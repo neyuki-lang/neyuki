@@ -1,0 +1,19 @@
+local math = require("@neyuki/math")
+
+-- test 1: auto-widening i64 to bigint
+local small: int = 2^62
+local big = small * 8
+assert(typeof(big) == "bigint", "expected bigint widening")
+assert(type(big) == "number", "base type must stay number")
+
+-- test 2: division rules
+local floatDiv: float = 7 / 2
+local intDiv: int = 7 // 2
+assert(floatDiv == 3.5, "slash must produce float")
+assert(intDiv == 3, "double slash must floor int")
+
+-- test 3: bitwise shifts widening
+local shifted = 1 << 65
+assert(typeof(shifted) == "bigint", "large shift should widen")
+
+print(`[pass] numbers & widening: 2^62 * 8 = {big} ({typeof(big)})`)

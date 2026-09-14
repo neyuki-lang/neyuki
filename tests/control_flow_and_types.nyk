@@ -1,0 +1,25 @@
+local string = require("@neyuki/string")
+
+const users: {string} = {"janis", "syv", "root"}
+const scores: {[string]: int} = { janis = 100, syv = 95 }
+
+-- generic loop directly over array (no ipairs)
+for i, name in users do
+    print(`user {i}: {name}`)
+end
+
+-- generic loop directly over map (no pairs)
+for k, v in scores do
+    print(`score {k} = {v}`)
+end
+
+-- nil-coalescing check
+local fallback: string? = nil
+local activeUser: string = fallback ?? "guest"
+
+-- strict boolean condition (activeUser != "" required, truthiness fails)
+if activeUser != "guest" then
+    print(`logged in: {activeUser}`)
+else
+    print("running as fallback guest")
+end

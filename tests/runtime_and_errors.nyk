@@ -1,0 +1,19 @@
+local string = require("@neyuki/string")
+
+const function divide(a: int, b: int): int
+    return a // b
+end
+
+-- test 1: try wrapper for div by zero
+local ok, err = try(divide, 10, 0)[cite: 1]
+assert(not ok, "div by zero should be caught by try")[cite: 1]
+
+-- test 2: inequality check (!=, not ~=)
+assert(ok != true, "!= check failed")[cite: 1]
+
+-- test 3: byte length (#) vs codepoint count (string.count)
+local unicodeStr = "héllo"
+assert(#unicodeStr == 6, "# operator must return raw byte length")[cite: 1]
+assert(string.count(unicodeStr) == 5, "string.count must return codepoint count")[cite: 1]
+
+print("[pass] try error handling & unicode length checks complete")

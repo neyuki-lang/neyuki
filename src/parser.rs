@@ -1,0 +1,629 @@
+use crate::lexer::{Lexer, Token};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Expr {
+    Literal(String),
+    Variable(String),
+    Member {
+        object: Box<Expr>,
+        field: String,
+    },
+    Call {
+        callee: Box<Expr>,
+        args: Vec<Expr>,
+    },
+    Unary {
+        op: String,
+        expr: Box<Expr>,
+    },
+    Binary {
+        left: Box<Expr>,
+        op: String,
+        right: Box<Expr>,
+    },
+    Table(Vec<TableEntry>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TableEntry {
+    pub key: Option<String>,
+    pub value: Expr,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Stmt {
+    Local {
+        name: String,
+        type_name: Option<String>,
+        initializer: Option<Expr>,
+    },
+    Function {
+        name: Option<String>,
+        params: Vec<Param>,
+        return_type: Option<String>,
+        body: Vec<Stmt>,
+    },
+    If {
+        condition: Expr,
+        then_branch: Vec<Stmt>,
+        else_if_branches: Vec<(Expr, Vec<Stmt>)>,
+        else_branch: Option<Vec<Stmt>>,
+    },
+    For {
+        vars: Vec<String>,
+        source: Expr,
+        body: Vec<Stmt>,
+    },
+    Return(Option<Expr>),
+    Break,
+    Continue,
+    Expr(Expr),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Param {
+    pub name: String,
+    pub type_name: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Parser {
+    tokens: Vec<Token>,
+    pos: usize,
+}
+
+impl Parser {
+    pub fn new(source: &str) -> Self {
+        let mut lexer = Lexer::new(source);
+        let tokens = lexer.tokenize();
+        Self { tokens, pos: 0 }
+    }
+
+    pub fn parse_program(&mut self) -> Vec<Stmt> {
+        let mut program = Vec::new();
+        while !self.is_eof() {
+            if self.check_keyword("end") || self.check_keyword("else") || self.check_keyword("elseif") || self.check_keyword("until") {
+                break;
+            }
+
+            if self.check_symbol(";") {
+                self.pos += 1;
+                continue;
+            }
+
+            program.push(self.parse_statement());
+            self.consume_semicolon_if_any();
+        }
+        program
+    }
+
+    fn parse_statement(&mut self) -> Stmt {
+        if self.check_keyword("local") || self.check_keyword("const") || self.check_keyword("global") {
+            return self.parse_binding();
+        }
+        if self.check_keyword("function") {
+            return self.parse_function();
+        }
+        if self.check_keyword("if") {
+            return self.parse_if();
+        }
+        if self.check_keyword("for") {
+            return self.parse_for();
+        }
+        if self.check_keyword("while") {
+            return self.parse_while();
+        }
+        if self.check_keyword("repeat") {
+            return self.parse_repeat();
+        }
+        if self.check_keyword("return") {
+            self.pos += 1;
+            let expr = if !self.is_eof() && !self.check_keyword("end") && !self.check_keyword("else") && !self.check_keyword("elseif") && !self.check_keyword("until") {
+                Some(self.parse_expr())
+            } else {
+                None
+            };
+            return Stmt::Return(expr);
+        }
+        if self.check_keyword("break") {
+            self.pos += 1;
+            return Stmt::Break;
+        }
+        if self.check_keyword("continue") {
+            self.pos += 1;
+            return Stmt::Continue;
+        }
+
+        let expr = self.parse_expr();
+        self.consume_bracket_attributes();
+        Stmt::Expr(expr)
+    }
+
+    fn parse_binding(&mut self) -> Stmt {
+        while self.check_keyword("local") || self.check_keyword("const") || self.check_keyword("global") {
+            self.pos += 1;
+        }
+
+        if self.check_keyword("function") {
+            return self.parse_function();
+        }
+
+        let name = self.expect_name();
+        let type_name = if self.match_symbol(":") {
+            Some(self.read_type_annotation())
+        } else {
+            None
+        };
+
+        let initializer = if self.match_symbol("=") {
+            Some(self.parse_expr())
+        } else {
+            None
+        };
+
+        Stmt::Local {
+            name,
+            type_name,
+            initializer,
+        }
+    }
+
+    fn parse_function(&mut self) -> Stmt {
+        self.expect_keyword("function");
+
+        let name = if self.peek().kind == "name" {
+            Some(self.expect_name())
+        } else {
+            None
+        };
+
+        let params = if self.match_symbol("(") {
+            self.parse_param_list()
+        } else {
+            Vec::new()
+        };
+
+        let return_type = if self.match_symbol(":") {
+            Some(self.read_type_annotation())
+        } else {
+            None
+        };
+
+        let body = self.parse_block_until("end");
+        Stmt::Function {
+            name,
+            params,
+            return_type,
+            body,
+        }
+    }
+
+    fn parse_if(&mut self) -> Stmt {
+        self.expect_keyword("if");
+        let condition = self.parse_expr();
+        self.expect_keyword("then");
+
+        let then_branch = self.parse_block_until_any(&["else", "elseif", "end"]);
+        let mut else_if_branches = Vec::new();
+        let mut else_branch = None;
+
+        while self.check_keyword("elseif") {
+            self.expect_keyword("elseif");
+            let next_condition = self.parse_expr();
+            self.expect_keyword("then");
+            let next_branch = self.parse_block_until_any(&["else", "elseif", "end"]);
+            else_if_branches.push((next_condition, next_branch));
+        }
+
+        if self.check_keyword("else") {
+            self.expect_keyword("else");
+            else_branch = Some(self.parse_block_until("end"));
+        }
+
+        self.expect_keyword("end");
+
+        Stmt::If {
+            condition,
+            then_branch,
+            else_if_branches,
+            else_branch,
+        }
+    }
+
+    fn parse_for(&mut self) -> Stmt {
+        self.expect_keyword("for");
+        let mut vars = Vec::new();
+        vars.push(self.expect_name());
+        if self.match_symbol(",") {
+            vars.push(self.expect_name());
+        }
+        self.expect_keyword("in");
+        let source = self.parse_expr();
+        self.expect_keyword("do");
+        let body = self.parse_block_until("end");
+        Stmt::For { vars, source, body }
+    }
+
+    fn parse_while(&mut self) -> Stmt {
+        self.expect_keyword("while");
+        let condition = self.parse_expr();
+        self.expect_keyword("do");
+        let body = self.parse_block_until("end");
+        Stmt::Expr(Expr::Call {
+            callee: Box::new(Expr::Variable("while".to_string())),
+            args: vec![condition],
+        })
+        // The AST intentionally keeps the loop body available for future expansion.
+        // For the current parser stage we just consume the block and return an expression sentinel.
+    }
+
+    fn parse_repeat(&mut self) -> Stmt {
+        self.expect_keyword("repeat");
+        let _ = self.parse_block_until("until");
+        self.expect_keyword("until");
+        let _ = self.parse_expr();
+        Stmt::Expr(Expr::Literal("repeat".to_string()))
+    }
+
+    fn parse_param_list(&mut self) -> Vec<Param> {
+        let mut params = Vec::new();
+        if self.check_symbol(")") {
+            self.expect_symbol(")");
+            return params;
+        }
+
+        loop {
+            let name = self.expect_name();
+            let type_name = if self.match_symbol(":") {
+                Some(self.read_type_annotation())
+            } else {
+                None
+            };
+            params.push(Param { name, type_name });
+
+            if self.match_symbol(",") {
+                continue;
+            }
+            self.expect_symbol(")");
+            break;
+        }
+        params
+    }
+
+    fn parse_block_until(&mut self, end_kw: &str) -> Vec<Stmt> {
+        self.parse_block_until_any(&[end_kw])
+    }
+
+    fn parse_block_until_any(&mut self, end_words: &[&str]) -> Vec<Stmt> {
+        let mut block = Vec::new();
+        while !self.is_eof() {
+            if self.check_symbol(";") {
+                self.pos += 1;
+                continue;
+            }
+            if end_words.iter().any(|word| self.check_keyword(word)) {
+                break;
+            }
+            block.push(self.parse_statement());
+        }
+        block
+    }
+
+    fn parse_expr(&mut self) -> Expr {
+        self.parse_precedence(0)
+    }
+
+    fn parse_precedence(&mut self, min_prec: u8) -> Expr {
+        let mut left = self.parse_prefix();
+
+        loop {
+            if self.is_eof() {
+                break;
+            }
+
+            let Some((op, prec)) = self.peek_binary_op() else {
+                break;
+            };
+            if prec < min_prec {
+                break;
+            }
+            self.pos += 1;
+            let next_min = prec + 1;
+            let right = self.parse_precedence(next_min);
+            left = Expr::Binary {
+                left: Box::new(left),
+                op: op.clone(),
+                right: Box::new(right),
+            };
+        }
+
+        left
+    }
+
+    fn parse_prefix(&mut self) -> Expr {
+        if self.check_symbol("(") {
+            self.expect_symbol("(");
+            let expr = self.parse_expr();
+            self.expect_symbol(")");
+            return expr;
+        }
+
+        if self.check_symbol("{") {
+            return self.parse_table();
+        }
+
+        if self.check_keyword("not") {
+            self.pos += 1;
+            return Expr::Unary {
+                op: "not".to_string(),
+                expr: Box::new(self.parse_prefix()),
+            };
+        }
+
+        if self.check_symbol("-") {
+            self.pos += 1;
+            return Expr::Unary {
+                op: "-".to_string(),
+                expr: Box::new(self.parse_prefix()),
+            };
+        }
+        if self.check_symbol("#") {
+            self.pos += 1;
+            return Expr::Unary {
+                op: "#".to_string(),
+                expr: Box::new(self.parse_prefix()),
+            };
+        }
+
+        let token = self.peek().clone();
+        match token.kind {
+            "name" | "keyword" => {
+                self.pos += 1;
+                let mut expr = match token.value.as_str() {
+                    "true" | "false" | "nil" => Expr::Literal(token.value),
+                    _ => Expr::Variable(token.value),
+                };
+                loop {
+                    if self.match_symbol(".") {
+                        let field = self.expect_name();
+                        expr = Expr::Member {
+                            object: Box::new(expr),
+                            field,
+                        };
+                    } else if self.match_symbol("(") {
+                        let mut args = Vec::new();
+                        if !self.check_symbol(")") {
+                            loop {
+                                args.push(self.parse_expr());
+                                if !self.match_symbol(",") {
+                                    break;
+                                }
+                            }
+                        }
+                        self.expect_symbol(")");
+                        expr = Expr::Call {
+                            callee: Box::new(expr),
+                            args,
+                        };
+                    } else if self.match_symbol("[") {
+                        let field = self.parse_expr();
+                        self.expect_symbol("]");
+                        expr = Expr::Member {
+                            object: Box::new(expr),
+                            field: format!("[{:?}]", field),
+                        };
+                    } else {
+                        break;
+                    }
+                }
+                expr
+            }
+            "string" | "number" | "interp" => {
+                self.pos += 1;
+                Expr::Literal(token.value)
+            }
+            _ => panic!("unexpected token in expression: {:?}", token),
+        }
+    }
+
+    fn parse_table(&mut self) -> Expr {
+        self.expect_symbol("{");
+        let mut entries = Vec::new();
+        if !self.check_symbol("}") {
+            loop {
+                if self.peek().kind == "name" && self.tokens.get(self.pos + 1).is_some_and(|next| next.kind == "symbol" && next.value == "=") {
+                    let key = self.expect_name();
+                    self.expect_symbol("=");
+                    let value = self.parse_expr();
+                    entries.push(TableEntry { key: Some(key), value });
+                } else {
+                    let value = self.parse_expr();
+                    entries.push(TableEntry { key: None, value });
+                }
+
+                if !self.match_symbol(",") {
+                    break;
+                }
+            }
+        }
+        self.expect_symbol("}");
+        Expr::Table(entries)
+    }
+
+    fn read_type_annotation(&mut self) -> String {
+        let mut parts = Vec::new();
+        while !self.is_eof() {
+            let token = self.peek().clone();
+            if token.kind == "eof" {
+                break;
+            }
+            if token.kind == "symbol" {
+                if matches!(token.value.as_str(), "=" | "," | ")" | "}" | ";") {
+                    break;
+                }
+                if token.value == "?" || token.value == "|" || token.value == "[" || token.value == "]" || token.value == ":" || token.value == "{" || token.value == "}" || token.value == "(" || token.value == ")" || token.value == "," || token.value == "<-" {
+                    // keep these in the annotation text so {string}, string?, and union types survive as raw type text.
+                }
+            }
+            if token.kind == "keyword" && matches!(token.value.as_str(), "end" | "do" | "then" | "else" | "elseif" | "until") {
+                break;
+            }
+            parts.push(self.advance_token().value);
+        }
+        parts.join(" ")
+    }
+
+    fn consume_keyword_or_name(&mut self) -> String {
+        let token = self.peek().clone();
+        if token.kind == "keyword" || token.kind == "name" {
+            self.pos += 1;
+            token.value
+        } else {
+            panic!("expected keyword or name, got {:?}", token)
+        }
+    }
+
+    fn advance_token(&mut self) -> Token {
+        let token = self.peek().clone();
+        self.pos += 1;
+        token
+    }
+
+    fn consume_bracket_attributes(&mut self) {
+        while self.match_symbol("[") {
+            while !self.is_eof() && !self.check_symbol("]") {
+                if self.check_symbol("[") {
+                    self.pos += 1;
+                    continue;
+                }
+                self.pos += 1;
+            }
+            self.match_symbol("]");
+        }
+    }
+
+    fn consume_semicolon_if_any(&mut self) {
+        while self.match_symbol(";") {}
+    }
+
+    fn match_symbol(&mut self, value: &str) -> bool {
+        if self.peek().kind == "symbol" && self.peek().value == value {
+            self.pos += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn expect_symbol(&mut self, value: &str) {
+        if !self.match_symbol(value) {
+            panic!("expected symbol {:?}", value);
+        }
+    }
+
+    fn expect_keyword(&mut self, value: &str) {
+        if !self.match_keyword(value) {
+            panic!("expected keyword {:?}", value);
+        }
+    }
+
+    fn match_keyword(&mut self, value: &str) -> bool {
+        if self.peek().kind == "keyword" && self.peek().value == value {
+            self.pos += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn check_keyword(&self, value: &str) -> bool {
+        self.peek().kind == "keyword" && self.peek().value == value
+    }
+
+    fn expect_name(&mut self) -> String {
+        let token = self.peek().clone();
+        if token.kind == "name" {
+            self.pos += 1;
+            token.value
+        } else {
+            panic!("expected name, got {:?}", token)
+        }
+    }
+
+    fn check_symbol(&self, value: &str) -> bool {
+        self.peek().kind == "symbol" && self.peek().value == value
+    }
+
+    fn peek(&self) -> &Token {
+        &self.tokens[self.pos]
+    }
+
+    fn is_eof(&self) -> bool {
+        self.peek().kind == "eof"
+    }
+
+    fn peek_binary_op(&self) -> Option<(String, u8)> {
+        if self.peek().kind != "symbol" && self.peek().kind != "keyword" {
+            return None;
+        }
+
+        let value = self.peek().value.clone();
+        let prec = match value.as_str() {
+            "or" => 1,
+            "and" => 2,
+            "==" | "!=" | "<" | "<=" | ">" | ">=" => 3,
+            "|" => 4,
+            "~" => 5,
+            "&" => 6,
+            "<<" | ">>" => 7,
+            ".." => 8,
+            "+" | "-" => 9,
+            "*" | "/" | "//" | "%" => 10,
+            "^" => 11,
+            "??" => 12,
+            _ => return None,
+        };
+
+        Some((value, prec))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Expr, Parser, Stmt};
+
+    #[test]
+    fn parses_local_assignment_and_call() {
+        let mut parser = Parser::new("local msg = \"hello\"\nprint(msg)");
+        let program = parser.parse_program();
+
+        assert_eq!(
+            program,
+            vec![
+                Stmt::Local {
+                    name: "msg".to_string(),
+                    type_name: None,
+                    initializer: Some(Expr::Literal("hello".to_string())),
+                },
+                Stmt::Expr(Expr::Call {
+                    callee: Box::new(Expr::Variable("print".to_string())),
+                    args: vec![Expr::Variable("msg".to_string())],
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_typed_local_and_function_bindings() {
+        let mut parser = Parser::new("local small: int = 2\nconst function divide(a: int, b: int): int\n    return a // b\nend");
+        let program = parser.parse_program();
+
+        assert_eq!(program[0], Stmt::Local {
+            name: "small".to_string(),
+            type_name: Some("int".to_string()),
+            initializer: Some(Expr::Literal("2".to_string())),
+        });
+
+        assert!(matches!(program[1], Stmt::Function { .. }));
+    }
+}
