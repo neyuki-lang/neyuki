@@ -236,7 +236,7 @@ impl Runtime {
     }
 
     fn call(&self, function: Value, args: Vec<Value>) -> Result<Vec<Value>, String> {
-        match function { Value::Function(function) => match &*function { Function::Native { name: "try", .. } => self.call_try(args), Function::Native { call, .. } => call(args), Function::User { params, body, env } => {
+        match function { Value::Function(function) => match &*function { Function::Native { name: "try", .. } => self.call_try(args), Function::Native { name: "require", .. } => self.call_require(args), Function::Native { call, .. } => call(args), Function::User { params, body, env } => {
             let call_env = child(env);
             for (index, param) in params.iter().enumerate() { call_env.borrow_mut().values.insert(param.name.clone(), args.get(index).cloned().unwrap_or(Value::Nil)); }
             match self.exec_block(body, call_env)? { Flow::Return(values) => Ok(values), _ => Ok(vec![Value::Nil]) }
@@ -248,6 +248,21 @@ impl Runtime {
         match self.call(function, args[1..].to_vec()) {
             Ok(mut values) => { values.insert(0, Value::Bool(true)); Ok(values) }
             Err(error) => Ok(vec![Value::Bool(false), Value::String(error)]),
+        }
+    }
+
+    fn call_require(&self, args: Vec<Value>) -> Result<Vec<Value>, String> {
+        let Some(Value::String(package)) = args.first() else { return Err("require expects a string path".to_string()) };
+        let path = match package.as_str() {
+            "@neyuki/math" => "lib/math.nyk",
+            _ => return Err(format!("package `{}` is not bundled; add it to the project manually", package)),
+        };
+        let program = crate::compiler::compile_file(path)?;
+        let module_env = child(&self.global);
+        match self.exec_block(&program, module_env)? {
+            Flow::Return(values) => Ok(values),
+            Flow::Normal => Ok(vec![Value::Nil]),
+            Flow::Break | Flow::Continue => Err("loop control used outside a loop".to_string()),
         }
     }
 
@@ -304,7 +319,4 @@ fn builtin_assert(args: Vec<Value>) -> Result<Vec<Value>, String> { if !args.fir
 fn builtin_int(args: Vec<Value>) -> Result<Vec<Value>, String> { Ok(vec![Value::Integer(number(args.first().cloned().unwrap_or(Value::Nil))? as i128)]) }
 fn builtin_float(args: Vec<Value>) -> Result<Vec<Value>, String> { Ok(vec![Value::Number(number(args.first().cloned().unwrap_or(Value::Nil))?)]) }
 fn builtin_try(args: Vec<Value>) -> Result<Vec<Value>, String> { let Some(Value::Function(function)) = args.first() else { return Err("try expects a function".to_string()) }; match &**function { Function::Native { call, .. } => match call(args[1..].to_vec()) { Ok(mut values) => { values.insert(0, Value::Bool(true)); Ok(values) }, Err(error) => Ok(vec![Value::Bool(false), Value::String(error)]) }, Function::User { .. } => Ok(vec![Value::Bool(false), Value::String("user function try is unavailable in this base runtime".to_string())]), } }
-fn builtin_require(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let Some(Value::String(path)) = args.first() else { return Err("require expects a string path".to_string()) };
-    Err(format!("package `{}` is not bundled; add it to the project manually", path))
-}
+fn builtin_require(_args: Vec<Value>) -> Result<Vec<Value>, String> { Err("require must be called through the runtime".to_string()) }
