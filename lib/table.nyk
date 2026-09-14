@@ -1,0 +1,17 @@
+local table = {}
+
+const function table.length(t: {any}): int
+    local n = 0
+    for _, _ in t do
+        n++
+    end
+    return n
+end
+
+const function table.insert(t: {any}, v: any): int
+    local len = table.length(t)
+    t[len + 1] = v
+    return len + 1
+end
+
+return table
