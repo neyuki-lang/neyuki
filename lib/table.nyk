@@ -14,4 +14,8 @@ const function table.insert(t: {any}, v: any): int
     return len + 1
 end
 
+const function table.unpack(t: {any}): ...: any
+    return __table_unpack(t)
+end
+
 return table

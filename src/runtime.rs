@@ -19,6 +19,7 @@ enum Value {
     String(String),
     Table(Rc<RefCell<Table>>),
     Function(Rc<Function>),
+    Varargs(Vec<Value>),
 }
 
 struct Table {
@@ -60,6 +61,7 @@ impl fmt::Display for Value {
             Value::String(value) => write!(f, "{}", value),
             Value::Table(_) => write!(f, "table"),
             Value::Function(_) => write!(f, "function"),
+            Value::Varargs(values) => write!(f, "varargs({})", values.len()),
         }
     }
 }
@@ -81,6 +83,7 @@ impl Value {
             Value::String(_) => "string",
             Value::Table(_) => "table",
             Value::Function(_) => "function",
+            Value::Varargs(_) => "varargs",
         }
     }
 }
@@ -110,6 +113,7 @@ impl Runtime {
             ("int", native("int", builtin_int)),
             ("float", native("float", builtin_float)),
             ("__random_int", native("__random_int", builtin_random_int)),
+            ("__table_unpack", native("__table_unpack", builtin_table_unpack)),
             ("try", native("try", builtin_try)),
             ("require", native("require", builtin_require)),
         ] {
@@ -208,7 +212,11 @@ impl Runtime {
                     .map(|expr| self.eval(expr, env))
                     .transpose()?
                     .unwrap_or(Value::Nil);
-                return Ok(Flow::Return(vec![value]));
+                let values = match value {
+                    Value::Varargs(values) => values,
+                    value => vec![value],
+                };
+                return Ok(Flow::Return(values));
             }
             Stmt::If {
                 condition,
@@ -299,8 +307,14 @@ impl Runtime {
             Expr::Variable(name) => {
                 lookup(&env, name).ok_or_else(|| format!("undefined name `{}`", name))
             }
-            Expr::Vararg => lookup(&env, "__varargs")
-                .ok_or_else(|| "vararg expression outside a variadic function".to_string()),
+            Expr::Vararg => {
+                let values = lookup(&env, "__varargs")
+                    .ok_or_else(|| "vararg expression outside a variadic function".to_string())?;
+                match values {
+                    Value::Table(values) => Ok(Value::Varargs(values.borrow().array.clone())),
+                    _ => Ok(values),
+                }
+            }
             Expr::Member { object, field } => {
                 self.index(&self.eval(object, env)?, &Value::String(field.clone()))
             }
@@ -320,10 +334,21 @@ impl Runtime {
                         continue;
                     }
                     let value = self.eval(&entry.value, env.clone())?;
-                    if let Some(key) = &entry.key {
-                        table.fields.insert(key.clone(), value);
-                    } else {
-                        table.array.push(value);
+                    match value {
+                        Value::Varargs(values) => {
+                            if let Some(key) = &entry.key {
+                                table.fields.insert(key.clone(), Value::Varargs(values));
+                            } else {
+                                table.array.extend(values);
+                            }
+                        }
+                        value => {
+                            if let Some(key) = &entry.key {
+                                table.fields.insert(key.clone(), value);
+                            } else {
+                                table.array.push(value);
+                            }
+                        }
                     }
                 }
                 Ok(Value::Table(Rc::new(RefCell::new(table))))
@@ -347,11 +372,18 @@ impl Runtime {
                             values.extend(varargs.borrow().array.iter().cloned());
                         }
                     } else {
-                        values.push(self.eval(arg, env.clone())?);
+                        let value = self.eval(arg, env.clone())?;
+                        match value {
+                            Value::Varargs(varargs) => values.extend(varargs),
+                            value => values.push(value),
+                        }
                     }
                 }
-                self.call(function, values)
-                    .map(|mut values| values.drain(..).next().unwrap_or(Value::Nil))
+                self.call(function, values).map(|values| match values.as_slice() {
+                    [] => Value::Nil,
+                    [value] => value.clone(),
+                    _ => Value::Varargs(values),
+                })
             }
         }
     }
@@ -738,6 +770,13 @@ fn builtin_random_int(args: Vec<Value>) -> Result<Vec<Value>, String> {
     Ok(vec![Value::Integer(
         rand::thread_rng().gen_range(min..=max) as i128,
     )])
+}
+
+fn builtin_table_unpack(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let Some(Value::Table(table)) = args.first().cloned() else {
+        return Err("table.unpack expects a table".to_string());
+    };
+    Ok(vec![Value::Varargs(table.borrow().array.clone())])
 }
 fn integer_argument(value: Value, name: &str) -> Result<i64, String> {
     let value = number(value)?;

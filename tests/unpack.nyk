@@ -1,0 +1,10 @@
+local table = require("@neyuki/table")
+local numbers = {10, 20, 30}
+
+local values = {table.unpack(numbers)}
+assert(values[1] == 10)
+assert(values[2] == 20)
+assert(values[3] == 30)
+assert(#values == 3)
+
+print("unpack ok")
