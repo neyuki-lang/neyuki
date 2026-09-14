@@ -73,26 +73,56 @@ impl Lexer {
             let ch = self.peek();
             if ch.is_ascii_alphabetic() || ch == '_' {
                 let value = self.read_name();
-                let kind = if is_keyword(&value) { "keyword" } else { "name" };
-                tokens.push(Token { kind, value, line: self.line });
-            } else if ch.is_ascii_digit() || (ch == '.' && self.peek_next().is_some_and(|c| c.is_ascii_digit())) {
+                let kind = if is_keyword(&value) {
+                    "keyword"
+                } else {
+                    "name"
+                };
+                tokens.push(Token {
+                    kind,
+                    value,
+                    line: self.line,
+                });
+            } else if ch.is_ascii_digit()
+                || (ch == '.' && self.peek_next().is_some_and(|c| c.is_ascii_digit()))
+            {
                 let value = self.read_number();
-                tokens.push(Token { kind: "number", value, line: self.line });
+                tokens.push(Token {
+                    kind: "number",
+                    value,
+                    line: self.line,
+                });
             } else if ch == '"' || ch == '\'' {
                 let value = self.read_string(ch);
-                tokens.push(Token { kind: "string", value, line: self.line });
+                tokens.push(Token {
+                    kind: "string",
+                    value,
+                    line: self.line,
+                });
             } else if ch == '[' && self.peek_next().is_some_and(|c| c == '[' || c == '=') {
                 let value = self.read_long_bracket();
-                tokens.push(Token { kind: "string", value, line: self.line });
+                tokens.push(Token {
+                    kind: "string",
+                    value,
+                    line: self.line,
+                });
             } else if ch == '`' {
                 let value = self.read_interpolated_string();
-                tokens.push(Token { kind: "interp", value, line: self.line });
+                tokens.push(Token {
+                    kind: "interp",
+                    value,
+                    line: self.line,
+                });
             } else {
                 let value = self.read_symbol();
                 if value.is_empty() {
                     panic!("Unexpected character {:?} at line {}", ch, self.line);
                 }
-                tokens.push(Token { kind: "symbol", value, line: self.line });
+                tokens.push(Token {
+                    kind: "symbol",
+                    value,
+                    line: self.line,
+                });
             }
         }
 
@@ -135,7 +165,7 @@ impl Lexer {
                 ' ' | '\t' | '\r' | '\n' => {
                     self.advance();
                 }
-                '-' if self.peek_next() == Some('-') => {
+                '-' if self.peek_next() == Some('-') && self.can_start_comment() => {
                     self.advance();
                     self.advance();
                     if self.peek() == '[' {
@@ -168,6 +198,14 @@ impl Lexer {
             }
         }
         self.src[start..self.pos].to_owned()
+    }
+
+    fn can_start_comment(&self) -> bool {
+        self.pos == 0
+            || self.src[..self.pos]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_whitespace)
     }
 
     fn read_number(&mut self) -> String {
@@ -396,12 +434,10 @@ impl Lexer {
     fn read_symbol(&mut self) -> String {
         let start = self.pos;
         let candidates = [
-            "??=", "<<=", ">>=", "==", "!=", "<=", ">=", "??",
-            "..=", "//=", "::", "->", "...", "..",
-            "+=", "-=", "*=", "/=", "%=", "^=",
-            "<<", ">>", "//", "&=", "|=", "&", "|", "~", "^",
-            "?", ";", ":", ",", ".", "=", "+", "-", "*", "/", "%",
-            "#", "<", ">", "(", ")", "{", "}", "[", "]",
+            "??=", "<<=", ">>=", "==", "!=", "<=", ">=", "??", "..=", "//=", "::", "->", "...",
+            "..", "+=", "-=", "*=", "/=", "%=", "^=", "<<", ">>", "//", "++", "--", "&=", "|=",
+            "&", "|", "~", "^", "?", ";", ":", ",", ".", "=", "+", "-", "*", "/", "%", "#", "<",
+            ">", "(", ")", "{", "}", "[", "]",
         ];
 
         for candidate in candidates {
@@ -419,9 +455,30 @@ impl Lexer {
 fn is_keyword(word: &str) -> bool {
     matches!(
         word,
-        "and" | "break" | "const" | "continue" | "do" | "else" | "elseif" | "end" |
-            "false" | "for" | "function" | "global" | "if" | "in" | "local" | "nil" |
-            "not" | "or" | "repeat" | "return" | "then" | "true" | "type" | "until" |
-            "while"
+        "and"
+            | "break"
+            | "const"
+            | "continue"
+            | "do"
+            | "else"
+            | "elseif"
+            | "end"
+            | "false"
+            | "for"
+            | "function"
+            | "global"
+            | "if"
+            | "in"
+            | "local"
+            | "nil"
+            | "not"
+            | "or"
+            | "repeat"
+            | "return"
+            | "then"
+            | "true"
+            | "type"
+            | "until"
+            | "while"
     )
 }

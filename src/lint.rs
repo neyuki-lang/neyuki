@@ -5,8 +5,8 @@ use crate::lexer::Lexer;
 use crate::parser::Parser;
 
 pub fn lint(path: &str) -> Result<(), String> {
-    let source = fs::read_to_string(path)
-        .map_err(|err| format!("failed to read {}: {}", path, err))?;
+    let source =
+        fs::read_to_string(path).map_err(|err| format!("failed to read {}: {}", path, err))?;
 
     let mut lexer = Lexer::new(&source);
     let tokens = lexer.tokenize();

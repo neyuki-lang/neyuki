@@ -4,6 +4,7 @@ use crate::lexer::{Lexer, Token};
 pub enum Expr {
     Literal(String),
     Variable(String),
+    Vararg,
     Member {
         object: Box<Expr>,
         field: String,
@@ -49,6 +50,10 @@ pub enum Stmt {
         target: Expr,
         value: Expr,
     },
+    Increment {
+        target: Expr,
+        amount: i8,
+    },
     Function {
         name: Option<String>,
         params: Vec<Param>,
@@ -84,6 +89,7 @@ pub enum Stmt {
 pub struct Param {
     pub name: String,
     pub type_name: Option<String>,
+    pub variadic: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -102,7 +108,11 @@ impl Parser {
     pub fn parse_program(&mut self) -> Vec<Stmt> {
         let mut program = Vec::new();
         while !self.is_eof() {
-            if self.check_keyword("end") || self.check_keyword("else") || self.check_keyword("elseif") || self.check_keyword("until") {
+            if self.check_keyword("end")
+                || self.check_keyword("else")
+                || self.check_keyword("elseif")
+                || self.check_keyword("until")
+            {
                 break;
             }
 
@@ -118,7 +128,10 @@ impl Parser {
     }
 
     fn parse_statement(&mut self) -> Stmt {
-        if self.check_keyword("local") || self.check_keyword("const") || self.check_keyword("global") {
+        if self.check_keyword("local")
+            || self.check_keyword("const")
+            || self.check_keyword("global")
+        {
             return self.parse_binding();
         }
         if self.check_keyword("function") {
@@ -138,7 +151,12 @@ impl Parser {
         }
         if self.check_keyword("return") {
             self.pos += 1;
-            let expr = if !self.is_eof() && !self.check_keyword("end") && !self.check_keyword("else") && !self.check_keyword("elseif") && !self.check_keyword("until") {
+            let expr = if !self.is_eof()
+                && !self.check_keyword("end")
+                && !self.check_keyword("else")
+                && !self.check_keyword("elseif")
+                && !self.check_keyword("until")
+            {
                 Some(self.parse_expr())
             } else {
                 None
@@ -155,16 +173,34 @@ impl Parser {
         }
 
         let expr = self.parse_expr();
+        if self.match_symbol("++") {
+            return Stmt::Increment {
+                target: expr,
+                amount: 1,
+            };
+        }
+        if self.match_symbol("--") {
+            return Stmt::Increment {
+                target: expr,
+                amount: -1,
+            };
+        }
         if self.match_symbol("=") {
             let value = self.parse_expr();
-            return Stmt::Assign { target: expr, value };
+            return Stmt::Assign {
+                target: expr,
+                value,
+            };
         }
         self.consume_bracket_attributes();
         Stmt::Expr(expr)
     }
 
     fn parse_binding(&mut self) -> Stmt {
-        while self.check_keyword("local") || self.check_keyword("const") || self.check_keyword("global") {
+        while self.check_keyword("local")
+            || self.check_keyword("const")
+            || self.check_keyword("global")
+        {
             self.pos += 1;
         }
 
@@ -183,7 +219,10 @@ impl Parser {
             while self.match_symbol(",") {
                 initializers.push(self.parse_expr());
             }
-            return Stmt::LocalMany { names, initializers };
+            return Stmt::LocalMany {
+                names,
+                initializers,
+            };
         }
         let type_name = if self.match_symbol(":") {
             Some(self.read_type_annotation())
@@ -312,13 +351,31 @@ impl Parser {
         }
 
         loop {
+            if self.match_symbol("...") {
+                let type_name = if self.match_symbol(":") {
+                    Some(self.read_type_annotation())
+                } else {
+                    None
+                };
+                params.push(Param {
+                    name: "...".to_string(),
+                    type_name,
+                    variadic: true,
+                });
+                self.expect_symbol(")");
+                break;
+            }
             let name = self.expect_name();
             let type_name = if self.match_symbol(":") {
                 Some(self.read_type_annotation())
             } else {
                 None
             };
-            params.push(Param { name, type_name });
+            params.push(Param {
+                name,
+                type_name,
+                variadic: false,
+            });
 
             if self.match_symbol(",") {
                 continue;
@@ -414,6 +471,10 @@ impl Parser {
             };
         }
 
+        if self.match_symbol("...") {
+            return Expr::Vararg;
+        }
+
         let token = self.peek().clone();
         match token.kind {
             "name" | "keyword" => {
@@ -477,11 +538,19 @@ impl Parser {
         let mut entries = Vec::new();
         if !self.check_symbol("}") {
             loop {
-                if self.peek().kind == "name" && self.tokens.get(self.pos + 1).is_some_and(|next| next.kind == "symbol" && next.value == "=") {
+                if self.peek().kind == "name"
+                    && self
+                        .tokens
+                        .get(self.pos + 1)
+                        .is_some_and(|next| next.kind == "symbol" && next.value == "=")
+                {
                     let key = self.expect_name();
                     self.expect_symbol("=");
                     let value = self.parse_expr();
-                    entries.push(TableEntry { key: Some(key), value });
+                    entries.push(TableEntry {
+                        key: Some(key),
+                        value,
+                    });
                 } else {
                     let value = self.parse_expr();
                     entries.push(TableEntry { key: None, value });
@@ -507,7 +576,11 @@ impl Parser {
                 break;
             }
             if token.kind == "symbol" {
-                if braces == 0 && brackets == 0 && parens == 0 && matches!(token.value.as_str(), "=" | "," | ")" | ";") {
+                if braces == 0
+                    && brackets == 0
+                    && parens == 0
+                    && matches!(token.value.as_str(), "=" | "," | ")" | ";")
+                {
                     break;
                 }
                 match token.value.as_str() {
@@ -520,7 +593,28 @@ impl Parser {
                     _ => {}
                 }
             }
-            if token.kind == "keyword" && braces == 0 && brackets == 0 && parens == 0 && matches!(token.value.as_str(), "end" | "do" | "then" | "else" | "elseif" | "until" | "return" | "local" | "const" | "global" | "if" | "for" | "while" | "repeat") {
+            if token.kind == "keyword"
+                && braces == 0
+                && brackets == 0
+                && parens == 0
+                && matches!(
+                    token.value.as_str(),
+                    "end"
+                        | "do"
+                        | "then"
+                        | "else"
+                        | "elseif"
+                        | "until"
+                        | "return"
+                        | "local"
+                        | "const"
+                        | "global"
+                        | "if"
+                        | "for"
+                        | "while"
+                        | "repeat"
+                )
+            {
                 break;
             }
             parts.push(self.advance_token().value);
@@ -670,31 +764,71 @@ mod tests {
 
     #[test]
     fn parses_typed_local_and_function_bindings() {
-        let mut parser = Parser::new("local small: int = 2\nconst function divide(a: int, b: int): int\n    return a // b\nend");
+        let mut parser = Parser::new(
+            "local small: int = 2\nconst function divide(a: int, b: int): int\n    return a // b\nend",
+        );
         let program = parser.parse_program();
 
-        assert_eq!(program[0], Stmt::Local {
-            name: "small".to_string(),
-            type_name: Some("int".to_string()),
-            initializer: Some(Expr::Literal("2".to_string())),
-        });
+        assert_eq!(
+            program[0],
+            Stmt::Local {
+                name: "small".to_string(),
+                type_name: Some("int".to_string()),
+                initializer: Some(Expr::Literal("2".to_string())),
+            }
+        );
 
         assert!(matches!(program[1], Stmt::Function { .. }));
     }
 
     #[test]
     fn parses_dotted_typed_function_bindings() {
-        let mut parser = Parser::new("function math.random(min: number, max: number): number\n    return 1\nend");
+        let mut parser = Parser::new(
+            "function math.random(min: number, max: number): number\n    return 1\nend",
+        );
         let program = parser.parse_program();
 
-        assert_eq!(program[0], Stmt::Function {
-            name: Some("math.random".to_string()),
-            params: vec![
-                super::Param { name: "min".to_string(), type_name: Some("number".to_string()) },
-                super::Param { name: "max".to_string(), type_name: Some("number".to_string()) },
-            ],
-            return_type: Some("number".to_string()),
-            body: vec![Stmt::Return(Some(Expr::Literal("1".to_string())))],
-        });
+        assert_eq!(
+            program[0],
+            Stmt::Function {
+                name: Some("math.random".to_string()),
+                params: vec![
+                    super::Param {
+                        name: "min".to_string(),
+                        type_name: Some("number".to_string()),
+                        variadic: false
+                    },
+                    super::Param {
+                        name: "max".to_string(),
+                        type_name: Some("number".to_string()),
+                        variadic: false
+                    },
+                ],
+                return_type: Some("number".to_string()),
+                body: vec![Stmt::Return(Some(Expr::Literal("1".to_string())))],
+            }
+        );
+    }
+
+    #[test]
+    fn parses_typed_variadic_parameter_and_increment() {
+        let mut parser = Parser::new(
+            "function collect(first: number, ...: number): number\n    local total = first\n    total++\n    total--\n    return total\nend",
+        );
+        let program = parser.parse_program();
+
+        let Stmt::Function { params, body, .. } = &program[0] else {
+            panic!("expected function");
+        };
+        assert_eq!(
+            params[1],
+            super::Param {
+                name: "...".to_string(),
+                type_name: Some("number".to_string()),
+                variadic: true
+            }
+        );
+        assert!(matches!(body[1], Stmt::Increment { amount: 1, .. }));
+        assert!(matches!(body[2], Stmt::Increment { amount: -1, .. }));
     }
 }

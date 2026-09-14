@@ -89,6 +89,8 @@ The current compiler/runtime supports a practical subset of a Lua-like language:
 
 - variable declarations with `local` and `const`
 - function declarations and calls
+- typed variadic parameters (`...`) and vararg expansion in tables and calls
+- postfix increment and decrement statements (`++` and `--`)
 - arithmetic, comparisons, and boolean logic
 - `if` / `elseif` / `else` blocks
 - `while` and `repeat` loops
@@ -132,6 +134,8 @@ print(math.random(1, 10))
 ## Editor support
 
 The repository also includes a VS Code extension under `editor-extensions/neyuki` for `.nyk` syntax highlighting and editor tooling.
+
+The detailed language and runtime references are in [`docs/`](docs/README.md).
 
 ## Status
 
