@@ -383,7 +383,9 @@ impl Lexer {
                         expr.push(c);
                     }
                 }
+                out.push('{');
                 out.push_str(&expr);
+                out.push('}');
             } else {
                 out.push(ch);
             }

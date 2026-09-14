@@ -8,6 +8,10 @@ pub enum Expr {
         object: Box<Expr>,
         field: String,
     },
+    Index {
+        object: Box<Expr>,
+        index: Box<Expr>,
+    },
     Call {
         callee: Box<Expr>,
         args: Vec<Expr>,
@@ -37,6 +41,14 @@ pub enum Stmt {
         type_name: Option<String>,
         initializer: Option<Expr>,
     },
+    LocalMany {
+        names: Vec<String>,
+        initializers: Vec<Expr>,
+    },
+    Assign {
+        target: Expr,
+        value: Expr,
+    },
     Function {
         name: Option<String>,
         params: Vec<Param>,
@@ -53,6 +65,14 @@ pub enum Stmt {
         vars: Vec<String>,
         source: Expr,
         body: Vec<Stmt>,
+    },
+    While {
+        condition: Expr,
+        body: Vec<Stmt>,
+    },
+    Repeat {
+        body: Vec<Stmt>,
+        condition: Expr,
     },
     Return(Option<Expr>),
     Break,
@@ -135,6 +155,10 @@ impl Parser {
         }
 
         let expr = self.parse_expr();
+        if self.match_symbol("=") {
+            let value = self.parse_expr();
+            return Stmt::Assign { target: expr, value };
+        }
         self.consume_bracket_attributes();
         Stmt::Expr(expr)
     }
@@ -149,6 +173,18 @@ impl Parser {
         }
 
         let name = self.expect_name();
+        if self.check_symbol(",") {
+            let mut names = vec![name];
+            while self.match_symbol(",") {
+                names.push(self.expect_name());
+            }
+            self.expect_symbol("=");
+            let mut initializers = vec![self.parse_expr()];
+            while self.match_symbol(",") {
+                initializers.push(self.parse_expr());
+            }
+            return Stmt::LocalMany { names, initializers };
+        }
         let type_name = if self.match_symbol(":") {
             Some(self.read_type_annotation())
         } else {
@@ -190,6 +226,7 @@ impl Parser {
         };
 
         let body = self.parse_block_until("end");
+        self.expect_keyword("end");
         Stmt::Function {
             name,
             params,
@@ -241,6 +278,7 @@ impl Parser {
         let source = self.parse_expr();
         self.expect_keyword("do");
         let body = self.parse_block_until("end");
+        self.expect_keyword("end");
         Stmt::For { vars, source, body }
     }
 
@@ -249,20 +287,16 @@ impl Parser {
         let condition = self.parse_expr();
         self.expect_keyword("do");
         let body = self.parse_block_until("end");
-        Stmt::Expr(Expr::Call {
-            callee: Box::new(Expr::Variable("while".to_string())),
-            args: vec![condition],
-        })
-        // The AST intentionally keeps the loop body available for future expansion.
-        // For the current parser stage we just consume the block and return an expression sentinel.
+        self.expect_keyword("end");
+        Stmt::While { condition, body }
     }
 
     fn parse_repeat(&mut self) -> Stmt {
         self.expect_keyword("repeat");
-        let _ = self.parse_block_until("until");
+        let body = self.parse_block_until("until");
         self.expect_keyword("until");
-        let _ = self.parse_expr();
-        Stmt::Expr(Expr::Literal("repeat".to_string()))
+        let condition = self.parse_expr();
+        Stmt::Repeat { body, condition }
     }
 
     fn parse_param_list(&mut self) -> Vec<Param> {
@@ -406,11 +440,18 @@ impl Parser {
                             args,
                         };
                     } else if self.match_symbol("[") {
+                        if self.peek().kind == "name" && self.peek().value == "cite" {
+                            while !self.is_eof() && !self.check_symbol("]") {
+                                self.pos += 1;
+                            }
+                            self.expect_symbol("]");
+                            continue;
+                        }
                         let field = self.parse_expr();
                         self.expect_symbol("]");
-                        expr = Expr::Member {
+                        expr = Expr::Index {
                             object: Box::new(expr),
-                            field: format!("[{:?}]", field),
+                            index: Box::new(field),
                         };
                     } else {
                         break;
@@ -452,20 +493,29 @@ impl Parser {
 
     fn read_type_annotation(&mut self) -> String {
         let mut parts = Vec::new();
+        let mut braces = 0usize;
+        let mut brackets = 0usize;
+        let mut parens = 0usize;
         while !self.is_eof() {
             let token = self.peek().clone();
             if token.kind == "eof" {
                 break;
             }
             if token.kind == "symbol" {
-                if matches!(token.value.as_str(), "=" | "," | ")" | "}" | ";") {
+                if braces == 0 && brackets == 0 && parens == 0 && matches!(token.value.as_str(), "=" | "," | ")" | ";") {
                     break;
                 }
-                if token.value == "?" || token.value == "|" || token.value == "[" || token.value == "]" || token.value == ":" || token.value == "{" || token.value == "}" || token.value == "(" || token.value == ")" || token.value == "," || token.value == "<-" {
-                    // keep these in the annotation text so {string}, string?, and union types survive as raw type text.
+                match token.value.as_str() {
+                    "{" => braces += 1,
+                    "}" if braces > 0 => braces -= 1,
+                    "[" => brackets += 1,
+                    "]" if brackets > 0 => brackets -= 1,
+                    "(" => parens += 1,
+                    ")" if parens > 0 => parens -= 1,
+                    _ => {}
                 }
             }
-            if token.kind == "keyword" && matches!(token.value.as_str(), "end" | "do" | "then" | "else" | "elseif" | "until") {
+            if token.kind == "keyword" && braces == 0 && brackets == 0 && parens == 0 && matches!(token.value.as_str(), "end" | "do" | "then" | "else" | "elseif" | "until" | "return" | "local" | "const" | "global" | "if" | "for" | "while" | "repeat") {
                 break;
             }
             parts.push(self.advance_token().value);
