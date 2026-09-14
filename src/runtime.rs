@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
 
+use rand::Rng;
+
 use crate::parser::{Expr, Param, Stmt};
 
 type EnvRef = Rc<RefCell<Env>>;
@@ -97,6 +99,7 @@ impl Runtime {
             ("assert", native("assert", builtin_assert)),
             ("int", native("int", builtin_int)),
             ("float", native("float", builtin_float)),
+            ("__random_int", native("__random_int", builtin_random_int)),
             ("try", native("try", builtin_try)),
             ("require", native("require", builtin_require)),
         ] {
@@ -327,5 +330,18 @@ fn builtin_typeof(args: Vec<Value>) -> Result<Vec<Value>, String> { Ok(vec![Valu
 fn builtin_assert(args: Vec<Value>) -> Result<Vec<Value>, String> { if !args.first().unwrap_or(&Value::Nil).truthy_bool()? { return Err(args.get(1).map(ToString::to_string).unwrap_or_else(|| "assertion failed".to_string())); } Ok(args) }
 fn builtin_int(args: Vec<Value>) -> Result<Vec<Value>, String> { Ok(vec![Value::Integer(number(args.first().cloned().unwrap_or(Value::Nil))? as i128)]) }
 fn builtin_float(args: Vec<Value>) -> Result<Vec<Value>, String> { Ok(vec![Value::Number(number(args.first().cloned().unwrap_or(Value::Nil))?)]) }
+fn builtin_random_int(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let min = integer_argument(args.first().cloned().unwrap_or(Value::Nil), "min")?;
+    let max = integer_argument(args.get(1).cloned().unwrap_or(Value::Nil), "max")?;
+    if min > max { return Err("random min must be less than or equal to max".to_string()); }
+    Ok(vec![Value::Integer(rand::thread_rng().gen_range(min..=max) as i128)])
+}
+fn integer_argument(value: Value, name: &str) -> Result<i64, String> {
+    let value = number(value)?;
+    if !value.is_finite() || value.fract() != 0.0 || value < i64::MIN as f64 || value > i64::MAX as f64 {
+        return Err(format!("random {} must be an integer", name));
+    }
+    Ok(value as i64)
+}
 fn builtin_try(args: Vec<Value>) -> Result<Vec<Value>, String> { let Some(Value::Function(function)) = args.first() else { return Err("try expects a function".to_string()) }; match &**function { Function::Native { call, .. } => match call(args[1..].to_vec()) { Ok(mut values) => { values.insert(0, Value::Bool(true)); Ok(values) }, Err(error) => Ok(vec![Value::Bool(false), Value::String(error)]) }, Function::User { .. } => Ok(vec![Value::Bool(false), Value::String("user function try is unavailable in this base runtime".to_string())]), } }
 fn builtin_require(_args: Vec<Value>) -> Result<Vec<Value>, String> { Err("require must be called through the runtime".to_string()) }

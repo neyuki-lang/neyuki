@@ -1,0 +1,7 @@
+local math = {}
+
+function math.random(min: number, max: number): number
+    return __random_int(min, max)
+end
+
+return math
