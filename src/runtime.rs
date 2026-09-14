@@ -294,6 +294,44 @@ impl Runtime {
                     }
                 }
             }
+            Stmt::NumericFor {
+                var,
+                start,
+                end,
+                step,
+                body,
+            } => {
+                let mut current = number(self.eval(start, env.clone())?)?;
+                let limit = number(self.eval(end, env.clone())?)?;
+                let increment = match step {
+                    Some(step) => number(self.eval(step, env.clone())?)?,
+                    None => 1.0,
+                };
+                if increment == 0.0 {
+                    return Err("numeric for step cannot be zero".to_string());
+                }
+
+                while (increment > 0.0 && current <= limit)
+                    || (increment < 0.0 && current >= limit)
+                {
+                    let loop_env = child(&env);
+                    let loop_value = if current.fract() == 0.0 {
+                        Value::Integer(current as i128)
+                    } else {
+                        Value::Number(current)
+                    };
+                    loop_env
+                        .borrow_mut()
+                        .values
+                        .insert(var.clone(), loop_value);
+                    match self.exec_block(body, loop_env)? {
+                        Flow::Normal | Flow::Continue => {}
+                        Flow::Break => break,
+                        flow => return Ok(flow),
+                    }
+                    current += increment;
+                }
+            }
             Stmt::Break => return Ok(Flow::Break),
             Stmt::Continue => return Ok(Flow::Continue),
         }

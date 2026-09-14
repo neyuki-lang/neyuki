@@ -71,6 +71,13 @@ pub enum Stmt {
         source: Expr,
         body: Vec<Stmt>,
     },
+    NumericFor {
+        var: String,
+        start: Expr,
+        end: Expr,
+        step: Option<Expr>,
+        body: Vec<Stmt>,
+    },
     While {
         condition: Expr,
         body: Vec<Stmt>,
@@ -313,8 +320,29 @@ impl Parser {
 
     fn parse_for(&mut self) -> Stmt {
         self.expect_keyword("for");
-        let mut vars = Vec::new();
-        vars.push(self.expect_name());
+        let first_name = self.expect_name();
+        if self.match_symbol("=") {
+            let start = self.parse_expr();
+            self.expect_symbol(",");
+            let end = self.parse_expr();
+            let step = if self.match_symbol(",") {
+                Some(self.parse_expr())
+            } else {
+                None
+            };
+            self.expect_keyword("do");
+            let body = self.parse_block_until("end");
+            self.expect_keyword("end");
+            return Stmt::NumericFor {
+                var: first_name,
+                start,
+                end,
+                step,
+                body,
+            };
+        }
+
+        let mut vars = vec![first_name];
         if self.match_symbol(",") {
             vars.push(self.expect_name());
         }
@@ -830,5 +858,21 @@ mod tests {
         );
         assert!(matches!(body[1], Stmt::Increment { amount: 1, .. }));
         assert!(matches!(body[2], Stmt::Increment { amount: -1, .. }));
+    }
+
+    #[test]
+    fn parses_numeric_for_loop() {
+        let mut parser = Parser::new("for i = 1, 10, 2 do\n    print(i)\nend");
+        let program = parser.parse_program();
+
+        assert!(matches!(
+            &program[0],
+            Stmt::NumericFor {
+                var,
+                step: Some(_),
+                body,
+                ..
+            } if var == "i" && body.len() == 1
+        ));
     }
 }
