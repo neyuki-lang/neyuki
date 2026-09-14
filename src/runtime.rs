@@ -140,9 +140,18 @@ impl Runtime {
                 self.assign(target, value, env)?;
             }
             Stmt::Function { name: Some(name), params, body, .. } => {
-                env.borrow_mut().values.insert(name.clone(), Value::Function(Rc::new(Function::User {
+                let value = Value::Function(Rc::new(Function::User {
                     params: params.clone(), body: body.clone(), env: env.clone(),
-                })));
+                }));
+                if name.contains('.') {
+                    let mut target = Expr::Variable(name.split('.').next().unwrap().to_string());
+                    for field in name.split('.').skip(1) {
+                        target = Expr::Member { object: Box::new(target), field: field.to_string() };
+                    }
+                    self.assign(&target, value, env)?;
+                } else {
+                    env.borrow_mut().values.insert(name.clone(), value);
+                }
             }
             Stmt::Function { name: None, .. } => return Err("anonymous function is only valid as an expression".to_string()),
             Stmt::Expr(expr) => { self.eval(expr, env)?; }

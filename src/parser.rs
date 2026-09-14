@@ -208,7 +208,12 @@ impl Parser {
         self.expect_keyword("function");
 
         let name = if self.peek().kind == "name" {
-            Some(self.expect_name())
+            let mut name = self.expect_name();
+            while self.match_symbol(".") {
+                name.push('.');
+                name.push_str(&self.expect_name());
+            }
+            Some(name)
         } else {
             None
         };
@@ -675,5 +680,21 @@ mod tests {
         });
 
         assert!(matches!(program[1], Stmt::Function { .. }));
+    }
+
+    #[test]
+    fn parses_dotted_typed_function_bindings() {
+        let mut parser = Parser::new("function math.random(min: number, max: number): number\n    return 1\nend");
+        let program = parser.parse_program();
+
+        assert_eq!(program[0], Stmt::Function {
+            name: Some("math.random".to_string()),
+            params: vec![
+                super::Param { name: "min".to_string(), type_name: Some("number".to_string()) },
+                super::Param { name: "max".to_string(), type_name: Some("number".to_string()) },
+            ],
+            return_type: Some("number".to_string()),
+            body: vec![Stmt::Return(Some(Expr::Literal("1".to_string())))],
+        });
     }
 }
