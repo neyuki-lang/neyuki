@@ -2,7 +2,12 @@
 name = "neyuki"
 version = "0.1.0"
 edition = "2024"
+description = "A small Lua-like scripting language implemented in Rust"
+readme = "README.md"
 license = "MIT"
 license-file = "LICENSE"
+repository = "https://github.com/neyuki-lang/neyuki"
+homepage = "https://neyuki.cc/"
 
 [dependencies]
+rand = "0.8"
