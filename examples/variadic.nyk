@@ -1,0 +1,3 @@
+local math = require("@neyuki/math")
+
+print(math.max(2, 7, 4, 9))

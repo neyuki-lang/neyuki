@@ -1,0 +1,6 @@
+local math = require("@neyuki/math")
+local table = require("@neyuki/table")
+
+local numbers = {}
+
+print(table.unpack(numbers))
