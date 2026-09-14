@@ -1,7 +1,46 @@
+local table = require("@neyuki/table")
+
 local math = {}
 
-function math.random(min: number, max: number): number
+const function math.random(min: number, max: number): number
     return __random_int(min, max)
+end
+
+const function getNumberTable(...: number)
+    local t = {}
+    local function handle(obj: number|{})
+        if type(obj) == "number" then
+            table.insert(t, obj)
+        elseif type(obj) == "table" then
+            for _, n in {...} do
+                handle(n)
+            end
+        end
+    end
+    handle({...})
+    return t
+end
+
+const function math.max(n1: number, n2: number, ...: number): number
+    local t = getNumberTable(n1, n2, {...})
+    local max = t[1]
+    for _, n in t do
+        if n > max then
+            max = n
+        end
+    end
+    return max
+end
+
+const function math.min(n1: number, n2: number, ...: number): number
+    local t = getNumberTable(n1, n2, {...})
+    local min = table[1]
+    for _, n in t do
+        if n < min then
+            min = n
+        end
+    end
+    return min
 end
 
 return math
