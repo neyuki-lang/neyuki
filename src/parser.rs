@@ -650,16 +650,6 @@ impl Parser {
         parts.join(" ")
     }
 
-    fn consume_keyword_or_name(&mut self) -> String {
-        let token = self.peek().clone();
-        if token.kind == "keyword" || token.kind == "name" {
-            self.pos += 1;
-            token.value
-        } else {
-            panic!("expected keyword or name, got {:?}", token)
-        }
-    }
-
     fn advance_token(&mut self) -> Token {
         let token = self.peek().clone();
         self.pos += 1;
