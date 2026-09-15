@@ -172,6 +172,7 @@ impl Runtime {
         for (name, call) in crate::string_lib::NATIVES
             .iter()
             .chain(crate::fs_lib::NATIVES)
+            .chain(crate::http_lib::NATIVES)
             .chain(crate::io_lib::NATIVES)
         {
             env.borrow_mut()

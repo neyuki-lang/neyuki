@@ -17,7 +17,7 @@ cargo run -- test
 
 The base runtime provides `print`, `tostring`, `type`, `typeof`, `assert`, `int`, `float`, `try`, and `require`. `type` groups integers and floats as `number`; `typeof` reports `bigint` for arbitrary-precision integers and `float` for floating-point values.
 
-`try(function, ...)` returns a leading boolean followed by the function result or an error message. The bundled `@neyuki/fs`, `@neyuki/io`, `@neyuki/math`, `@neyuki/string` and `@neyuki/table` modules can be loaded with `require`.
+`try(function, ...)` returns a leading boolean followed by the function result or an error message. The bundled `@neyuki/fs`, `@neyuki/http`, `@neyuki/io`, `@neyuki/math`, `@neyuki/string` and `@neyuki/table` modules can be loaded with `require`.
 
 ```lua
 local math = require("@neyuki/math")
@@ -60,6 +60,27 @@ for value in io.lines("n") do
 end
 io.stderr:write("sum: ", total, "
 ")
+```
+
+`@neyuki/http` is an HTTP/1.1 client and server. `request(url, options?)` performs one request, where `options` may hold `method` (default `"GET"`), `headers` (a `{ name = value }` table), `body`, `timeout` (seconds for the whole exchange; unlimited by default) and `follow` (whether redirects are followed; `true` by default). The shorthands `get`, `head` and `delete` take `(url, options?)` and `post`, `put` and `patch` take `(url, body?, options?)`. Only transport failures (DNS, connection, TLS, timeout) raise errors; every status code comes back as a `Response` with `status`, `ok` (true for 2xx), `headers` (names lower-cased), `body`, `url` (after redirects) and `header(name)` for a case-insensitive lookup. `encode` and `decode` percent-encode a string, `query(params)` builds a sorted `a=1&b=2` query string and `parseQuery(target)` splits a `path?query` target into the path and a decoded parameter table. Bodies are strings; responses that are not valid UTF-8 have those bytes replaced with U+FFFD.
+
+```lua
+local http = require("@neyuki/http")
+local response = http.get("https://httpbin.org/get?" .. http.query({ q = "neyuki" }), { timeout = 10 })
+if (response.ok) then
+    print(response:header("content-type"), response.body)
+end
+```
+
+`listen(options?)` binds a server (`options` is a port number or `{ host?, port? }`; the defaults are `127.0.0.1` and `8080`, and port `0` picks a free one) and returns a `Server` with `host`, `port`, `url`, `accept(timeout?)` (the next `Request`, or `nil` once `timeout` seconds pass without one), `isOpen()` and `close()`. A `Request` has `method`, `path`, `headers`, `body`, `remote`, `header(name)`, `query()` (the path and decoded query parameters) and `respond(reply)`, which may be called once with `nil` (204), a string (200, `text/plain`) or `{ status?, headers?, body? }`. `serve(options?, handler)` runs `listen` and then calls `handler(request)` for every request forever, sending its return value with `respond` unless the handler already answered; a handler error is reported on stderr and answered with a 500. The runtime is single-threaded, so a script cannot serve and request itself at the same time.
+
+```lua
+local http = require("@neyuki/http")
+http.serve(8080, function(request: Request): any
+    local path, params = request:query()
+    if (path == "/hello") then return "hello " .. (params.name ?? "world") end
+    return { status = 404, body = "not found" }
+end)
 ```
 
 ## Current boundaries

@@ -678,6 +678,27 @@ impl Parser {
                         key: Some(key),
                         value,
                     });
+                } else if self.check_symbol("[")
+                    && self
+                        .tokens
+                        .get(self.pos + 1)
+                        .is_some_and(|next| next.kind == "string")
+                    && self
+                        .tokens
+                        .get(self.pos + 2)
+                        .is_some_and(|next| next.kind == "symbol" && next.value == "]")
+                {
+                    // `["content-type"] = value`: a string key that is not a
+                    // valid name.
+                    self.expect_symbol("[");
+                    let key = self.advance_token().value;
+                    self.expect_symbol("]");
+                    self.expect_symbol("=");
+                    let value = self.parse_expr();
+                    entries.push(TableEntry {
+                        key: Some(key),
+                        value,
+                    });
                 } else {
                     let value = self.parse_expr();
                     entries.push(TableEntry { key: None, value });

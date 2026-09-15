@@ -1,0 +1,301 @@
+local table = require("@neyuki/table")
+local string = require("@neyuki/string")
+local io = require("@neyuki/io")
+
+local http = {}
+
+function checkString(s: string, name: string)
+    if (s == nil) then error(name .. " must be provided") end
+    if (type(s) != "string") then error(name .. " must be a string") end
+end
+
+function checkOptionalString(s: string?, name: string)
+    if (s != nil) then checkString(s, name) end
+end
+
+function checkOptionalNumber(n: number?, name: string)
+    if (n != nil and type(n) != "number") then error(name .. " must be a number") end
+end
+
+function checkOptionalBoolean(b: boolean?, name: string)
+    if (b != nil and type(b) != "boolean") then error(name .. " must be a boolean") end
+end
+
+function checkOptionalTable(t: {any}?, name: string)
+    if (t != nil and type(t) != "table") then error(name .. " must be a table") end
+end
+
+-- Every header name and value must be a string or a number; names are sent
+-- as given, so callers can pick their own casing.
+function checkHeaders(headers: {[string]: string}?, name: string)
+    checkOptionalTable(headers, name)
+    if (headers == nil) then return end
+    for key, value in headers do
+        if (type(key) != "string") then error(name .. " must be keyed by header names") end
+        if (type(value) != "string" and type(value) != "number") then
+            error("header `" .. key .. "` must be a string or a number")
+        end
+    end
+end
+
+-- Reads one header from a lower-cased table by any casing of its name.
+function findHeader(headers: {[string]: string}, name: string): string?
+    checkString(name, "name")
+    return headers[string.lower(name)]
+end
+
+function makeResponse(raw: {[string]: any}): Response
+    local response = {}
+    response.status = raw.status
+    response.ok = raw.status >= 200 and raw.status < 300
+    response.headers = table.freeze(raw.headers)
+    response.body = raw.body
+    response.url = raw.url
+
+    function response.header(self: Response, name: string): string?
+        return findHeader(raw.headers, name)
+    end
+
+    return table.freeze(response)
+end
+
+-- Performs one request. `options` may hold:
+--   method   the HTTP method (default "GET")
+--   headers  a { name = value } table
+--   body     the request body string
+--   timeout  seconds to wait for the whole exchange (default: no limit)
+--   follow   whether redirects are followed (default true)
+-- Only transport failures raise errors; any status code is returned as a
+-- `Response` with `ok` set for 2xx.
+function http.request(url: string, options: RequestOptions?): Response
+    checkString(url, "url")
+    checkOptionalTable(options, "options")
+    options = options ?? {}
+    checkOptionalString(options.method, "method")
+    checkHeaders(options.headers, "headers")
+    checkOptionalString(options.body, "body")
+    checkOptionalNumber(options.timeout, "timeout")
+    checkOptionalBoolean(options.follow, "follow")
+
+    local raw = __http_request(
+        options.method ?? "GET",
+        url,
+        options.headers,
+        options.body,
+        options.timeout,
+        options.follow ?? true
+    )
+    return makeResponse(raw)
+end
+
+-- Builds a copy of `options` with `method` (and optionally `body`) set, so
+-- the shorthands never mutate the table the caller passed in.
+function withMethod(options: RequestOptions?, method: string, body: string?): RequestOptions
+    checkOptionalTable(options, "options")
+    local merged = {}
+    if (options != nil) then
+        for key, value in options do
+            merged[key] = value
+        end
+    end
+    merged.method = method
+    if (body != nil) then merged.body = body end
+    return merged
+end
+
+function http.get(url: string, options: RequestOptions?): Response
+    return http.request(url, withMethod(options, "GET"))
+end
+
+function http.head(url: string, options: RequestOptions?): Response
+    return http.request(url, withMethod(options, "HEAD"))
+end
+
+function http.delete(url: string, options: RequestOptions?): Response
+    return http.request(url, withMethod(options, "DELETE"))
+end
+
+function http.post(url: string, body: string?, options: RequestOptions?): Response
+    checkOptionalString(body, "body")
+    return http.request(url, withMethod(options, "POST", body))
+end
+
+function http.put(url: string, body: string?, options: RequestOptions?): Response
+    checkOptionalString(body, "body")
+    return http.request(url, withMethod(options, "PUT", body))
+end
+
+function http.patch(url: string, body: string?, options: RequestOptions?): Response
+    checkOptionalString(body, "body")
+    return http.request(url, withMethod(options, "PATCH", body))
+end
+
+-- Percent-encodes `s` for use in a URL path or query component.
+function http.encode(s: string): string
+    checkString(s, "s")
+    return __http_url_encode(s)
+end
+
+-- Reverses `http.encode`; also turns `+` into a space as forms do.
+function http.decode(s: string): string
+    checkString(s, "s")
+    return __http_url_decode(s)
+end
+
+-- Turns a { name = value } table into a `a=1&b=two` query string with the
+-- keys sorted, so the output is stable.
+function http.query(params: {[string]: any}): string
+    if (type(params) != "table") then error("params must be a table") end
+    local keys = {}
+    for key, value in params do
+        if (type(key) != "string") then error("params must be keyed by strings") end
+        if (type(value) != "string" and type(value) != "number" and type(value) != "boolean") then
+            error("param `" .. key .. "` must be a string, a number or a boolean")
+        end
+        table.insert(keys, key)
+    end
+    table.sort(keys, function(a: string, b: string): boolean return a <= b end)
+    local parts = {}
+    for _, key in keys do
+        table.insert(parts, __http_url_encode(key) .. "=" .. __http_url_encode(tostring(params[key])))
+    end
+    return table.concat(parts, "&")
+end
+
+-- Splits a `path?query` string into its path and a decoded { name = value }
+-- table of query parameters. Repeated names keep the last value.
+function http.parseQuery(target: string): (string, {[string]: string})
+    checkString(target, "target")
+    local params = {}
+    local mark = string.find(target, "?", 1, true)
+    if (mark == nil) then return target, params end
+    local path = string.sub(target, 1, mark - 1)
+    local query = string.sub(target, mark + 1)
+    for pair in string.gmatch(query, "[^&]+") do
+        local equals = string.find(pair, "=", 1, true)
+        if (equals == nil) then
+            params[__http_url_decode(pair)] = ""
+        else
+            params[__http_url_decode(string.sub(pair, 1, equals - 1))] = __http_url_decode(string.sub(pair, equals + 1))
+        end
+    end
+    return path, params
+end
+
+-- Normalizes what a handler may return into status, headers and body:
+--   nil       204 with an empty body
+--   a string  200 with that body as text/plain
+--   a table   { status?, headers?, body? }
+function normalizeReply(reply: any): (number, {[string]: string}, string)
+    if (reply == nil) then return 204, {}, "" end
+    if (type(reply) == "string") then
+        return 200, { ["content-type"] = "text/plain; charset=utf-8" }, reply
+    end
+    if (type(reply) != "table") then
+        error("a response must be nil, a string or a table, got " .. type(reply))
+    end
+    checkOptionalNumber(reply.status, "status")
+    checkHeaders(reply.headers, "headers")
+    checkOptionalString(reply.body, "body")
+    return reply.status ?? 200, reply.headers ?? {}, reply.body ?? ""
+end
+
+function makeRequest(raw: {[string]: any}): Request
+    local answered = false
+    local request = {}
+    request.method = raw.method
+    request.path = raw.path
+    request.headers = table.freeze(raw.headers)
+    request.body = raw.body
+    request.remote = raw.remote
+
+    function request.header(self: Request, name: string): string?
+        return findHeader(raw.headers, name)
+    end
+
+    -- Splits the request target into its path and query parameters.
+    function request.query(self: Request): (string, {[string]: string})
+        return http.parseQuery(raw.path)
+    end
+
+    -- Sends the reply (see `normalizeReply`). Each request is answered once.
+    function request.respond(self: Request, reply: any): ()
+        if (answered) then error("request was already answered") end
+        local status, headers, body = normalizeReply(reply)
+        answered = true
+        __http_respond(raw.id, status, headers, body)
+    end
+
+    function request.answered(self: Request): boolean
+        return answered
+    end
+
+    return table.freeze(request)
+end
+
+-- Opens a listening socket. `options` may be a port number or a table with
+-- `host` (default "127.0.0.1") and `port` (default 8080; 0 picks a free one).
+function http.listen(options: ServerOptions | number | nil): Server
+    if (type(options) == "number") then options = { port = options } end
+    checkOptionalTable(options, "options")
+    options = options ?? {}
+    checkOptionalString(options.host, "host")
+    checkOptionalNumber(options.port, "port")
+    local host = options.host ?? "127.0.0.1"
+
+    local id, port = __http_listen(host, options.port ?? 8080)
+    local closed = false
+    local server = {}
+    server.host = host
+    server.port = port
+    server.url = "http://" .. host .. ":" .. tostring(port)
+
+    function checkOpen()
+        if (closed) then error("server on " .. server.url .. " is closed") end
+    end
+
+    -- Waits for the next request. With `timeout` (in seconds) it returns nil
+    -- once that long passes without one; without it, it waits indefinitely.
+    function server.accept(self: Server, timeout: number?): Request?
+        checkOpen()
+        checkOptionalNumber(timeout, "timeout")
+        local raw = __http_accept(id, timeout)
+        if (raw == nil) then return nil end
+        return makeRequest(raw)
+    end
+
+    function server.close(self: Server): ()
+        if (closed) then return end
+        closed = true
+        __http_close(id)
+    end
+
+    function server.isOpen(self: Server): boolean
+        return not closed
+    end
+
+    return table.freeze(server)
+end
+
+-- Runs `handler(request)` for every incoming request, forever. A handler's
+-- return value is sent with `request:respond` unless the handler already
+-- answered; an error inside the handler is reported on stderr and answered
+-- with a 500 so the server keeps going.
+function http.serve(options: ServerOptions | number | nil, handler: (Request) -> any): ()
+    if (type(handler) != "function") then error("handler must be a function") end
+    local server = http.listen(options)
+    while (true) do
+        local request = server:accept()
+        local ok, reply = try(handler, request)
+        if (ok) then
+            if (not request:answered()) then request:respond(reply) end
+        else
+            io.stderr:write("http: handler failed for ", request.method, " ", request.path, ": ", tostring(reply), "\n")
+            if (not request:answered()) then
+                request:respond({ status = 500, body = "Internal Server Error" })
+            end
+        end
+    end
+end
+
+return table.freeze(http)

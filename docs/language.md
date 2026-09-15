@@ -30,13 +30,14 @@ local ok, value = try(int, "12")
 
 ## Values and tables
 
-Neyuki supports `nil`, booleans, arbitrary-precision integers, floating-point numbers, strings, functions, and tables. Array entries are one-based; named entries use `key = value`.
+Neyuki supports `nil`, booleans, arbitrary-precision integers, floating-point numbers, strings, functions, and tables. Array entries are one-based; named entries use `key = value`, or `["key"] = value` when the key is not a valid name (such as `content-type`).
 
 Integer literals may be decimal, hexadecimal (`0x...`), or binary (`0b...`), and may contain `_` separators. Integer arithmetic remains exact; `/` produces a floating-point result, while `//`, `%`, and bitwise operators preserve integer values.
 
 ```lua
 local values = {10, 20, 30}
 local config = {name = "neyuki", enabled = true}
+local headers = {["content-type"] = "text/plain"}
 values[2] = 25
 print(config.name)
 ```

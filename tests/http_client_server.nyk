@@ -1,0 +1,70 @@
+local http = require("@neyuki/http")
+
+-- URL encoding round-trips and leaves unreserved characters alone.
+assert(http.encode("a-b_c.d~e") == "a-b_c.d~e", "unreserved characters should not be escaped")
+assert(http.encode("a b&c=d/é") == "a%20b%26c%3Dd%2F%C3%A9", "reserved and non-ascii bytes should be percent-encoded")
+assert(http.decode("a%20b%26c%3Dd%2F%C3%A9") == "a b&c=d/é", "decode should reverse encode")
+assert(http.decode("a+b") == "a b", "decode should turn + into a space")
+local ok, err = try(http.decode, "50%")
+assert(not ok, "a truncated escape should error")
+assert(not try(http.encode, 5), "encode should reject non-strings")
+
+-- Query strings are sorted by key and fully encoded.
+assert(http.query({}) == "", "an empty table should produce an empty query")
+assert(http.query({ b = 2, a = "x y", c = true }) == "a=x%20y&b=2&c=true", "query should sort keys and encode values")
+assert(not try(http.query, { a = {} }), "query should reject table values")
+
+-- parseQuery splits the target and decodes each parameter.
+local path, params = http.parseQuery("/search?q=hello+world&page=2&flag&x=%2F")
+assert(path == "/search", "parseQuery should return the path")
+assert(params.q == "hello world", "parseQuery should decode + and escapes")
+assert(params.page == "2", "parseQuery should keep values as strings")
+assert(params.flag == "", "a parameter without = should be empty")
+assert(params.x == "/", "parseQuery should decode percent escapes")
+local bare, none = http.parseQuery("/plain")
+assert(bare == "/plain", "a target without a query should be returned as is")
+assert(none.q == nil, "no parameters should be present without a query")
+
+-- Request validation happens before any network activity.
+assert(not try(http.request, nil), "request should require a url")
+assert(not try(http.request, "http://localhost/", { method = 5 }), "method must be a string")
+assert(not try(http.request, "http://localhost/", { headers = { a = {} } }), "header values must be strings or numbers")
+assert(not try(http.request, "http://localhost/", { timeout = "soon" }), "timeout must be a number")
+assert(not try(http.request, "http://localhost/", { follow = "yes" }), "follow must be a boolean")
+assert(not try(http.post, "http://localhost/", 42), "post body must be a string")
+ok, err = try(http.get, "not a url")
+assert(not ok, "an invalid url should error")
+
+-- The shorthands copy their options instead of mutating them.
+local options = { headers = { accept = "text/plain" } }
+assert(not try(http.get, "http://127.0.0.1:1/", options), "nothing listens on port 1")
+assert(options.method == nil, "get should not write into the caller's options")
+
+-- Servers bind, report their address, time out on accept and close cleanly.
+local server = http.listen({ host = "127.0.0.1", port = 0 })
+assert(server.host == "127.0.0.1", "listen should keep the host")
+assert(server.port > 0, "port 0 should be replaced by the bound port")
+assert(server.url == "http://127.0.0.1:" .. tostring(server.port), "url should combine host and port")
+assert(server:isOpen(), "a fresh server should be open")
+assert(server:accept(0.05) == nil, "accept should return nil once the timeout passes")
+assert(not try(server.accept, server, "later"), "accept timeout must be a number")
+
+-- The first server still owns its port, so a second bind fails.
+assert(not try(http.listen, server.port), "binding a busy port should error")
+
+server:close()
+assert(not server:isOpen(), "close should mark the server closed")
+assert(not try(server.accept, server, 0.05), "accept on a closed server should error")
+server:close()
+
+-- Once closed the port is free again and clients are refused.
+local reopened = http.listen({ port = server.port })
+assert(reopened.port == server.port, "a closed port should be reusable")
+reopened:close()
+ok, err = try(http.get, "http://127.0.0.1:" .. tostring(server.port) .. "/", { timeout = 2 })
+assert(not ok, "a request to a closed port should error")
+
+-- listen validates its options.
+assert(not try(http.listen, { port = "eighty" }), "port must be a number")
+assert(not try(http.listen, { host = 1 }), "host must be a string")
+assert(not try(http.listen, { port = 70000 }), "port must fit in 16 bits")

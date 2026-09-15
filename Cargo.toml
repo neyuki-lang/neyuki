@@ -13,3 +13,11 @@ num-bigint = "0.4"
 num-integer = "0.1"
 num-traits = "0.2"
 rand = "0.8"
+tiny_http = "0.12"
+# `native-tls` keeps the build free of C compilers (rustls needs `ring`/`aws-lc`).
+# schannel 0.1.28+ links Windows APIs with `raw-dylib`, which needs `dlltool`
+# on the windows-gnu toolchain; older versions use prebuilt import libraries.
+ureq = { version = "3", default-features = false, features = ["native-tls", "gzip", "charset"] }
+
+[target.'cfg(windows)'.dependencies]
+schannel = ">=0.1.23, <0.1.28"

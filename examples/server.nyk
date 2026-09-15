@@ -1,0 +1,13 @@
+local http = require("@neyuki/http")
+
+-- Visit http://127.0.0.1:8080/hello?name=you while this runs.
+http.serve({ host = "127.0.0.1", port = 8080 }, function(request: Request): any
+    local path, params = request:query()
+    if (path == "/hello") then
+        return "Hello, " .. (params.name ?? "stranger") .. "!\n"
+    end
+    if (path == "/echo") then
+        return { headers = { ["content-type"] = request:header("content-type") ?? "text/plain" }, body = request.body }
+    end
+    return { status = 404, body = "No route for " .. request.method .. " " .. path .. "\n" }
+end)

@@ -3,6 +3,7 @@ use std::process;
 
 mod compiler;
 mod fs_lib;
+mod http_lib;
 mod io_lib;
 mod lexer;
 mod lint;

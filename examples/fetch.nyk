@@ -1,0 +1,11 @@
+local http = require("@neyuki/http")
+local io = require("@neyuki/io")
+
+local url = "https://httpbin.org/get?" .. http.query({ lang = "neyuki", version = 1 })
+local response = http.get(url, { headers = { accept = "application/json" }, timeout = 15 })
+
+local outcome = "failed"
+if (response.ok) then outcome = "ok" end
+io.write(response.status, " ", outcome, " from ", response.url, "\n")
+io.write("content-type: ", response:header("Content-Type") ?? "?", "\n")
+io.write(response.body, "\n")
