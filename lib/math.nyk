@@ -87,4 +87,15 @@ const function math.clamp(n: number, min: number, max: number): number
     end
 end
 
+const function math.floor(n: number): int
+    if (n == nil) then
+        error("n must be provided")
+    end
+    if (type(n) != "number") then
+        error("n must be a number")
+    end
+
+    return __floor(n)
+end
+
 return math

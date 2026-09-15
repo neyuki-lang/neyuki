@@ -120,6 +120,7 @@ impl Runtime {
             ("int", native("int", builtin_int)),
             ("float", native("float", builtin_float)),
             ("__exp", native("__exp", builtin_exp)),
+            ("__floor", native("__floor", builtin_floor)),
             ("__random_int", native("__random_int", builtin_random_int)),
             (
                 "__random_bigint",
@@ -888,6 +889,16 @@ fn builtin_exp(args: Vec<Value>) -> Result<Vec<Value>, String> {
     Ok(vec![Value::Number(
         number(args.first().cloned().unwrap_or(Value::Nil))?.exp(),
     )])
+}
+fn builtin_floor(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let value = args.first().cloned().unwrap_or(Value::Nil);
+    Ok(vec![match value {
+        Value::Integer(value) => Value::Integer(value),
+        value => Value::Integer(
+            BigInt::from_f64(number(value)?.floor())
+                .ok_or_else(|| "value cannot be converted to an integer".to_string())?,
+        ),
+    }])
 }
 fn builtin_random_int(args: Vec<Value>) -> Result<Vec<Value>, String> {
     if args
