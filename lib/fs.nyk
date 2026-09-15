@@ -1,0 +1,127 @@
+local table = require("@neyuki/table")
+local string = require("@neyuki/string")
+
+local fs = {}
+
+function checkString(s: string, name: string)
+    if (s == nil) then error(name .. " must be provided") end
+    if (type(s) != "string") then error(name .. " must be a string") end
+end
+
+function checkOptionalBoolean(b: boolean?, name: string)
+    if (b != nil and type(b) != "boolean") then error(name .. " must be a boolean") end
+end
+
+-- Splits file contents into lines. Both "\n" and "\r\n" endings are accepted
+-- and a trailing newline does not produce an extra empty line.
+function splitLines(content: string): {string}
+    local lines = string.split(content, "\n")
+    local count = #lines
+    if (count > 0 and lines[count] == "") then
+        table.remove(lines, count)
+        count--
+    end
+    for index = 1, count do
+        local line = lines[index]
+        if (string.sub(line, -1) == "\r") then
+            lines[index] = string.sub(line, 1, -2)
+        end
+    end
+    return lines
+end
+
+-- Opens `path` and returns a File. Modes are "r" (read, the file must exist),
+-- "w" (write, the file is created or truncated) and "a" (append, the file is
+-- created if missing). Errors if the file cannot be opened in that mode.
+function fs.open(path: string, mode: string?): File
+    checkString(path, "path")
+    mode = mode ?? "r"
+    checkString(mode, "mode")
+    __fs_open(path, mode)
+
+    local closed = false
+    local file = {}
+    file.path = path
+    file.mode = mode
+
+    function checkOpen()
+        if (closed) then error("file `" .. path .. "` is closed") end
+    end
+
+    function checkWritable()
+        checkOpen()
+        if (mode == "r") then error("file `" .. path .. "` was opened read-only") end
+    end
+
+    -- Returns the whole file contents.
+    function file.read(self: File): string
+        checkOpen()
+        return __fs_read(path)
+    end
+
+    -- Writes `text` to the file, replacing its contents unless `append` is
+    -- true. A file opened with "a" always appends.
+    function file.write(self: File, text: string, append: boolean?): ()
+        checkWritable()
+        checkString(text, "text")
+        checkOptionalBoolean(append, "append")
+        if (mode == "a") then append = true end
+        __fs_write(path, text, append ?? false)
+    end
+
+    -- Returns an iterator that yields one line at a time, then nil.
+    function file.lines(self: File): () -> string?
+        checkOpen()
+        local lines = splitLines(__fs_read(path))
+        local index = 0
+        return function(): string?
+            index++
+            return lines[index]
+        end
+    end
+
+    -- Marks the file closed; any further use of it errors.
+    function file.close(self: File): ()
+        closed = true
+    end
+
+    return table.freeze(file)
+end
+
+function fs.exists(path: string): boolean
+    checkString(path, "path")
+    return __fs_exists(path)
+end
+
+-- Removes a file or an empty directory.
+function fs.remove(path: string): ()
+    checkString(path, "path")
+    __fs_remove(path)
+end
+
+function fs.rename(from: string, to: string): ()
+    checkString(from, "from")
+    checkString(to, "to")
+    __fs_rename(from, to)
+end
+
+-- Creates a directory. With `recursive` missing parents are created too and
+-- an existing directory is not an error.
+function fs.mkdir(path: string, recursive: boolean?): ()
+    checkString(path, "path")
+    checkOptionalBoolean(recursive, "recursive")
+    __fs_mkdir(path, recursive ?? false)
+end
+
+-- Returns the names of the entries in a directory, sorted.
+function fs.list(path: string): {string}
+    checkString(path, "path")
+    return __fs_list(path)
+end
+
+function fs.isDir(path: string): boolean
+    checkString(path, "path")
+    return __fs_isdir(path)
+end
+
+return table.freeze(fs)

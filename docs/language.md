@@ -62,6 +62,13 @@ print(maximum(3, 8, 5))
 
 Inside a variadic function, `...` can be used as a table entry or as a call argument list. It is an error to evaluate it outside a variadic function.
 
+`object:name(args)` calls the function stored in `object.name` with `object` passed as the first argument. It is shorthand for `object.name(object, args)` and is how the file objects from `@neyuki/fs` are used.
+
+```lua
+local file = fs.open("notes.txt")
+print(file:read())
+```
+
 ## Operators
 
 Arithmetic operators are `+`, `-`, `*`, `/`, `//`, `%`, and `^`. Comparisons are `==`, `!=`, `<`, `<=`, `>`, and `>=`. Boolean operators are `and`, `or`, and `not`; `??` selects its right side only when the left side is `nil`. `..` concatenates strings and `#` returns string or array length.

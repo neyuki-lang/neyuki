@@ -19,6 +19,11 @@ pub enum Expr {
         callee: Box<Expr>,
         args: Vec<Expr>,
     },
+    MethodCall {
+        object: Box<Expr>,
+        method: String,
+        args: Vec<Expr>,
+    },
     Function {
         params: Vec<Param>,
         body: Vec<Stmt>,
@@ -520,23 +525,7 @@ impl Parser {
             self.expect_symbol("(");
             let expr = self.parse_expr();
             self.expect_symbol(")");
-            if self.match_symbol("(") {
-                let mut args = Vec::new();
-                if !self.check_symbol(")") {
-                    loop {
-                        args.push(self.parse_expr());
-                        if !self.match_symbol(",") {
-                            break;
-                        }
-                    }
-                }
-                self.expect_symbol(")");
-                return Expr::Call {
-                    callee: Box::new(expr),
-                    args,
-                };
-            }
-            return expr;
+            return self.parse_postfix(expr);
         }
 
         if self.check_symbol("{") {
@@ -574,51 +563,11 @@ impl Parser {
         match token.kind {
             "name" | "keyword" => {
                 self.pos += 1;
-                let mut expr = match token.value.as_str() {
+                let expr = match token.value.as_str() {
                     "true" | "false" | "nil" => Expr::Literal(token.value),
                     _ => Expr::Variable(token.value),
                 };
-                loop {
-                    if self.match_symbol(".") {
-                        let field = self.expect_name();
-                        expr = Expr::Member {
-                            object: Box::new(expr),
-                            field,
-                        };
-                    } else if self.match_symbol("(") {
-                        let mut args = Vec::new();
-                        if !self.check_symbol(")") {
-                            loop {
-                                args.push(self.parse_expr());
-                                if !self.match_symbol(",") {
-                                    break;
-                                }
-                            }
-                        }
-                        self.expect_symbol(")");
-                        expr = Expr::Call {
-                            callee: Box::new(expr),
-                            args,
-                        };
-                    } else if self.match_symbol("[") {
-                        if self.peek().kind == "name" && self.peek().value == "cite" {
-                            while !self.is_eof() && !self.check_symbol("]") {
-                                self.pos += 1;
-                            }
-                            self.expect_symbol("]");
-                            continue;
-                        }
-                        let field = self.parse_expr();
-                        self.expect_symbol("]");
-                        expr = Expr::Index {
-                            object: Box::new(expr),
-                            index: Box::new(field),
-                        };
-                    } else {
-                        break;
-                    }
-                }
-                expr
+                self.parse_postfix(expr)
             }
             "string" => {
                 self.pos += 1;
@@ -634,6 +583,53 @@ impl Parser {
             }
             _ => panic!("unexpected token in expression: {:?}", token),
         }
+    }
+
+    /// Applies any chain of `.field`, `(args)`, `:method(args)` and `[index]`
+    /// suffixes to an already parsed expression.
+    fn parse_postfix(&mut self, mut expr: Expr) -> Expr {
+        loop {
+            if self.match_symbol(".") {
+                let field = self.expect_name();
+                expr = Expr::Member {
+                    object: Box::new(expr),
+                    field,
+                };
+            } else if self.match_symbol("(") {
+                let args = self.parse_call_args();
+                expr = Expr::Call {
+                    callee: Box::new(expr),
+                    args,
+                };
+            } else if self.check_method_call() {
+                self.pos += 1;
+                let method = self.expect_name();
+                self.expect_symbol("(");
+                let args = self.parse_call_args();
+                expr = Expr::MethodCall {
+                    object: Box::new(expr),
+                    method,
+                    args,
+                };
+            } else if self.match_symbol("[") {
+                if self.peek().kind == "name" && self.peek().value == "cite" {
+                    while !self.is_eof() && !self.check_symbol("]") {
+                        self.pos += 1;
+                    }
+                    self.expect_symbol("]");
+                    continue;
+                }
+                let field = self.parse_expr();
+                self.expect_symbol("]");
+                expr = Expr::Index {
+                    object: Box::new(expr),
+                    index: Box::new(field),
+                };
+            } else {
+                break;
+            }
+        }
+        expr
     }
 
     fn parse_table(&mut self) -> Expr {
@@ -757,6 +753,32 @@ impl Parser {
 
     fn consume_semicolon_if_any(&mut self) {
         while self.match_symbol(";") {}
+    }
+
+    /// `object:name(` starts a method call; a bare `:` elsewhere is a type
+    /// annotation and is left alone.
+    fn check_method_call(&self) -> bool {
+        self.check_symbol(":")
+            && self.tokens.get(self.pos + 1).is_some_and(|t| t.kind == "name")
+            && self
+                .tokens
+                .get(self.pos + 2)
+                .is_some_and(|t| t.kind == "symbol" && t.value == "(")
+    }
+
+    /// Parses call arguments after the opening `(` up to and including `)`.
+    fn parse_call_args(&mut self) -> Vec<Expr> {
+        let mut args = Vec::new();
+        if !self.check_symbol(")") {
+            loop {
+                args.push(self.parse_expr());
+                if !self.match_symbol(",") {
+                    break;
+                }
+            }
+        }
+        self.expect_symbol(")");
+        args
     }
 
     fn match_symbol(&mut self, value: &str) -> bool {

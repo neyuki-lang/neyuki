@@ -2,6 +2,7 @@ use std::env;
 use std::process;
 
 mod compiler;
+mod fs_lib;
 mod lexer;
 mod lint;
 mod parser;

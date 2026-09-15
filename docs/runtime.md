@@ -17,7 +17,7 @@ cargo run -- test
 
 The base runtime provides `print`, `tostring`, `type`, `typeof`, `assert`, `int`, `float`, `try`, and `require`. `type` groups integers and floats as `number`; `typeof` reports `bigint` for arbitrary-precision integers and `float` for floating-point values.
 
-`try(function, ...)` returns a leading boolean followed by the function result or an error message. The bundled `@neyuki/math`, `@neyuki/string` and `@neyuki/table` modules can be loaded with `require`.
+`try(function, ...)` returns a leading boolean followed by the function result or an error message. The bundled `@neyuki/fs`, `@neyuki/math`, `@neyuki/string` and `@neyuki/table` modules can be loaded with `require`.
 
 ```lua
 local math = require("@neyuki/math")
@@ -30,6 +30,20 @@ print(math.max(2, 7, 4))
 local string = require("@neyuki/string")
 for key, value in string.gmatch("a=1, b=2", "(%w+)=(%w+)") do
     print(string.format("%s -> %d", key, value))
+end
+```
+
+`@neyuki/fs` exposes the filesystem: `open(path, mode?)` returns a `File` (modes `"r"`, `"w"` and `"a"`; the default is `"r"` and a missing file is an error), plus `exists`, `remove` (files and empty directories), `rename`, `mkdir(path, recursive?)`, `list` (sorted entry names) and `isDir`. A `File` has a read-only `path` and the methods `read()`, `write(text, append?)` (replaces the contents unless `append` is true; files opened with `"a"` always append), `lines()` (an iterator yielding one line at a time) and `close()`.
+
+```lua
+local fs = require("@neyuki/fs")
+local file = fs.open("notes.txt", "w")
+file:write("one
+two
+")
+file:close()
+for line in fs.open("notes.txt"):lines() do
+    print(line)
 end
 ```
 

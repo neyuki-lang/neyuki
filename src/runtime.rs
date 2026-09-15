@@ -169,7 +169,10 @@ impl Runtime {
         ] {
             env.borrow_mut().values.insert(name.to_string(), function);
         }
-        for (name, call) in crate::string_lib::NATIVES {
+        for (name, call) in crate::string_lib::NATIVES
+            .iter()
+            .chain(crate::fs_lib::NATIVES)
+        {
             env.borrow_mut()
                 .values
                 .insert(name.to_string(), native(name, *call));
@@ -510,26 +513,31 @@ impl Runtime {
             Expr::Binary { left, op, right } => self.binary(left, op, right, env),
             Expr::Call { callee, args } => {
                 let function = self.eval(callee, env.clone())?;
-                let mut values = Vec::new();
-                for arg in args {
-                    if matches!(arg, Expr::Vararg) {
-                        if let Some(Value::Table(varargs)) = lookup(&env, "__varargs") {
-                            values.extend(varargs.borrow().array.iter().cloned());
-                        }
-                    } else {
-                        let value = self.eval(arg, env.clone())?;
-                        match value {
-                            Value::Varargs(varargs) => values.extend(varargs),
-                            value => values.push(value),
-                        }
-                    }
+                let values = self.eval_args(args, env)?;
+                self.call(function, values).map(collapse_values)
+            }
+            Expr::MethodCall {
+                object,
+                method,
+                args,
+            } => {
+                // `object:method(args)` looks `method` up on the object and
+                // passes the object itself as the first argument.
+                let receiver = first_value(self.eval(object, env.clone())?);
+                if !matches!(receiver, Value::Table(_)) {
+                    return Err(format!(
+                        "cannot call method `{}` on a {}",
+                        method,
+                        receiver.type_name()
+                    ));
                 }
-                self.call(function, values)
-                    .map(|values| match values.as_slice() {
-                        [] => Value::Nil,
-                        [value] => value.clone(),
-                        _ => Value::Varargs(values),
-                    })
+                let function = self.index(&receiver, &Value::String(method.clone()))?;
+                if matches!(function, Value::Nil) {
+                    return Err(format!("method `{}` is not defined", method));
+                }
+                let mut values = vec![receiver];
+                values.extend(self.eval_args(args, env)?);
+                self.call(function, values).map(collapse_values)
             }
             Expr::Function { params, body } => Ok(Value::Function(Rc::new(Function::User {
                 params: params.clone(),
@@ -537,6 +545,24 @@ impl Runtime {
                 env,
             }))),
         }
+    }
+
+    fn eval_args(&self, args: &[Expr], env: EnvRef) -> Result<Vec<Value>, String> {
+        let mut values = Vec::new();
+        for arg in args {
+            if matches!(arg, Expr::Vararg) {
+                if let Some(Value::Table(varargs)) = lookup(&env, "__varargs") {
+                    values.extend(varargs.borrow().array.iter().cloned());
+                }
+            } else {
+                let value = self.eval(arg, env.clone())?;
+                match value {
+                    Value::Varargs(varargs) => values.extend(varargs),
+                    value => values.push(value),
+                }
+            }
+        }
+        Ok(values)
     }
 
     fn call(&self, function: Value, args: Vec<Value>) -> Result<Vec<Value>, String> {
@@ -822,6 +848,15 @@ impl Runtime {
     }
 }
 
+/// The result list of a call becomes a single value, or varargs when the
+/// callee returned several.
+fn collapse_values(values: Vec<Value>) -> Value {
+    match values.as_slice() {
+        [] => Value::Nil,
+        [value] => value.clone(),
+        _ => Value::Varargs(values),
+    }
+}
 /// A multi-value result used where a single value is expected keeps only its
 /// first value (or nil when it is empty).
 fn first_value(value: Value) -> Value {

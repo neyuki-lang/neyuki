@@ -1,0 +1,84 @@
+local fs = require("@neyuki/fs")
+local table = require("@neyuki/table")
+
+local dir = ".fs-test-tmp"
+local nested = dir .. "/inner/deep"
+local path = dir .. "/notes.txt"
+local moved = dir .. "/moved.txt"
+
+-- Start from a clean slate in case an earlier run was interrupted.
+if (fs.exists(path)) then fs.remove(path) end
+if (fs.exists(moved)) then fs.remove(moved) end
+if (fs.exists(nested)) then fs.remove(nested) end
+if (fs.exists(dir .. "/inner")) then fs.remove(dir .. "/inner") end
+if (fs.exists(dir)) then fs.remove(dir) end
+
+assert(not fs.exists(dir), "temp dir should not exist yet")
+fs.mkdir(dir)
+assert(fs.exists(dir), "mkdir should create the directory")
+assert(fs.isDir(dir), "isDir should be true for a directory")
+
+fs.mkdir(nested, true)
+assert(fs.isDir(nested), "recursive mkdir should create parents")
+
+local ok, err = try(fs.mkdir, dir)
+assert(not ok, "mkdir on an existing directory should error")
+
+-- Write mode creates the file.
+local file = fs.open(path, "w")
+assert(file.path == path, "File.path should be the opened path")
+file:write("first\n")
+file:write("second\n", true)
+file:close()
+
+assert(fs.exists(path), "open with w should create the file")
+assert(not fs.isDir(path), "isDir should be false for a file")
+
+-- Read mode.
+local reader = fs.open(path)
+assert(reader:read() == "first\nsecond\n", "read should return the whole file")
+
+local lines = {}
+for line in reader:lines() do
+    table.insert(lines, line)
+end
+assert(#lines == 2, "lines should yield one entry per line")
+assert(lines[1] == "first" and lines[2] == "second", "lines should strip newlines")
+
+local ok, err = try(reader.write, reader, "nope")
+assert(not ok, "writing to a read-only file should error")
+reader:close()
+
+local ok, err = try(reader.read, reader)
+assert(not ok, "reading a closed file should error")
+
+-- Append mode always appends, and write without append replaces contents.
+local appender = fs.open(path, "a")
+appender:write("third\n")
+appender:close()
+assert(fs.open(path):read() == "first\nsecond\nthird\n", "append mode should append")
+
+local writer = fs.open(path, "w")
+writer:write("only")
+writer:close()
+assert(fs.open(path):read() == "only", "write without append should replace contents")
+
+-- Opening a missing file for reading errors.
+local ok, err = try(fs.open, dir .. "/missing.txt", "r")
+assert(not ok, "open on a missing file should error")
+
+-- Rename, list, remove.
+fs.rename(path, moved)
+assert(not fs.exists(path) and fs.exists(moved), "rename should move the file")
+
+local entries = fs.list(dir)
+assert(#entries == 2, "list should return both entries")
+assert(entries[1] == "inner" and entries[2] == "moved.txt", "list should be sorted")
+
+fs.remove(moved)
+fs.remove(nested)
+fs.remove(dir .. "/inner")
+fs.remove(dir)
+assert(not fs.exists(dir), "remove should delete the directory")
+
+print("[pass] fs operations")
