@@ -759,7 +759,10 @@ impl Parser {
     /// annotation and is left alone.
     fn check_method_call(&self) -> bool {
         self.check_symbol(":")
-            && self.tokens.get(self.pos + 1).is_some_and(|t| t.kind == "name")
+            && self
+                .tokens
+                .get(self.pos + 1)
+                .is_some_and(|t| t.kind == "name")
             && self
                 .tokens
                 .get(self.pos + 2)

@@ -111,7 +111,8 @@ fn builtin_remove(args: Vec<Value>) -> Result<Vec<Value>, String> {
 fn builtin_rename(args: Vec<Value>) -> Result<Vec<Value>, String> {
     let from = string_arg(&args, 0, "from")?;
     let to = string_arg(&args, 1, "to")?;
-    fs::rename(&from, &to).map_err(|err| format!("cannot rename `{}` to `{}`: {}", from, to, err))?;
+    fs::rename(&from, &to)
+        .map_err(|err| format!("cannot rename `{}` to `{}`: {}", from, to, err))?;
     Ok(vec![Value::Nil])
 }
 
@@ -135,7 +136,9 @@ fn builtin_list(args: Vec<Value>) -> Result<Vec<Value>, String> {
         names.push(entry.file_name().to_string_lossy().into_owned());
     }
     names.sort();
-    Ok(vec![new_table(names.into_iter().map(Value::String).collect())])
+    Ok(vec![new_table(
+        names.into_iter().map(Value::String).collect(),
+    )])
 }
 
 fn builtin_isdir(args: Vec<Value>) -> Result<Vec<Value>, String> {
