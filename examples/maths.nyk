@@ -8,3 +8,6 @@ for i = 1, 10 do
 end
 
 print(table.unpack(numbers))
+print("Max:", math.max(table.unpack(numbers)))
+print("Min:", math.min(table.unpack(numbers)))
+print("Abs of first number:", math.abs(numbers[1]))

@@ -3,15 +3,16 @@ local table = require("@neyuki/table")
 local math = {}
 
 const function math.random(min: number, max: number): number
-    if not min or not max then
+    if (min == nil) or (max == nil) then
         error("Both min and max must be provided")
     end
-    if type(min) != "number" or type(max) != "number" then
+    if (type(min) != "number") or (type(max) != "number") then
         error("Both min and max must be numbers")
     end
-    if min > max then
+    if (min > max) then
         error("min must be less than or equal to max")
     end
+
     return __random_int(min, max)
 end
 
@@ -21,7 +22,7 @@ const function getNumberTable(...: number|{}): {number}
         if type(obj) == "number" then
             table.insert(t, obj)
         elseif type(obj) == "table" then
-            for _, n in {...} do
+            for _, n in obj do
                 handle(n)
             end
         else
@@ -52,6 +53,14 @@ const function math.min(n1: number, n2: number, ...: number): number
         end
     end
     return min
+end
+
+const function math.abs(n: number): number
+    if (n < 0) then
+        return -n
+    else
+        return n
+    end
 end
 
 return math
