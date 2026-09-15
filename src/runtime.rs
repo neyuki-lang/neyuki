@@ -125,6 +125,28 @@ impl Runtime {
             ("float", native("float", builtin_float)),
             ("__floor", native("__floor", builtin_floor)),
             ("__sqrt", native("__sqrt", builtin_sqrt)),
+            ("__ceil", native("__ceil", builtin_ceil)),
+            ("__round", native("__round", builtin_round)),
+            ("__sin", native("__sin", builtin_sin)),
+            ("__cos", native("__cos", builtin_cos)),
+            ("__tan", native("__tan", builtin_tan)),
+            ("__asin", native("__asin", builtin_asin)),
+            ("__acos", native("__acos", builtin_acos)),
+            ("__atan", native("__atan", builtin_atan)),
+            ("__atan2", native("__atan2", builtin_atan2)),
+            ("__sinh", native("__sinh", builtin_sinh)),
+            ("__cosh", native("__cosh", builtin_cosh)),
+            ("__tanh", native("__tanh", builtin_tanh)),
+            ("__log", native("__log", builtin_log)),
+            ("__log10", native("__log10", builtin_log10)),
+            ("__pow", native("__pow", builtin_pow)),
+            ("__fmod", native("__fmod", builtin_fmod)),
+            ("__modf", native("__modf", builtin_modf)),
+            ("__frexp", native("__frexp", builtin_frexp)),
+            ("__ldexp", native("__ldexp", builtin_ldexp)),
+            ("__isfinite", native("__isfinite", builtin_isfinite)),
+            ("__isinf", native("__isinf", builtin_isinf)),
+            ("__noise", native("__noise", builtin_noise)),
             ("__random_int", native("__random_int", builtin_random_int)),
             (
                 "__random_bigint",
@@ -192,10 +214,13 @@ impl Runtime {
                 is_const,
                 initializers,
             } => {
-                let values = initializers
-                    .iter()
-                    .map(|expr| self.eval(expr, env.clone()))
-                    .collect::<Result<Vec<_>, _>>()?;
+                let mut values = Vec::new();
+                for expr in initializers {
+                    match self.eval(expr, env.clone())? {
+                        Value::Varargs(varargs) => values.extend(varargs),
+                        value => values.push(value),
+                    }
+                }
                 for (index, name) in names.iter().enumerate() {
                     env.borrow_mut().values.insert(
                         name.clone(),
@@ -973,6 +998,256 @@ fn builtin_sqrt(args: Vec<Value>) -> Result<Vec<Value>, String> {
         return Err("sqrt expects a non-negative number".to_string());
     }
     Ok(vec![Value::Number(value.sqrt())])
+}
+fn float_argument(args: &[Value], index: usize, name: &str) -> Result<f64, String> {
+    number(args.get(index).cloned().unwrap_or(Value::Nil))
+        .map_err(|_| format!("{} must be a number", name))
+}
+fn float_to_integer(value: f64) -> Result<Value, String> {
+    Ok(Value::Integer(BigInt::from_f64(value).ok_or_else(
+        || "value cannot be converted to an integer".to_string(),
+    )?))
+}
+fn builtin_ceil(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    Ok(vec![match args.first().cloned().unwrap_or(Value::Nil) {
+        Value::Integer(value) => Value::Integer(value),
+        value => float_to_integer(number(value)?.ceil())?,
+    }])
+}
+fn builtin_round(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    Ok(vec![match args.first().cloned().unwrap_or(Value::Nil) {
+        Value::Integer(value) => Value::Integer(value),
+        value => float_to_integer(number(value)?.round())?,
+    }])
+}
+fn unary_float(args: Vec<Value>, name: &str, f: fn(f64) -> f64) -> Result<Vec<Value>, String> {
+    Ok(vec![Value::Number(f(float_argument(&args, 0, name)?))])
+}
+fn builtin_sin(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    unary_float(args, "sin argument", f64::sin)
+}
+fn builtin_cos(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    unary_float(args, "cos argument", f64::cos)
+}
+fn builtin_tan(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    unary_float(args, "tan argument", f64::tan)
+}
+fn builtin_asin(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let value = float_argument(&args, 0, "asin argument")?;
+    if !(-1.0..=1.0).contains(&value) {
+        return Err("asin expects a number between -1 and 1".to_string());
+    }
+    Ok(vec![Value::Number(value.asin())])
+}
+fn builtin_acos(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let value = float_argument(&args, 0, "acos argument")?;
+    if !(-1.0..=1.0).contains(&value) {
+        return Err("acos expects a number between -1 and 1".to_string());
+    }
+    Ok(vec![Value::Number(value.acos())])
+}
+fn builtin_atan(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    unary_float(args, "atan argument", f64::atan)
+}
+fn builtin_atan2(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let y = float_argument(&args, 0, "atan2 y")?;
+    let x = float_argument(&args, 1, "atan2 x")?;
+    Ok(vec![Value::Number(y.atan2(x))])
+}
+fn builtin_sinh(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    unary_float(args, "sinh argument", f64::sinh)
+}
+fn builtin_cosh(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    unary_float(args, "cosh argument", f64::cosh)
+}
+fn builtin_tanh(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    unary_float(args, "tanh argument", f64::tanh)
+}
+fn builtin_log(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let value = float_argument(&args, 0, "log argument")?;
+    if value < 0.0 {
+        return Err("log expects a non-negative number".to_string());
+    }
+    let result = match args.get(1) {
+        None | Some(Value::Nil) => value.ln(),
+        Some(_) => {
+            let base = float_argument(&args, 1, "log base")?;
+            if base <= 0.0 || base == 1.0 {
+                return Err("log base must be positive and not equal to 1".to_string());
+            }
+            value.log(base)
+        }
+    };
+    Ok(vec![Value::Number(result)])
+}
+fn builtin_log10(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let value = float_argument(&args, 0, "log10 argument")?;
+    if value < 0.0 {
+        return Err("log10 expects a non-negative number".to_string());
+    }
+    Ok(vec![Value::Number(value.log10())])
+}
+fn builtin_pow(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let base = float_argument(&args, 0, "pow base")?;
+    let exponent = float_argument(&args, 1, "pow exponent")?;
+    Ok(vec![Value::Number(base.powf(exponent))])
+}
+fn builtin_fmod(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let a = float_argument(&args, 0, "fmod a")?;
+    let b = float_argument(&args, 1, "fmod b")?;
+    if b == 0.0 {
+        return Err("fmod divisor must not be zero".to_string());
+    }
+    Ok(vec![Value::Number(a % b)])
+}
+fn builtin_modf(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let value = float_argument(&args, 0, "modf argument")?;
+    if value.is_infinite() {
+        return Ok(vec![Value::Number(value), Value::Number(0.0)]);
+    }
+    Ok(vec![Value::Number(value.trunc()), Value::Number(value.fract())])
+}
+fn builtin_frexp(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let value = float_argument(&args, 0, "frexp argument")?;
+    if value == 0.0 || !value.is_finite() {
+        return Ok(vec![Value::Number(value), Value::Integer(BigInt::zero())]);
+    }
+    // Decompose value = mantissa * 2^exponent with 0.5 <= |mantissa| < 1.
+    let exponent_mask = 0x7ffu64 << 52;
+    let (bits, bias) = if value.to_bits() & exponent_mask == 0 {
+        // Subnormal: scale up first so the exponent field is populated.
+        ((value * 2f64.powi(64)).to_bits(), 1022 + 64)
+    } else {
+        (value.to_bits(), 1022)
+    };
+    let raw_exponent = ((bits & exponent_mask) >> 52) as i64;
+    let mantissa = f64::from_bits((bits & !exponent_mask) | (1022u64 << 52));
+    Ok(vec![
+        Value::Number(mantissa),
+        Value::Integer(BigInt::from(raw_exponent - bias)),
+    ])
+}
+fn builtin_ldexp(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let mantissa = float_argument(&args, 0, "ldexp mantissa")?;
+    let exponent = float_argument(&args, 1, "ldexp exponent")?;
+    if !exponent.is_finite() || exponent.fract() != 0.0 {
+        return Err("ldexp exponent must be an integer".to_string());
+    }
+    let exponent = exponent.clamp(i32::MIN as f64, i32::MAX as f64) as i32;
+    Ok(vec![Value::Number(mantissa * 2f64.powi(exponent))])
+}
+fn builtin_isfinite(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    Ok(vec![Value::Bool(
+        match args.first().cloned().unwrap_or(Value::Nil) {
+            Value::Integer(_) => true,
+            value => number(value)?.is_finite(),
+        },
+    )])
+}
+fn builtin_isinf(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    Ok(vec![Value::Bool(
+        match args.first().cloned().unwrap_or(Value::Nil) {
+            Value::Integer(_) => false,
+            value => number(value)?.is_infinite(),
+        },
+    )])
+}
+
+// Improved Perlin noise (Ken Perlin, 2002). Returns values in roughly [-1, 1];
+// integer lattice points always yield 0.
+const PERLIN_PERMUTATION: [u8; 256] = [
+    151, 160, 137, 91, 90, 15, 131, 13, 201, 95, 96, 53, 194, 233, 7, 225, 140, 36, 103, 30, 69,
+    142, 8, 99, 37, 240, 21, 10, 23, 190, 6, 148, 247, 120, 234, 75, 0, 26, 197, 62, 94, 252, 219,
+    203, 117, 35, 11, 32, 57, 177, 33, 88, 237, 149, 56, 87, 174, 20, 125, 136, 171, 168, 68, 175,
+    74, 165, 71, 134, 139, 48, 27, 166, 77, 146, 158, 231, 83, 111, 229, 122, 60, 211, 133, 230,
+    220, 105, 92, 41, 55, 46, 245, 40, 244, 102, 143, 54, 65, 25, 63, 161, 1, 216, 80, 73, 209, 76,
+    132, 187, 208, 89, 18, 169, 200, 196, 135, 130, 116, 188, 159, 86, 164, 100, 109, 198, 173,
+    186, 3, 64, 52, 217, 226, 250, 124, 123, 5, 202, 38, 147, 118, 126, 255, 82, 85, 212, 207, 206,
+    59, 227, 47, 16, 58, 17, 182, 189, 28, 42, 223, 183, 170, 213, 119, 248, 152, 2, 44, 154, 163,
+    70, 221, 153, 101, 155, 167, 43, 172, 9, 129, 22, 39, 253, 19, 98, 108, 110, 79, 113, 224, 232,
+    178, 185, 112, 104, 218, 246, 97, 228, 251, 34, 242, 193, 238, 210, 144, 12, 191, 179, 162,
+    241, 81, 51, 145, 235, 249, 14, 239, 107, 49, 192, 214, 31, 181, 199, 106, 157, 184, 84, 204,
+    176, 115, 121, 50, 45, 127, 4, 150, 254, 138, 236, 205, 93, 222, 114, 67, 29, 24, 72, 243, 141,
+    128, 195, 78, 66, 215, 61, 156, 180,
+];
+fn perlin_hash(index: i64) -> usize {
+    PERLIN_PERMUTATION[index.rem_euclid(256) as usize] as usize
+}
+fn perlin_fade(t: f64) -> f64 {
+    t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+}
+fn perlin_lerp(t: f64, a: f64, b: f64) -> f64 {
+    a + t * (b - a)
+}
+fn perlin_grad(hash: usize, x: f64, y: f64, z: f64) -> f64 {
+    let h = hash & 15;
+    let u = if h < 8 { x } else { y };
+    let v = if h < 4 {
+        y
+    } else if h == 12 || h == 14 {
+        x
+    } else {
+        z
+    };
+    (if h & 1 == 0 { u } else { -u }) + (if h & 2 == 0 { v } else { -v })
+}
+fn perlin_noise(x: f64, y: f64, z: f64) -> f64 {
+    let (xi, yi, zi) = (x.floor() as i64, y.floor() as i64, z.floor() as i64);
+    let (x, y, z) = (x - x.floor(), y - y.floor(), z - z.floor());
+    let (u, v, w) = (perlin_fade(x), perlin_fade(y), perlin_fade(z));
+    let a = perlin_hash(xi) as i64 + yi;
+    let aa = perlin_hash(a) as i64 + zi;
+    let ab = perlin_hash(a + 1) as i64 + zi;
+    let b = perlin_hash(xi + 1) as i64 + yi;
+    let ba = perlin_hash(b) as i64 + zi;
+    let bb = perlin_hash(b + 1) as i64 + zi;
+    perlin_lerp(
+        w,
+        perlin_lerp(
+            v,
+            perlin_lerp(
+                u,
+                perlin_grad(perlin_hash(aa), x, y, z),
+                perlin_grad(perlin_hash(ba), x - 1.0, y, z),
+            ),
+            perlin_lerp(
+                u,
+                perlin_grad(perlin_hash(ab), x, y - 1.0, z),
+                perlin_grad(perlin_hash(bb), x - 1.0, y - 1.0, z),
+            ),
+        ),
+        perlin_lerp(
+            v,
+            perlin_lerp(
+                u,
+                perlin_grad(perlin_hash(aa + 1), x, y, z - 1.0),
+                perlin_grad(perlin_hash(ba + 1), x - 1.0, y, z - 1.0),
+            ),
+            perlin_lerp(
+                u,
+                perlin_grad(perlin_hash(ab + 1), x, y - 1.0, z - 1.0),
+                perlin_grad(perlin_hash(bb + 1), x - 1.0, y - 1.0, z - 1.0),
+            ),
+        ),
+    )
+}
+fn builtin_noise(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let coordinate = |index: usize, name: &str| -> Result<f64, String> {
+        match args.get(index) {
+            None | Some(Value::Nil) => Ok(0.0),
+            Some(_) => {
+                let value = float_argument(&args, index, name)?;
+                if !value.is_finite() {
+                    return Err(format!("{} must be finite", name));
+                }
+                Ok(value)
+            }
+        }
+    };
+    let x = coordinate(0, "noise x")?;
+    let y = coordinate(1, "noise y")?;
+    let z = coordinate(2, "noise z")?;
+    Ok(vec![Value::Number(perlin_noise(x, y, z))])
 }
 fn builtin_random_int(args: Vec<Value>) -> Result<Vec<Value>, String> {
     if args

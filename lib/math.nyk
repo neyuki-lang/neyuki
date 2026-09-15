@@ -2,9 +2,14 @@ local table = require("@neyuki/table")
 
 local math = {}
 
+function checkNumber(n: number, name: string)
+    if (n == nil) then error(name .. " must be provided") end
+    if (type(n) != "number") then error(name .. " must be a number") end
+end
+
+
 function math.sqrt(n: number): number
-    if (n == nil) then error("n must be provided") end
-    if (type(n) != "number") then error("n must be a number") end
+    checkNumber(n, "number")
     if (n < 0) then error("n must be non-negative") end
 
     return __sqrt(n)
@@ -14,18 +19,13 @@ math.huge = 1 / 0
 math.phi = (1 + math.sqrt(5)) / 2
 math.e = 2.71828182845904523536
 math.pi = 3.14159265358979323846
+math.sqrt2 = math.sqrt(2)
+math.tau = 2*math.pi
 
 function math.random(min: number, max: number): number
-    if (min == nil) or (max == nil) then
-        error("Both min and max must be provided")
-    end
-    if (type(min) != "number") or (type(max) != "number") then
-        error("Both min and max must be numbers")
-    end
-    if (min > max) then
-        error("min must be less than or equal to max")
-    end
-
+    checkNumber(min, "min")
+    checkNumber(max, "max")
+    if (min > max) then error("min must be less than or equal to max") end
     return __random_int(min, max)
 end
 
@@ -76,6 +76,7 @@ function math.exp(n: number): number -- exponent e^n
 end
 
 function math.abs(n: number): number
+    checkNumber(n, "number")
     if (n < 0) then
         return -n
     else
@@ -84,6 +85,9 @@ function math.abs(n: number): number
 end
 
 function math.clamp(n: number, min: number, max: number): number
+    checkNumber(n, "number")
+    checkNumber(min, "min")
+    checkNumber(max, "max")
     if (min > max) then error("min must be less than or equal to max") end
     if (n < min) then
         return min
@@ -95,10 +99,152 @@ function math.clamp(n: number, min: number, max: number): number
 end
 
 function math.floor(n: number): int
-    if (n == nil) then error("n must be provided") end
-    if (type(n) != "number") then error("n must be a number") end
-
+    checkNumber(n, "number")
     return __floor(n)
+end
+
+function math.ceil(n: number): int
+    checkNumber(n, "n")
+    return __ceil(n)
+end
+
+function math.round(n: number): int
+    checkNumber(n, "n")
+    return __round(n)
+end
+
+function math.pow(base: number, exponent: number): number
+    checkNumber(base, "base")
+    checkNumber(exponent, "exponent")
+    return __pow(base, exponent)
+end
+
+function math.log(n: number, base: number?): number
+    checkNumber(n, "n")
+    if (base != nil) then checkNumber(base, "base") end
+    return __log(n, base)
+end
+
+function math.log10(n: number): number
+    checkNumber(n, "n")
+    return __log10(n)
+end
+
+function math.sin(n: number): number
+    checkNumber(n, "n")
+    return __sin(n)
+end
+
+function math.cos(n: number): number
+    checkNumber(n, "n")
+    return __cos(n)
+end
+
+function math.tan(n: number): number
+    checkNumber(n, "n")
+    return __tan(n)
+end
+
+function math.asin(n: number): number
+    checkNumber(n, "n")
+    return __asin(n)
+end
+
+function math.acos(n: number): number
+    checkNumber(n, "n")
+    return __acos(n)
+end
+
+function math.atan(n: number): number
+    checkNumber(n, "n")
+    return __atan(n)
+end
+
+function math.atan2(y: number, x: number): number
+    checkNumber(y, "y")
+    checkNumber(x, "x")
+    return __atan2(y, x)
+end
+
+function math.sinh(n: number): number
+    checkNumber(n, "n")
+    return __sinh(n)
+end
+
+function math.cosh(n: number): number
+    checkNumber(n, "n")
+    return __cosh(n)
+end
+
+function math.tanh(n: number): number
+    checkNumber(n, "n")
+    return __tanh(n)
+end
+
+function math.deg(radians: number): number
+    checkNumber(radians, "radians")
+    return radians * (180 / math.pi)
+end
+
+function math.rad(degrees: number): number
+    checkNumber(degrees, "degrees")
+    return degrees * (math.pi / 180)
+end
+
+function math.fmod(a: number, b: number): number -- remainder with the sign of a
+    checkNumber(a, "a")
+    checkNumber(b, "b")
+    return __fmod(a, b)
+end
+
+function math.modf(n: number): (number, number) -- integral part, fractional part
+    checkNumber(n, "n")
+    return __modf(n)
+end
+
+function math.frexp(n: number): (number, int) -- mantissa in [0.5, 1) and exponent, n = m * 2^e
+    checkNumber(n, "n")
+    return __frexp(n)
+end
+
+function math.ldexp(mantissa: number, exponent: int): number -- mantissa * 2^exponent
+    checkNumber(mantissa, "mantissa")
+    checkNumber(exponent, "exponent")
+    return __ldexp(mantissa, exponent)
+end
+
+function math.isfinite(n: number): bool
+    checkNumber(n, "n")
+    return __isfinite(n)
+end
+
+function math.isinf(n: number): bool
+    checkNumber(n, "n")
+    return __isinf(n)
+end
+
+function math.lerp(a: number, b: number, t: number): number
+    checkNumber(a, "a")
+    checkNumber(b, "b")
+    checkNumber(t, "t")
+    return a + (b - a) * t
+end
+
+function math.map(n: number, inMin: number, inMax: number, outMin: number, outMax: number): number
+    checkNumber(n, "n")
+    checkNumber(inMin, "inMin")
+    checkNumber(inMax, "inMax")
+    checkNumber(outMin, "outMin")
+    checkNumber(outMax, "outMax")
+    if (inMin == inMax) then error("inMin and inMax must differ") end
+    return outMin + (n - inMin) * (outMax - outMin) / (inMax - inMin)
+end
+
+function math.noise(x: number, y: number?, z: number?): number -- Perlin noise in roughly [-1, 1]
+    checkNumber(x, "x")
+    if (y != nil) then checkNumber(y, "y") end
+    if (z != nil) then checkNumber(z, "z") end
+    return __noise(x, y, z)
 end
 
 return table.freeze(math)
