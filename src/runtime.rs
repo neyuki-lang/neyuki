@@ -10,6 +10,9 @@ use rand::Rng;
 
 use crate::parser::{Expr, Param, Stmt};
 
+const BUNDLED_LIBRARIES: &[(&str, &str)] =
+    include!(concat!(env!("OUT_DIR"), "/bundled_libraries.rs"));
+
 type EnvRef = Rc<RefCell<Env>>;
 type Native = fn(Vec<Value>) -> Result<Vec<Value>, String>;
 
@@ -487,17 +490,13 @@ impl Runtime {
         let Some(Value::String(package)) = args.first() else {
             return Err("require expects a string path".to_string());
         };
-        let path = match package.as_str() {
-            "@neyuki/math" => "lib/math.nyk",
-            "@neyuki/table" => "lib/table.nyk",
-            _ => {
-                return Err(format!(
-                    "package `{}` is not bundled; add it to the project manually",
-                    package
-                ));
-            }
+        let Some((_, source)) = BUNDLED_LIBRARIES.iter().find(|(name, _)| *name == package) else {
+            return Err(format!(
+                "package `{}` is not bundled; add it to the project manually",
+                package
+            ));
         };
-        let program = crate::compiler::compile_file(path)?;
+        let program = crate::compiler::compile_source(source)?;
         let module_env = child(&self.global);
         match self.exec_block(&program, module_env)? {
             Flow::Return(values) => Ok(values),

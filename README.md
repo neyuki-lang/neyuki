@@ -126,14 +126,17 @@ if not ok then
 end
 ```
 
-## Bundled library example
+## Bundled libraries
 
-The runtime currently recognizes a bundled package named `@neyuki/math`:
+Every `.nyk` file in `lib/` is bundled into the executable and exposed as
+`@neyuki/<filename>` without its extension. For example:
 
 ```lua
 local math = require("@neyuki/math")
 print(math.random(1, 10))
 ```
+
+Adding a new library only requires adding its source file to `lib/`.
 
 ## Editor support
 
