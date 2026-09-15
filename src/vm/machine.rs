@@ -1,5 +1,3 @@
-// Register-based Virtual Machine execution engine.
-
 use num_bigint::{BigInt, Sign};
 use num_integer::Integer as _;
 use num_traits::{FromPrimitive, ToPrimitive, Zero};
