@@ -1,4 +1,4 @@
-// Execution frame for register-based VM.
+// Execution frame
 
 use std::rc::Rc;
 use crate::vm::value::VmClosure;
