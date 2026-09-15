@@ -961,9 +961,7 @@ mod tests {
 
     #[test]
     fn parses_anonymous_function_expression() {
-        let mut parser = Parser::new(
-            "table.sort(numbers, function(a, b) return a < b end)",
-        );
+        let mut parser = Parser::new("table.sort(numbers, function(a, b) return a < b end)");
         let program = parser.parse_program();
 
         assert!(matches!(
