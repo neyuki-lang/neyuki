@@ -12,8 +12,6 @@ function checkOptionalBoolean(b: boolean?, name: string)
     if (b != nil and type(b) != "boolean") then error(name .. " must be a boolean") end
 end
 
--- Splits file contents into lines. Both "\n" and "\r\n" endings are accepted
--- and a trailing newline does not produce an extra empty line.
 function splitLines(content: string): {string}
     local lines = string.split(content, "\n")
     local count = #lines
@@ -30,9 +28,6 @@ function splitLines(content: string): {string}
     return lines
 end
 
--- Opens `path` and returns a File. Modes are "r" (read, the file must exist),
--- "w" (write, the file is created or truncated) and "a" (append, the file is
--- created if missing). Errors if the file cannot be opened in that mode.
 function fs.open(path: string, mode: string?): File
     checkString(path, "path")
     mode = mode ?? "r"
@@ -53,14 +48,11 @@ function fs.open(path: string, mode: string?): File
         if (mode == "r") then error("file `" .. path .. "` was opened read-only") end
     end
 
-    -- Returns the whole file contents.
     function file.read(self: File): string
         checkOpen()
         return __fs_read(path)
     end
 
-    -- Writes `text` to the file, replacing its contents unless `append` is
-    -- true. A file opened with "a" always appends.
     function file.write(self: File, text: string, append: boolean?): ()
         checkWritable()
         checkString(text, "text")
@@ -69,7 +61,6 @@ function fs.open(path: string, mode: string?): File
         __fs_write(path, text, append ?? false)
     end
 
-    -- Returns an iterator that yields one line at a time, then nil.
     function file.lines(self: File): () -> string?
         checkOpen()
         local lines = splitLines(__fs_read(path))
@@ -80,7 +71,6 @@ function fs.open(path: string, mode: string?): File
         end
     end
 
-    -- Marks the file closed; any further use of it errors.
     function file.close(self: File): ()
         closed = true
     end
@@ -93,7 +83,6 @@ function fs.exists(path: string): boolean
     return __fs_exists(path)
 end
 
--- Removes a file or an empty directory.
 function fs.remove(path: string): ()
     checkString(path, "path")
     __fs_remove(path)
@@ -105,15 +94,12 @@ function fs.rename(from: string, to: string): ()
     __fs_rename(from, to)
 end
 
--- Creates a directory. With `recursive` missing parents are created too and
--- an existing directory is not an error.
 function fs.mkdir(path: string, recursive: boolean?): ()
     checkString(path, "path")
     checkOptionalBoolean(recursive, "recursive")
     __fs_mkdir(path, recursive ?? false)
 end
 
--- Returns the names of the entries in a directory, sorted.
 function fs.list(path: string): {string}
     checkString(path, "path")
     return __fs_list(path)
