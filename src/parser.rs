@@ -588,6 +588,13 @@ impl Parser {
                 expr: Box::new(self.parse_prefix()),
             };
         }
+        if self.check_symbol("~") {
+            self.pos += 1;
+            return Expr::Unary {
+                op: "~".to_string(),
+                expr: Box::new(self.parse_prefix()),
+            };
+        }
 
         if self.match_symbol("...") {
             return Expr::Vararg;

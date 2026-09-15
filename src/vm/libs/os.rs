@@ -1,0 +1,59 @@
+// Standard operating system interface library for Neyuki VM.
+
+use num_bigint::BigInt;
+use num_traits::ToPrimitive;
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::vm::machine::VM;
+use crate::vm::value::{Value, VmTable};
+
+fn os_clock(_vm: &mut VM, _args: &[Value]) -> Result<Vec<Value>, String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    Ok(vec![Value::Float(now.as_secs_f64())])
+}
+
+fn os_time(_vm: &mut VM, _args: &[Value]) -> Result<Vec<Value>, String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    Ok(vec![Value::Int(BigInt::from(now.as_secs()))])
+}
+
+fn os_difftime(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let t2 = match args.first().ok_or_else(|| "os.difftime expects 2 arguments".to_string())? {
+        Value::Int(i) => i.to_f64().unwrap_or(0.0),
+        Value::Float(f) => *f,
+        _ => return Err("os.difftime expects numbers".to_string()),
+    };
+    let t1 = match args.get(1).ok_or_else(|| "os.difftime expects 2 arguments".to_string())? {
+        Value::Int(i) => i.to_f64().unwrap_or(0.0),
+        Value::Float(f) => *f,
+        _ => return Err("os.difftime expects numbers".to_string()),
+    };
+    Ok(vec![Value::Float(t2 - t1)])
+}
+
+fn os_getenv(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let varname = match args.first().ok_or_else(|| "os.getenv expects variable name".to_string())? {
+        Value::String(s) => s,
+        _ => return Err("os.getenv expects string".to_string()),
+    };
+    match std::env::var(varname) {
+        Ok(v) => Ok(vec![Value::String(v)]),
+        Err(_) => Ok(vec![Value::Nil]),
+    }
+}
+
+pub fn create_os_lib() -> Value {
+    let mut table = VmTable::new();
+    table.set_str("clock", Value::Native("os.clock", os_clock));
+    table.set_str("time", Value::Native("os.time", os_time));
+    table.set_str("difftime", Value::Native("os.difftime", os_difftime));
+    table.set_str("getenv", Value::Native("os.getenv", os_getenv));
+    table.frozen = true;
+    Value::Table(Rc::new(RefCell::new(table)))
+}
