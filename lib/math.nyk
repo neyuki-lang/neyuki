@@ -3,10 +3,19 @@ local table = require("@neyuki/table")
 local math = {}
 
 const function math.random(min: number, max: number): number
+    if not min or not max then
+        error("Both min and max must be provided")
+    end
+    if type(min) != "number" or type(max) != "number" then
+        error("Both min and max must be numbers")
+    end
+    if min > max then
+        error("min must be less than or equal to max")
+    end
     return __random_int(min, max)
 end
 
-const function getNumberTable(...: number)
+const function getNumberTable(...: number|{}): {number}
     local t = {}
     local function handle(obj: number|{})
         if type(obj) == "number" then
@@ -15,6 +24,8 @@ const function getNumberTable(...: number)
             for _, n in {...} do
                 handle(n)
             end
+        else
+            error("Invalid argument type: " .. type(obj))
         end
     end
     handle({...})
