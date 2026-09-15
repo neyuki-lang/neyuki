@@ -13,11 +13,11 @@ use crate::parser::{Expr, Param, Stmt};
 const BUNDLED_LIBRARIES: &[(&str, &str)] =
     include!(concat!(env!("OUT_DIR"), "/bundled_libraries.rs"));
 
-type EnvRef = Rc<RefCell<Env>>;
-type Native = fn(Vec<Value>) -> Result<Vec<Value>, String>;
+pub(crate) type EnvRef = Rc<RefCell<Env>>;
+pub(crate) type Native = fn(Vec<Value>) -> Result<Vec<Value>, String>;
 
 #[derive(Clone)]
-enum Value {
+pub(crate) enum Value {
     Nil,
     Bool(bool),
     Number(f64),
@@ -28,14 +28,14 @@ enum Value {
     Varargs(Vec<Value>),
 }
 
-struct Table {
+pub(crate) struct Table {
     pub array: Vec<Value>,
     pub fields: HashMap<String, Value>,
     pub const_fields: HashSet<String>,
     pub frozen: bool,
 }
 
-enum Function {
+pub(crate) enum Function {
     Native {
         name: &'static str,
         call: Native,
@@ -47,7 +47,7 @@ enum Function {
     },
 }
 
-struct Env {
+pub(crate) struct Env {
     values: HashMap<String, Value>,
     const_names: HashSet<String>,
     parent: Option<EnvRef>,
@@ -83,7 +83,7 @@ impl Value {
         }
     }
 
-    fn type_name(&self) -> &'static str {
+    pub(crate) fn type_name(&self) -> &'static str {
         match self {
             Value::Nil => "nil",
             Value::Bool(_) => "boolean",
@@ -169,6 +169,11 @@ impl Runtime {
         ] {
             env.borrow_mut().values.insert(name.to_string(), function);
         }
+        for (name, call) in crate::string_lib::NATIVES {
+            env.borrow_mut()
+                .values
+                .insert(name.to_string(), native(name, *call));
+        }
         Self { global: env }
     }
 
@@ -203,6 +208,7 @@ impl Runtime {
                     .map(|expr| self.eval(expr, env.clone()))
                     .transpose()?
                     .unwrap_or(Value::Nil);
+                let value = first_value(value);
                 let mut env = env.borrow_mut();
                 env.values.insert(name.clone(), value);
                 if *is_const {
@@ -236,7 +242,7 @@ impl Runtime {
                 value,
                 is_const,
             } => {
-                let value = self.eval(value, env.clone())?;
+                let value = first_value(self.eval(value, env.clone())?);
                 self.assign(target, value, env.clone())?;
                 if *is_const {
                     self.protect_member(target, env)?;
@@ -285,16 +291,17 @@ impl Runtime {
             Stmt::Expr(expr) => {
                 self.eval(expr, env)?;
             }
-            Stmt::Return(expr) => {
-                let value = expr
-                    .as_ref()
-                    .map(|expr| self.eval(expr, env))
-                    .transpose()?
-                    .unwrap_or(Value::Nil);
-                let values = match value {
-                    Value::Varargs(values) => values,
-                    value => vec![value],
-                };
+            Stmt::Return(exprs) => {
+                let mut values = Vec::new();
+                for expr in exprs {
+                    match self.eval(expr, env.clone())? {
+                        Value::Varargs(varargs) => values.extend(varargs),
+                        value => values.push(value),
+                    }
+                }
+                if values.is_empty() {
+                    values.push(Value::Nil);
+                }
                 return Ok(Flow::Return(values));
             }
             Stmt::If {
@@ -335,7 +342,29 @@ impl Runtime {
                 }
             },
             Stmt::For { vars, source, body } => {
-                let table = self.eval(source, env.clone())?;
+                let table = first_value(self.eval(source, env.clone())?);
+                if let Value::Function(_) = table {
+                    // Iterator function: call it until its first result is nil.
+                    loop {
+                        let values = self.call(table.clone(), Vec::new())?;
+                        if matches!(values.first(), None | Some(Value::Nil)) {
+                            break;
+                        }
+                        let loop_env = child(&env);
+                        for (index, name) in vars.iter().enumerate() {
+                            loop_env.borrow_mut().values.insert(
+                                name.clone(),
+                                values.get(index).cloned().unwrap_or(Value::Nil),
+                            );
+                        }
+                        match self.exec_block(body, loop_env)? {
+                            Flow::Normal | Flow::Continue => {}
+                            Flow::Break => break,
+                            flow => return Ok(flow),
+                        }
+                    }
+                    return Ok(Flow::Normal);
+                }
                 let values: Vec<Vec<Value>> = match table {
                     Value::Table(table) => {
                         let table = table.borrow();
@@ -356,7 +385,7 @@ impl Runtime {
                             table.array.iter().map(|v| vec![v.clone()]).collect()
                         }
                     }
-                    _ => return Err("generic for expects a table in the base runtime".to_string()),
+                    _ => return Err("generic for expects a table or iterator function".to_string()),
                 };
                 for values in values {
                     let loop_env = child(&env);
@@ -415,8 +444,9 @@ impl Runtime {
 
     fn eval(&self, expr: &Expr, env: EnvRef) -> Result<Value, String> {
         match expr {
-            Expr::Literal(value) if value.contains('{') => self.interpolate(value, env),
             Expr::Literal(value) => parse_literal(value),
+            Expr::Str(value) => Ok(Value::String(value.clone())),
+            Expr::Interp(value) => self.interpolate(value, env),
             Expr::Variable(name) => {
                 lookup(&env, name).ok_or_else(|| format!("undefined name `{}`", name))
             }
@@ -469,7 +499,7 @@ impl Runtime {
                 Ok(Value::Table(Rc::new(RefCell::new(table))))
             }
             Expr::Unary { op, expr } => {
-                let value = self.eval(expr, env)?;
+                let value = first_value(self.eval(expr, env)?);
                 match op.as_str() {
                     "not" => Ok(Value::Bool(!value.truthy_bool()?)),
                     "-" => self.number_unary(value, true),
@@ -611,15 +641,17 @@ impl Runtime {
     }
 
     fn binary(&self, left: &Expr, op: &str, right: &Expr, env: EnvRef) -> Result<Value, String> {
-        let left = self.eval(left, env.clone())?;
+        let left = first_value(self.eval(left, env.clone())?);
         if op == "and" || op == "or" {
             let a = left.truthy_bool()?;
             if (op == "and" && !a) || (op == "or" && a) {
                 return Ok(Value::Bool(a));
             }
-            return Ok(Value::Bool(self.eval(right, env)?.truthy_bool()?));
+            return Ok(Value::Bool(
+                first_value(self.eval(right, env)?).truthy_bool()?,
+            ));
         }
-        let right = self.eval(right, env)?;
+        let right = first_value(self.eval(right, env)?);
         match op {
             "??" => {
                 if matches!(left, Value::Nil) {
@@ -790,8 +822,24 @@ impl Runtime {
     }
 }
 
+/// A multi-value result used where a single value is expected keeps only its
+/// first value (or nil when it is empty).
+fn first_value(value: Value) -> Value {
+    match value {
+        Value::Varargs(values) => values.into_iter().next().unwrap_or(Value::Nil),
+        value => value,
+    }
+}
 fn native(name: &'static str, call: Native) -> Value {
     Value::Function(Rc::new(Function::Native { name, call }))
+}
+pub(crate) fn new_table(array: Vec<Value>) -> Value {
+    Value::Table(Rc::new(RefCell::new(Table {
+        array,
+        fields: HashMap::new(),
+        const_fields: HashSet::new(),
+        frozen: false,
+    })))
 }
 fn child(parent: &EnvRef) -> EnvRef {
     Rc::new(RefCell::new(Env {
@@ -849,7 +897,7 @@ fn parse_literal(value: &str) -> Result<Value, String> {
         }
     }
 }
-fn number(value: Value) -> Result<f64, String> {
+pub(crate) fn number(value: Value) -> Result<f64, String> {
     match value {
         Value::Integer(value) => value
             .to_f64()
@@ -858,7 +906,7 @@ fn number(value: Value) -> Result<f64, String> {
         _ => Err("expected a number".to_string()),
     }
 }
-fn require_string(value: Value) -> Result<String, String> {
+pub(crate) fn require_string(value: Value) -> Result<String, String> {
     match value {
         Value::String(value) => Ok(value),
         _ => Err("expected a string".to_string()),

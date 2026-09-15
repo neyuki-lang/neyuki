@@ -1,0 +1,201 @@
+local string = require("@neyuki/string")
+local table = require("@neyuki/table")
+
+-- basics
+assert(string.len("hello") == 5, "len")
+assert(string.count("héllo") == 5, "count codepoints")
+assert(#"héllo" == 6, "# counts bytes")
+assert(string.upper("abc") == "ABC", "upper")
+assert(string.lower("AbC") == "abc", "lower")
+assert(string.reverse("abc") == "cba", "reverse")
+assert(string.rep("ab", 3) == "ababab", "rep")
+assert(string.rep("ab", 3, "-") == "ab-ab-ab", "rep with separator")
+assert(string.rep("ab", 0) == "", "rep zero")
+
+-- sub with negative indices
+assert(string.sub("hello", 2, 4) == "ell", "sub")
+assert(string.sub("hello", -3) == "llo", "sub negative start")
+assert(string.sub("hello", 2) == "ello", "sub open end")
+assert(string.sub("hello", 4, 2) == "", "sub empty range")
+assert(string.sub("hello", 0) == "hello", "sub zero start")
+
+-- byte / char
+assert(string.byte("A") == 65, "byte")
+local b1, b2, b3 = string.byte("abc", 1, 3)
+assert(b1 == 97 and b2 == 98 and b3 == 99, "byte range")
+assert(string.byte("abc", -1) == 99, "byte negative")
+assert(string.char(72, 105) == "Hi", "char")
+assert(string.char() == "", "char empty")
+
+-- split
+local parts = string.split("a,b,,c")
+assert(#parts == 4 and parts[1] == "a" and parts[3] == "" and parts[4] == "c", "split default")
+local words = string.split("one two", " ")
+assert(#words == 2 and words[2] == "two", "split custom")
+local letters = string.split("abc", "")
+assert(#letters == 3 and letters[2] == "b", "split chars")
+
+-- find
+local s1, e1 = string.find("hello world", "wor")
+assert(s1 == 7 and e1 == 9, "find plain")
+assert(string.find("hello", "xyz") == nil, "find missing")
+local s2, e2 = string.find("a.b", ".", 1, true)
+assert(s2 == 2 and e2 == 2, "find plain flag")
+local s3, e3, cap = string.find("key=value", "(%w+)=")
+assert(s3 == 1 and e3 == 4 and cap == "key", "find capture")
+local s4 = string.find("hello", "l", 4)
+assert(s4 == 4, "find init")
+assert(string.find("hello", "^h") == 1, "find anchor")
+assert(string.find("hello", "^e") == nil, "find anchor miss")
+assert(string.find("hello", "o$") == 5, "find end anchor")
+assert(string.find("abc", "") == 1, "find empty pattern")
+
+-- match
+assert(string.match("hello 123", "%d+") == "123", "match digits")
+local k, v = string.match("name = janis", "(%w+)%s*=%s*(%w+)")
+assert(k == "name" and v == "janis", "match two captures")
+assert(string.match("hello", "xyz") == nil, "match nil")
+assert(string.match("  trim  ", "^%s*(.-)%s*$") == "trim", "match lazy")
+assert(string.match("(nested (parens))", "%b()") == "(nested (parens))", "match balance")
+assert(string.match("THE (quick) fox", "%f[%a]%a+", 5) == "quick", "match frontier")
+assert(string.match("abc", "()b()") == 2, "position capture")
+assert(string.match("hello", "[aeiou]") == "e", "match set")
+assert(string.match("hello", "[^aeiou]+") == "h", "match negated set")
+assert(string.match("a-b", "[%w-]+") == "a-b", "set with escaped dash")
+assert(string.match("x7", "%a%d") == "x7", "class sequence")
+assert(string.match("aaa", "a?a?a?a?") == "aaa", "optional")
+assert(string.match("say \"hi\" now", "(\"[^\"]*\")") == "\"hi\"", "quoted")
+assert(string.match("abab", "(ab)%1") == "ab", "back reference")
+
+-- gmatch
+local collected = {}
+for word in string.gmatch("one two three", "%a+") do
+    table.insert(collected, word)
+end
+assert(#collected == 3 and collected[3] == "three", "gmatch words")
+
+local pairsFound = {}
+for key, value in string.gmatch("a=1, b=2", "(%w+)=(%w+)") do
+    pairsFound[key] = value
+end
+assert(pairsFound.a == "1" and pairsFound.b == "2", "gmatch captures")
+
+local anchoredCount = 0
+for _ in string.gmatch("aaa", "^a") do
+    anchoredCount++
+end
+assert(anchoredCount == 1, "gmatch anchored matches once")
+
+-- gsub
+local r1, c1 = string.gsub("hello world", "o", "0")
+assert(r1 == "hell0 w0rld" and c1 == 2, "gsub string")
+local r2, c2 = string.gsub("hello world", "o", "0", 1)
+assert(r2 == "hell0 world" and c2 == 1, "gsub limit")
+local r3 = string.gsub("hello", "(l+)", "[%1]")
+assert(r3 == "he[ll]o", "gsub capture reference")
+local r4 = string.gsub("abc", "%w", "%0%0")
+assert(r4 == "aabbcc", "gsub whole match reference")
+local r5 = string.gsub("100%", "%%", " percent")
+assert(r5 == "100 percent", "gsub escaped percent")
+local r6 = string.gsub("$name is $age", "%$(%w+)", { name = "Janis", age = 20 })
+assert(r6 == "Janis is 20", "gsub table")
+local r7 = string.gsub("1 2 3", "%d", function(d: string): string
+    return d .. d
+end)
+assert(r7 == "11 22 33", "gsub function")
+local r8 = string.gsub("keep me", "%w+", function(w: string): nil
+    return nil
+end)
+assert(r8 == "keep me", "gsub nil keeps match")
+local r9, c9 = string.gsub("abc", "", "-")
+assert(r9 == "-a-b-c-" and c9 == 4, "gsub empty pattern")
+local r10, c10 = string.gsub("aaa", "^a", "b")
+assert(r10 == "baa" and c10 == 1, "gsub anchored")
+local r11 = string.gsub("hello world", "(%w+) (%w+)", "%2 %1")
+assert(r11 == "world hello", "gsub swap")
+local ok1, _ = try(string.gsub, "x", "x", "%2")
+assert(not ok1, "gsub invalid capture index should error")
+
+-- format
+assert(string.format("%d items", 3) == "3 items", "format d")
+assert(string.format("%5d|", 42) == "   42|", "format width")
+assert(string.format("%-5d|", 42) == "42   |", "format left")
+assert(string.format("%05d", 42) == "00042", "format zero pad")
+assert(string.format("%+d", 42) == "+42", "format plus")
+assert(string.format("%x %X %o", 255, 255, 8) == "ff FF 10", "format hex/oct")
+assert(string.format("%#x", 255) == "0xff", "format alt hex")
+assert(string.format("%.2f", 3.14159) == "3.14", "format f")
+assert(string.format("%8.3f|", 3.14159) == "   3.142|", "format f width")
+assert(string.format("%e", 12345.678) == "1.234568e+04", "format e")
+assert(string.format("%g", 100000) == "100000", "format g")
+assert(string.format("%g", 1000000) == "1e+06", "format g exponent")
+assert(string.format("%g", 0.0001) == "0.0001", "format g small")
+assert(string.format("%.3g", 3.14159) == "3.14", "format g precision")
+assert(string.format("%s and %s", "a", "b") == "a and b", "format s")
+assert(string.format("%.2s", "hello") == "he", "format s precision")
+assert(string.format("%5s|", "ab") == "   ab|", "format s width")
+assert(string.format("%c%c", 72, 105) == "Hi", "format c")
+assert(string.format("100%%") == "100%", "format percent")
+assert(string.format("%q", "a\"b\\c\nd") == "\"a\\\"b\\\\c\\nd\"", "format q")
+assert(string.format("%q", 42) == "42", "format q integer")
+assert(string.format("%s", 2.5) == "2.5", "format s float")
+assert(string.format("%d", 3.0) == "3", "format d integral float")
+assert(string.format("%i", -7) == "-7", "format i negative")
+assert(string.format("%a", 1) == "0x1p+0", "format a")
+assert(string.format("%.1f", 1 / 0) == "inf", "format inf")
+local ok2, _ = try(string.format, "%d", 1.5)
+assert(not ok2, "format d rejects non-integral float")
+local ok3, _ = try(string.format, "%d")
+assert(not ok3, "format missing argument")
+local ok4, _ = try(string.format, "%y", 1)
+assert(not ok4, "format invalid conversion")
+
+-- pack / unpack / packsize
+assert(string.packsize("i4") == 4, "packsize i4")
+assert(string.packsize("bhi8d") == 19, "packsize mixed")
+assert(string.packsize("!i1i8") == 16, "packsize aligned")
+local packed = string.pack("<i4", 1)
+assert(#packed == 4, "pack size")
+assert(string.byte(packed, 1) == 1 and string.byte(packed, 4) == 0, "pack little endian bytes")
+local bigPacked = string.pack(">i4", 1)
+assert(string.byte(bigPacked, 4) == 1 and string.byte(bigPacked, 1) == 0, "pack big endian bytes")
+local n, nextPos = string.unpack("<i4", packed)
+assert(n == 1 and nextPos == 5, "unpack i4")
+local neg = string.unpack("<i2", string.pack("<i2", -2))
+assert(neg == -2, "unpack signed")
+local ok5, _ = try(string.pack, "b", 200)
+assert(not ok5, "pack overflow")
+local a, b, c, after = string.unpack("<i2 d z", string.pack("<i2 d z", 7, 2.5, "text"))
+assert(a == 7 and b == 2.5 and c == "text" and after == 16, "pack/unpack roundtrip")
+local str, _ = string.unpack("s1", string.pack("s1", "hello"))
+assert(str == "hello", "pack length-prefixed string")
+local f, _ = string.unpack("f", string.pack("f", 0.5))
+assert(f == 0.5, "pack float")
+local big = string.unpack("<i16", string.pack("<i16", 2 ^ 100))
+assert(big == 2 ^ 100, "pack 16-byte integer")
+local mid = string.unpack("<i4", string.pack("<i4i4", 1, 2), 5)
+assert(mid == 2, "unpack readStart")
+local ok6, _ = try(string.unpack, "<i4", "ab")
+assert(not ok6, "unpack short data")
+local ok7, _ = try(string.packsize, "z")
+assert(not ok7, "packsize variable length")
+
+-- type checking
+local okA, errA = try(string.upper, 5)
+assert(not okA and errA == "s must be a string", "upper rejects numbers")
+local okB, errB = try(string.rep, "a", "x")
+assert(not okB and errB == "n must be a number", "rep rejects string count")
+local okC, errC = try(string.find, "a", nil)
+assert(not okC and errC == "pattern must be provided", "find requires pattern")
+local okD, errD = try(string.gsub, "a", "a", 5)
+assert(not okD and errD == "replacement must be a string, table or function", "gsub rejects number replacement")
+local okE, errE = try(string.find, "a", "a", 1, 1)
+assert(not okE and errE == "plain must be a boolean", "find plain must be boolean")
+local okF, _ = try(string.sub, "abc", "1")
+assert(not okF, "sub rejects string index")
+local okG, _ = try(string.match, "abc", "(")
+assert(not okG, "malformed pattern errors")
+local okH, _ = try(string.char, 300)
+assert(not okH, "char rejects out of range")
+
+print("[pass] string functions")

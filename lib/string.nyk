@@ -1,0 +1,251 @@
+local table = require("@neyuki/table")
+
+local string = {}
+
+function checkString(s: string, name: string)
+    if (s == nil) then error(name .. " must be provided") end
+    if (type(s) != "string") then error(name .. " must be a string") end
+end
+
+function checkNumber(n: number, name: string)
+    if (n == nil) then error(name .. " must be provided") end
+    if (type(n) != "number") then error(name .. " must be a number") end
+end
+
+function checkOptionalNumber(n: number?, name: string)
+    if (n != nil) then checkNumber(n, name) end
+end
+
+function checkOptionalString(s: string?, name: string)
+    if (s != nil) then checkString(s, name) end
+end
+
+function checkPattern(pattern: string)
+    checkString(pattern, "pattern")
+end
+
+function string.byte(s: string, i: number?, j: number?): ...number
+    checkString(s, "s")
+    checkOptionalNumber(i, "i")
+    checkOptionalNumber(j, "j")
+    return __string_byte(s, i, j)
+end
+
+function string.char(...: number): string
+    local codes = {...}
+    for index, code in codes do
+        checkNumber(code, "byte " .. tostring(index))
+    end
+    return __string_char(...)
+end
+
+function string.count(s: string): number
+    checkString(s, "s")
+    return __string_count(s)
+end
+
+function string.len(s: string): number
+    checkString(s, "s")
+    return #s
+end
+
+function string.sub(s: string, i: number, j: number?): string
+    checkString(s, "s")
+    checkOptionalNumber(i, "i")
+    checkOptionalNumber(j, "j")
+    return __string_sub(s, i, j)
+end
+
+function string.lower(s: string): string
+    checkString(s, "s")
+    return __string_lower(s)
+end
+
+function string.upper(s: string): string
+    checkString(s, "s")
+    return __string_upper(s)
+end
+
+function string.reverse(s: string): string
+    checkString(s, "s")
+    return __string_reverse(s)
+end
+
+function string.rep(s: string, n: number, sep: string?): string
+    checkString(s, "s")
+    checkNumber(n, "n")
+    checkOptionalString(sep, "sep")
+    return __string_rep(s, n, sep)
+end
+
+function string.split(s: string, separator: string?): {string}
+    checkString(s, "s")
+    checkOptionalString(separator, "separator")
+    return __string_split(s, separator)
+end
+
+function string.format(formatstring: string, ...: any): string
+    checkString(formatstring, "formatstring")
+    return __string_format(formatstring, ...)
+end
+
+function string.find(s: string, pattern: string, init: number?, plain: boolean?): (number?, number?, ...any)
+    checkString(s, "s")
+    checkPattern(pattern)
+    checkOptionalNumber(init, "init")
+    if (plain != nil and type(plain) != "boolean") then error("plain must be a boolean") end
+    return __string_find(s, pattern, init, plain)
+end
+
+function string.match(s: string, pattern: string, init: number?): ...any
+    checkString(s, "s")
+    checkPattern(pattern)
+    checkOptionalNumber(init, "init")
+    return __string_match(s, pattern, init)
+end
+
+function capturesOf(s: string, found: {any}): {any}
+    local captures = {}
+    if (#found > 2) then
+        for index = 3, #found do
+            table.insert(captures, found[index])
+        end
+    else
+        table.insert(captures, string.sub(s, found[1], found[2]))
+    end
+    return captures
+end
+
+function isAnchored(pattern: string): boolean
+    return string.sub(pattern, 1, 1) == "^"
+end
+
+function string.gmatch(s: string, pattern: string): () -> ...any
+    checkString(s, "s")
+    checkPattern(pattern)
+    local anchored = isAnchored(pattern)
+    local position = 1
+    local finished = false
+
+    return function(): ...any
+        if (finished) then return nil end
+        local found = {__string_find(s, pattern, position, false)}
+        if (found[1] == nil) then
+            finished = true
+            return nil
+        end
+        local start, stop = found[1], found[2]
+        if (stop >= start) then
+            position = stop + 1
+        else
+            position = start + 1
+        end
+        if (anchored) then finished = true end
+        return table.unpack(capturesOf(s, found))
+    end
+end
+
+function expandReplacement(replacement: string, whole: string, captures: {any}): string
+    local result = ""
+    local index = 1
+    local length = #replacement
+    while (index <= length) do
+        local character = string.sub(replacement, index, index)
+        if (character == "%") then
+            index++
+            local directive = string.sub(replacement, index, index)
+            if (directive == "%") then
+                result = result .. "%"
+            elseif (directive == "0") then
+                result = result .. whole
+            elseif (directive >= "1" and directive <= "9") then
+                local capture = captures[__string_byte(directive) - 48]
+                if (capture == nil) then
+                    error("invalid capture index %" .. directive .. " in replacement string")
+                end
+                result = result .. tostring(capture)
+            else
+                error("invalid use of '%' in replacement string")
+            end
+        else
+            result = result .. character
+        end
+        index++
+    end
+    return result
+end
+
+function string.gsub(s: string, pattern: string, replacement: string | {any} | (...any) -> any, replacements: number?): (string, number)
+    checkString(s, "s")
+    checkPattern(pattern)
+    if (replacement == nil) then error("replacement must be provided") end
+    local replacementType = type(replacement)
+    if (replacementType != "string" and replacementType != "table" and replacementType != "function") then
+        error("replacement must be a string, table or function")
+    end
+    checkOptionalNumber(replacements, "replacements")
+
+    local anchored = isAnchored(pattern)
+    local result = ""
+    local position = 1
+    local count = 0
+    local length = #s
+
+    while (replacements == nil or count < replacements) do
+        local found = {__string_find(s, pattern, position, false)}
+        if (found[1] == nil) then break end
+        local start, stop = found[1], found[2]
+        local whole = string.sub(s, start, stop)
+        local captures = capturesOf(s, found)
+
+        local value = nil
+        if (replacementType == "string") then
+            value = expandReplacement(replacement, whole, captures)
+        elseif (replacementType == "table") then
+            value = replacement[captures[1]]
+        else
+            value = replacement(table.unpack(captures))
+        end
+
+        if (value == nil or value == false) then
+            value = whole
+        elseif (type(value) == "number") then
+            value = tostring(value)
+        elseif (type(value) != "string") then
+            error("invalid replacement value (a " .. type(value) .. ")")
+        end
+
+        result = result .. string.sub(s, position, start - 1) .. value
+        count++
+
+        if (stop >= start) then
+            position = stop + 1
+        else
+            result = result .. string.sub(s, start, start)
+            position = start + 1
+        end
+        if (anchored or position > length + 1) then break end
+    end
+
+    result = result .. string.sub(s, position)
+    return result, count
+end
+
+function string.pack(format: string, ...: any): string
+    checkString(format, "format")
+    return __string_pack(format, ...)
+end
+
+function string.packsize(format: string): number
+    checkString(format, "format")
+    return __string_packsize(format)
+end
+
+function string.unpack(format: string, data: string, readStart: number?): ...any
+    checkString(format, "format")
+    checkString(data, "data")
+    checkOptionalNumber(readStart, "readStart")
+    return __string_unpack(format, data, readStart)
+end
+
+return table.freeze(string)

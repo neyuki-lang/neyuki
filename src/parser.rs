@@ -3,6 +3,8 @@ use crate::lexer::{Lexer, Token};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Expr {
     Literal(String),
+    Str(String),
+    Interp(String),
     Variable(String),
     Vararg,
     Member {
@@ -94,7 +96,7 @@ pub enum Stmt {
         body: Vec<Stmt>,
         condition: Expr,
     },
-    Return(Option<Expr>),
+    Return(Vec<Expr>),
     Break,
     Continue,
     Expr(Expr),
@@ -172,9 +174,13 @@ impl Parser {
                 && !self.check_keyword("elseif")
                 && !self.check_keyword("until")
             {
-                Some(self.parse_expr())
+                let mut values = vec![self.parse_expr()];
+                while self.match_symbol(",") {
+                    values.push(self.parse_expr());
+                }
+                values
             } else {
-                None
+                Vec::new()
             };
             return Stmt::Return(expr);
         }
@@ -502,6 +508,9 @@ impl Parser {
             self.expect_keyword("function");
             self.expect_symbol("(");
             let params = self.parse_param_list();
+            if self.match_symbol(":") {
+                self.read_type_annotation();
+            }
             let body = self.parse_block_until("end");
             self.expect_keyword("end");
             return Expr::Function { params, body };
@@ -611,7 +620,15 @@ impl Parser {
                 }
                 expr
             }
-            "string" | "number" | "interp" => {
+            "string" => {
+                self.pos += 1;
+                Expr::Str(token.value)
+            }
+            "interp" => {
+                self.pos += 1;
+                Expr::Interp(token.value)
+            }
+            "number" => {
                 self.pos += 1;
                 Expr::Literal(token.value)
             }
@@ -656,11 +673,22 @@ impl Parser {
         let mut braces = 0usize;
         let mut brackets = 0usize;
         let mut parens = 0usize;
+        let mut last_line = None;
         while !self.is_eof() {
             let token = self.peek().clone();
             if token.kind == "eof" {
                 break;
             }
+            // An annotation ends at a line break unless a bracket is still open,
+            // so the statement on the next line is not swallowed into the type.
+            if braces == 0
+                && brackets == 0
+                && parens == 0
+                && last_line.is_some_and(|line| line != token.line)
+            {
+                break;
+            }
+            last_line = Some(token.line);
             if token.kind == "symbol" {
                 if braces == 0
                     && brackets == 0
@@ -829,7 +857,7 @@ mod tests {
                     name: "msg".to_string(),
                     is_const: false,
                     type_name: None,
-                    initializer: Some(Expr::Literal("hello".to_string())),
+                    initializer: Some(Expr::Str("hello".to_string())),
                 },
                 Stmt::Expr(Expr::Call {
                     callee: Box::new(Expr::Variable("print".to_string())),
@@ -916,7 +944,7 @@ mod tests {
                     },
                 ],
                 return_type: Some("number".to_string()),
-                body: vec![Stmt::Return(Some(Expr::Literal("1".to_string())))],
+                body: vec![Stmt::Return(vec![Expr::Literal("1".to_string())])],
             }
         );
     }

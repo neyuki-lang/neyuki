@@ -6,6 +6,7 @@ mod lexer;
 mod lint;
 mod parser;
 mod runtime;
+mod string_lib;
 mod tests;
 
 fn main() {

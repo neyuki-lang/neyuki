@@ -17,11 +17,20 @@ cargo run -- test
 
 The base runtime provides `print`, `tostring`, `type`, `typeof`, `assert`, `int`, `float`, `try`, and `require`. `type` groups integers and floats as `number`; `typeof` reports `bigint` for arbitrary-precision integers and `float` for floating-point values.
 
-`try(function, ...)` returns a leading boolean followed by the function result or an error message. The bundled `@neyuki/math` and `@neyuki/table` modules can be loaded with `require`.
+`try(function, ...)` returns a leading boolean followed by the function result or an error message. The bundled `@neyuki/math`, `@neyuki/string` and `@neyuki/table` modules can be loaded with `require`.
 
 ```lua
 local math = require("@neyuki/math")
 print(math.max(2, 7, 4))
+```
+
+`@neyuki/string` follows Lua's string library: `byte`, `char`, `count` (codepoints; `#s` counts bytes), `find`, `format`, `gmatch`, `gsub`, `len`, `lower`, `match`, `pack`, `packsize`, `rep`, `reverse`, `split`, `sub`, `unpack` and `upper`. Indices are byte positions and patterns use Lua pattern syntax. `pack` returns one character per byte (codes 0-255) so binary data fits in a string; `unpack` expects the same encoding.
+
+```lua
+local string = require("@neyuki/string")
+for key, value in string.gmatch("a=1, b=2", "(%w+)=(%w+)") do
+    print(string.format("%s -> %d", key, value))
+end
 ```
 
 ## Current boundaries
