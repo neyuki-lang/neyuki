@@ -2,6 +2,20 @@ local table = require("@neyuki/table")
 
 local math = {}
 
+const math.e = (function()
+    local e = 0
+    local factorial = 1
+
+    for n = 0, 50 do
+        if n > 0 then
+            factorial = factorial * n
+        end
+        e = e + (1 / factorial)
+    end
+
+    return e
+end)()
+
 const function math.random(min: number, max: number): number
     if (min == nil) or (max == nil) then
         error("Both min and max must be provided")
@@ -63,7 +77,7 @@ const function math.exp(n: number): number -- exponent e^n
         error("n must be a number")
     end
 
-    return __exp(n)
+    return math.e ^ n
 end
 
 const function math.abs(n: number): number
