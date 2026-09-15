@@ -1003,7 +1003,7 @@ fn builtin_random_bigint(args: Vec<Value>) -> Result<Vec<Value>, String> {
 
     let range = &max - &min;
     let bit_count = range.bits();
-    let byte_count = ((bit_count + 7) / 8) as usize;
+    let byte_count = bit_count.div_ceil(8) as usize;
     let excess_bits = (byte_count as u64 * 8).saturating_sub(bit_count);
     let mut bytes = vec![0; byte_count];
     let mut rng = rand::thread_rng();
