@@ -1,0 +1,73 @@
+-- Tables and functions compare by identity.
+local t = {}
+local u = {}
+assert(t == t, "a table should equal itself")
+assert(t != u, "distinct tables should not be equal")
+local f = function() end
+assert(f == f, "a function should equal itself")
+assert(f != function() end, "distinct functions should not be equal")
+assert(print == print, "a native function should equal itself")
+
+-- Multiple assignment evaluates the right side before assigning.
+local a, b = 1, 2
+a, b = b, a
+assert(a == 2 and b == 1, "swap should exchange values")
+
+local function triple() return 10, 20, 30 end
+local x, y, z, w = 0, 0, 0, "keep"
+x, y, z = triple()
+assert(x == 10 and y == 20 and z == 30, "call results should spread across targets")
+assert(w == "keep", "untouched targets should keep their values")
+
+local obj = { n = 1 }
+obj.n, obj.m = 5, 6
+assert(obj.n == 5 and obj.m == 6, "member targets should be assignable together")
+
+local short, missing = 0, 0
+short, missing = 1
+assert(short == 1 and missing == nil, "missing values should become nil")
+
+-- Compound assignment.
+local n = 10
+n += 5
+assert(n == 15, "+=")
+n -= 3
+assert(n == 12, "-=")
+n *= 2
+assert(n == 24, "*=")
+n /= 4
+assert(n == 6, "/=")
+n //= 4
+assert(n == 1, "//=")
+n = 7
+n %= 4
+assert(n == 3, "%=")
+n ^= 2
+assert(n == 9, "^=")
+n = 1
+n <<= 4
+assert(n == 16, "<<=")
+n >>= 2
+assert(n == 4, ">>=")
+n |= 3
+assert(n == 7, "|=")
+n &= 5
+assert(n == 5, "&=")
+
+local s = "a"
+s ..= "b"
+assert(s == "ab", "..=")
+
+local maybe = nil
+maybe ??= "default"
+assert(maybe == "default", "??= should fill nil")
+maybe ??= "other"
+assert(maybe == "default", "??= should keep non-nil")
+
+obj.n += 1
+assert(obj.n == 6, "+= on a member")
+local arr = {1, 2}
+arr[1] += 10
+assert(arr[1] == 11, "+= on an index")
+
+print("assignment ok")

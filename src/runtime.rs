@@ -172,6 +172,7 @@ impl Runtime {
         for (name, call) in crate::string_lib::NATIVES
             .iter()
             .chain(crate::fs_lib::NATIVES)
+            .chain(crate::io_lib::NATIVES)
         {
             env.borrow_mut()
                 .values
@@ -249,6 +250,19 @@ impl Runtime {
                 self.assign(target, value, env.clone())?;
                 if *is_const {
                     self.protect_member(target, env)?;
+                }
+            }
+            Stmt::AssignMany { targets, values } => {
+                let mut evaluated = Vec::new();
+                for expr in values {
+                    match self.eval(expr, env.clone())? {
+                        Value::Varargs(varargs) => evaluated.extend(varargs),
+                        value => evaluated.push(value),
+                    }
+                }
+                for (index, target) in targets.iter().enumerate() {
+                    let value = evaluated.get(index).cloned().unwrap_or(Value::Nil);
+                    self.assign(target, value, env.clone())?;
                 }
             }
             Stmt::Increment { target, amount } => {
@@ -957,6 +971,9 @@ fn equal(left: &Value, right: &Value) -> bool {
             a.to_f64().is_some_and(|a| a == *b)
         }
         (Value::Number(a), Value::Number(b)) => a == b,
+        // Tables and functions are reference types: equal only to themselves.
+        (Value::Table(a), Value::Table(b)) => Rc::ptr_eq(a, b),
+        (Value::Function(a), Value::Function(b)) => Rc::ptr_eq(a, b),
         _ => false,
     }
 }

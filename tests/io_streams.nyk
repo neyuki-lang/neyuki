@@ -1,0 +1,43 @@
+local io = require("@neyuki/io")
+local table = require("@neyuki/table")
+
+assert(table.isfrozen(io), "io module should be frozen")
+assert(type(io.read) == "function", "io.read should be a function")
+assert(type(io.lines) == "function", "io.lines should be a function")
+assert(type(io.write) == "function", "io.write should be a function")
+assert(type(io.prompt) == "function", "io.prompt should be a function")
+
+for _, name in {"stdin", "stdout", "stderr"} do
+    local stream = io[name]
+    assert(type(stream) == "table", name .. " should be a stream")
+    assert(stream.name == name, name .. " should carry its name")
+    assert(type(stream:isTerminal()) == "boolean", name .. ":isTerminal should return a boolean")
+end
+
+assert(type(io.stdin.read) == "function", "stdin should be readable")
+assert(io.stdin.write == nil, "stdin should not be writable")
+assert(io.stdout.read == nil, "stdout should not be readable")
+
+-- Writing never appends separators or newlines and returns the stream for chaining.
+local returned = io.write("io test: ", 1, " ", 2.5, "\n")
+assert(returned == io.stdout, "io.write should return stdout")
+io.stderr:write("io test: stderr\n"):flush()
+io.flush()
+
+local ok, err = try(io.write, {})
+assert(not ok, "io.write should reject tables")
+assert(err != nil, "io.write should explain why it failed")
+
+local badFormat = try(io.read, "x")
+assert(not badFormat, "io.read should reject unknown formats")
+
+local badCount = try(io.read, -1)
+assert(not badCount, "io.read should reject negative counts")
+
+local badLines = try(io.lines, true)
+assert(not badLines, "io.lines should reject non-string formats")
+
+local badPrompt = try(io.prompt, 42)
+assert(not badPrompt, "io.prompt should reject non-string prompts")
+
+print("io streams ok")

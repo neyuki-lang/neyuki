@@ -1,0 +1,132 @@
+local table = require("@neyuki/table")
+
+local io = {}
+
+function checkOptionalString(s: string?, name: string)
+    if (s != nil and type(s) != "string") then error(name .. " must be a string") end
+end
+
+function checkFormat(format: string | number | nil): string | number
+    format = format ?? "l"
+    if (type(format) == "number") then
+        if (format < 0) then error("format must be a non-negative number of characters") end
+        return format
+    end
+    if (type(format) != "string") then error("format must be a string or a number") end
+    if (format == "l" or format == "L" or format == "a" or format == "n") then return format end
+    error("invalid read format `" .. format .. "` (expected l, L, a, n or a number)")
+end
+
+-- Reads one value from stdin according to `format` (already validated).
+function readOne(format: string | number): string | number | nil
+    if (type(format) == "number") then return __io_read_chars(format) end
+    if (format == "l") then return __io_read_line(false) end
+    if (format == "L") then return __io_read_line(true) end
+    if (format == "a") then return __io_read_all() end
+    return __io_read_number()
+end
+
+function joinValues(values: {any}): string
+    local parts = {}
+    for index, value in values do
+        if (type(value) != "string" and type(value) != "number") then
+            error("argument " .. tostring(index) .. " must be a string or a number, got " .. type(value))
+        end
+        parts[index] = tostring(value)
+    end
+    return table.concat(parts)
+end
+
+function makeReader(): () -> ...any
+    return function(...: string | number): ...any
+        local formats = {...}
+        if (#formats == 0) then return readOne("l") end
+        local results = {}
+        for index, format in formats do
+            local value = readOne(checkFormat(format))
+            results[index] = value
+            -- Once input runs out, the remaining formats cannot be satisfied.
+            if (value == nil) then break end
+        end
+        return table.unpack(results)
+    end
+end
+
+function makeLines(): (string | number | nil) -> () -> string | number | nil
+    return function(format: string | number | nil): () -> string | number | nil
+        local resolved = checkFormat(format)
+        return function(): string | number | nil
+            return readOne(resolved)
+        end
+    end
+end
+
+function makeWriter(stream: string): (...any) -> Stream
+    return function(...: any): Stream
+        __io_write(stream, joinValues({...}))
+        return io[stream]
+    end
+end
+
+function makeStream(name: string): Stream
+    local stream = {}
+    stream.name = name
+
+    function stream.isTerminal(self: Stream): boolean
+        return __io_isatty(name)
+    end
+
+    if (name == "stdin") then
+        local read = makeReader()
+        local lines = makeLines()
+        function stream.read(self: Stream, ...: string | number): ...any
+            return read(...)
+        end
+        function stream.lines(self: Stream, format: string | number | nil): () -> string | number | nil
+            return lines(format)
+        end
+    else
+        local write = makeWriter(name)
+        function stream.write(self: Stream, ...: any): Stream
+            return write(...)
+        end
+        function stream.flush(self: Stream): ()
+            __io_flush(name)
+        end
+    end
+
+    return table.freeze(stream)
+end
+
+io.stdin = makeStream("stdin")
+io.stdout = makeStream("stdout")
+io.stderr = makeStream("stderr")
+
+-- Reads from stdin. Each format is one of:
+--   "l"      a line without its trailing newline (the default)
+--   "L"      a line including its trailing newline
+--   "a"      everything remaining on stdin
+--   "n"      a whitespace-delimited number
+--   number   that many characters
+-- Returns nil for a format once input is exhausted.
+io.read = makeReader()
+
+-- Returns an iterator that reads stdin with `format` until input runs out.
+io.lines = makeLines()
+
+-- Writes every argument to stdout without separators or a trailing newline.
+io.write = makeWriter("stdout")
+
+function io.flush(): ()
+    __io_flush("stdout")
+end
+
+-- Prints `text` (if any), flushes stdout and reads one value from stdin.
+function io.prompt(text: string?, format: string | number | nil): string | number | nil
+    checkOptionalString(text, "text")
+    if (text != nil) then __io_write("stdout", text) end
+    __io_flush("stdout")
+    return readOne(checkFormat(format))
+end
+
+return table.freeze(io)

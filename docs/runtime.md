@@ -17,7 +17,7 @@ cargo run -- test
 
 The base runtime provides `print`, `tostring`, `type`, `typeof`, `assert`, `int`, `float`, `try`, and `require`. `type` groups integers and floats as `number`; `typeof` reports `bigint` for arbitrary-precision integers and `float` for floating-point values.
 
-`try(function, ...)` returns a leading boolean followed by the function result or an error message. The bundled `@neyuki/fs`, `@neyuki/math`, `@neyuki/string` and `@neyuki/table` modules can be loaded with `require`.
+`try(function, ...)` returns a leading boolean followed by the function result or an error message. The bundled `@neyuki/fs`, `@neyuki/io`, `@neyuki/math`, `@neyuki/string` and `@neyuki/table` modules can be loaded with `require`.
 
 ```lua
 local math = require("@neyuki/math")
@@ -45,6 +45,21 @@ file:close()
 for line in fs.open("notes.txt"):lines() do
     print(line)
 end
+```
+
+`@neyuki/io` talks to the terminal. `read(...formats)` reads from stdin, one value per format: `"l"` (a line without its newline, the default), `"L"` (a line with its newline), `"a"` (everything remaining), `"n"` (a whitespace-delimited number) or a count of characters; every format yields `nil` once input is exhausted. `lines(format?)` returns an iterator that reads with `format` until input runs out, `write(...)` prints strings and numbers to stdout with no separators or trailing newline (and returns the stream so calls chain), `flush()` flushes stdout and `prompt(text?, format?)` writes `text`, flushes and reads one value. The streams `io.stdin`, `io.stdout` and `io.stderr` expose the same operations as methods (`stdin:read`, `stdin:lines`, `stdout:write`, `stderr:flush`, ...) plus `isTerminal()`, which reports whether the stream is attached to a terminal rather than a pipe or file.
+
+```lua
+local io = require("@neyuki/io")
+local name = io.prompt("What is your name? ")
+io.write("Hello, ", name, "!
+")
+local total = 0
+for value in io.lines("n") do
+    total += value
+end
+io.stderr:write("sum: ", total, "
+")
 ```
 
 ## Current boundaries

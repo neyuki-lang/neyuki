@@ -64,6 +64,10 @@ pub enum Stmt {
         value: Expr,
         is_const: bool,
     },
+    AssignMany {
+        targets: Vec<Expr>,
+        values: Vec<Expr>,
+    },
     Increment {
         target: Expr,
         amount: i8,
@@ -216,6 +220,30 @@ impl Parser {
             return Stmt::Assign {
                 target: expr,
                 value,
+                is_const: false,
+            };
+        }
+        if self.check_symbol(",") {
+            let mut targets = vec![expr];
+            while self.match_symbol(",") {
+                targets.push(self.parse_expr());
+            }
+            self.expect_symbol("=");
+            let mut values = vec![self.parse_expr()];
+            while self.match_symbol(",") {
+                values.push(self.parse_expr());
+            }
+            return Stmt::AssignMany { targets, values };
+        }
+        if let Some(op) = self.match_compound_assignment() {
+            let right = self.parse_expr();
+            return Stmt::Assign {
+                target: expr.clone(),
+                value: Expr::Binary {
+                    left: Box::new(expr),
+                    op,
+                    right: Box::new(right),
+                },
                 is_const: false,
             };
         }
@@ -784,6 +812,21 @@ impl Parser {
         args
     }
 
+    /// Consumes an `op=` token and returns the binary operator it applies, so
+    /// `a op= b` can be desugared to `a = a op b`.
+    fn match_compound_assignment(&mut self) -> Option<String> {
+        const OPERATORS: [&str; 13] = [
+            "+=", "-=", "*=", "/=", "//=", "%=", "^=", "..=", "<<=", ">>=", "&=", "|=", "??=",
+        ];
+        let token = self.peek();
+        if token.kind != "symbol" || !OPERATORS.contains(&token.value.as_str()) {
+            return None;
+        }
+        let op = token.value[..token.value.len() - 1].to_string();
+        self.pos += 1;
+        Some(op)
+    }
+
     fn match_symbol(&mut self, value: &str) -> bool {
         if self.peek().kind == "symbol" && self.peek().value == value {
             self.pos += 1;
@@ -942,6 +985,39 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn parses_compound_and_multiple_assignment() {
+        let mut parser = Parser::new("n += 2
+a, b = b, a");
+        let program = parser.parse_program();
+
+        assert_eq!(
+            program[0],
+            Stmt::Assign {
+                target: Expr::Variable("n".to_string()),
+                value: Expr::Binary {
+                    left: Box::new(Expr::Variable("n".to_string())),
+                    op: "+".to_string(),
+                    right: Box::new(Expr::Literal("2".to_string())),
+                },
+                is_const: false,
+            }
+        );
+        assert_eq!(
+            program[1],
+            Stmt::AssignMany {
+                targets: vec![
+                    Expr::Variable("a".to_string()),
+                    Expr::Variable("b".to_string())
+                ],
+                values: vec![
+                    Expr::Variable("b".to_string()),
+                    Expr::Variable("a".to_string())
+                ],
+            }
+        );
     }
 
     #[test]

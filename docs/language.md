@@ -71,7 +71,7 @@ print(file:read())
 
 ## Operators
 
-Arithmetic operators are `+`, `-`, `*`, `/`, `//`, `%`, and `^`. Comparisons are `==`, `!=`, `<`, `<=`, `>`, and `>=`. Boolean operators are `and`, `or`, and `not`; `??` selects its right side only when the left side is `nil`. `..` concatenates strings and `#` returns string or array length.
+Arithmetic operators are `+`, `-`, `*`, `/`, `//`, `%`, and `^`. Comparisons are `==`, `!=`, `<`, `<=`, `>`, and `>=`; tables and functions compare by identity, so a table is equal only to itself. Boolean operators are `and`, `or`, and `not`; `??` selects its right side only when the left side is `nil`. `..` concatenates strings and `#` returns string or array length.
 
 Bitwise operators include `&`, `|`, `~`, `<<`, and `>>`.
 
@@ -83,6 +83,14 @@ values[1]--
 ```
 
 They add or subtract one and do not produce an expression value. `--` at the start of a line or after whitespace remains a line comment.
+
+Compound assignment rewrites `target op= value` as `target = target op value` for `+=`, `-=`, `*=`, `/=`, `//=`, `%=`, `^=`, `..=`, `<<=`, `>>=`, `&=`, `|=` and `??=`. Several targets can be assigned at once; the right-hand side is evaluated before any target changes, and a call's extra results spread across the remaining targets:
+
+```lua
+total += price
+a, b = b, a
+x, y, z = pair()
+```
 
 ## Control flow
 

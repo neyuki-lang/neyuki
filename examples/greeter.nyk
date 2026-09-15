@@ -1,0 +1,12 @@
+local io = require("@neyuki/io")
+
+local name = io.prompt("What is your name? ")
+if (name == nil or name == "") then name = "stranger" end
+io.write("Hello, ", name, "!\n")
+
+local age = io.prompt("How old are you? ", "n")
+if (age == nil) then
+    io.stderr:write("that was not a number\n")
+else
+    io.write("In ten years you will be ", age + 10, ".\n")
+end
