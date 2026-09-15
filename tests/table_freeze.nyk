@@ -1,0 +1,9 @@
+local table = require("@neyuki/table")
+
+local values = {"first", answer = 42}
+assert(not table.isfrozen(values), "new tables should not be frozen")
+table.freeze(values)
+
+assert(table.isfrozen(values), "table.freeze should freeze the table")
+
+print("[pass] table.freeze")

@@ -2,7 +2,7 @@ local table = require("@neyuki/table")
 
 local math = {}
 
-const math.e = (function()
+math.e = (function()
     local e = 0
     local factorial = 1
 
@@ -15,8 +15,9 @@ const math.e = (function()
 
     return e
 end)()
+math.huge = 1 / 0
 
-const function math.random(min: number, max: number): number
+function math.random(min: number, max: number): number
     if (min == nil) or (max == nil) then
         error("Both min and max must be provided")
     end
@@ -30,7 +31,7 @@ const function math.random(min: number, max: number): number
     return __random_int(min, max)
 end
 
-const function getNumberTable(...: number|{}): {number}
+function getNumberTable(...: number|{}): {number}
     local t = {}
     local function handle(obj: number|{})
         if type(obj) == "number" then
@@ -47,7 +48,7 @@ const function getNumberTable(...: number|{}): {number}
     return t
 end
 
-const function math.max(n1: number, n2: number, ...: number): number
+function math.max(n1: number, n2: number, ...: number): number
     local t = getNumberTable(n1, n2, {...})
     local max = t[1]
     for _, n in t do
@@ -58,7 +59,7 @@ const function math.max(n1: number, n2: number, ...: number): number
     return max
 end
 
-const function math.min(n1: number, n2: number, ...: number): number
+function math.min(n1: number, n2: number, ...: number): number
     local t = getNumberTable(n1, n2, {...})
     local min = t[1]
     for _, n in t do
@@ -69,7 +70,7 @@ const function math.min(n1: number, n2: number, ...: number): number
     return min
 end
 
-const function math.exp(n: number): number -- exponent e^n
+function math.exp(n: number): number -- exponent e^n
     if (n == nil) then
         error("n must be provided")
     end
@@ -80,7 +81,7 @@ const function math.exp(n: number): number -- exponent e^n
     return math.e ^ n
 end
 
-const function math.abs(n: number): number
+function math.abs(n: number): number
     if (n < 0) then
         return -n
     else
@@ -88,7 +89,7 @@ const function math.abs(n: number): number
     end
 end
 
-const function math.clamp(n: number, min: number, max: number): number
+function math.clamp(n: number, min: number, max: number): number
     if (min > max) then
         error("min must be less than or equal to max")
     end
@@ -101,7 +102,7 @@ const function math.clamp(n: number, min: number, max: number): number
     end
 end
 
-const function math.floor(n: number): int
+function math.floor(n: number): int
     if (n == nil) then
         error("n must be provided")
     end
@@ -112,4 +113,4 @@ const function math.floor(n: number): int
     return __floor(n)
 end
 
-return math
+return table.freeze(math)

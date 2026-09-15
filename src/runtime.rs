@@ -32,6 +32,7 @@ struct Table {
     pub array: Vec<Value>,
     pub fields: HashMap<String, Value>,
     pub const_fields: HashSet<String>,
+    pub frozen: bool,
 }
 
 enum Function {
@@ -131,6 +132,14 @@ impl Runtime {
             (
                 "__table_unpack",
                 native("__table_unpack", builtin_table_unpack),
+            ),
+            (
+                "__table_freeze",
+                native("__table_freeze", builtin_table_freeze),
+            ),
+            (
+                "__table_isfrozen",
+                native("__table_isfrozen", builtin_table_isfrozen),
             ),
             ("try", native("try", builtin_try)),
             ("require", native("require", builtin_require)),
@@ -404,6 +413,7 @@ impl Runtime {
                     array: Vec::new(),
                     fields: HashMap::new(),
                     const_fields: HashSet::new(),
+                    frozen: false,
                 };
                 for entry in entries {
                     if matches!(entry.value, Expr::Vararg) {
@@ -490,6 +500,7 @@ impl Runtime {
                                 array: args[arg_index..].to_vec(),
                                 fields: HashMap::new(),
                                 const_fields: HashSet::new(),
+                                frozen: false,
                             };
                             call_env.borrow_mut().values.insert(
                                 "__varargs".to_string(),
@@ -712,6 +723,9 @@ impl Runtime {
         match object {
             Value::Table(table) => {
                 let mut table = table.borrow_mut();
+                if table.frozen {
+                    return Err("assignment to frozen table".to_string());
+                }
                 match index {
                     Value::String(key) => {
                         if table.const_fields.contains(&key) {
@@ -994,6 +1008,22 @@ fn builtin_random_bigint(args: Vec<Value>) -> Result<Vec<Value>, String> {
     };
 
     Ok(vec![Value::Integer(min + offset)])
+}
+
+fn builtin_table_freeze(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let value = args.first().cloned().unwrap_or(Value::Nil);
+    let Value::Table(table) = &value else {
+        return Err("table.freeze expects a table".to_string());
+    };
+    table.borrow_mut().frozen = true;
+    Ok(vec![value])
+}
+
+fn builtin_table_isfrozen(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let Some(Value::Table(table)) = args.first() else {
+        return Err("table.isfrozen expects a table".to_string());
+    };
+    Ok(vec![Value::Bool(table.borrow().frozen)])
 }
 
 fn builtin_table_unpack(args: Vec<Value>) -> Result<Vec<Value>, String> {
