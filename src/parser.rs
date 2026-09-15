@@ -17,6 +17,10 @@ pub enum Expr {
         callee: Box<Expr>,
         args: Vec<Expr>,
     },
+    Function {
+        params: Vec<Param>,
+        body: Vec<Stmt>,
+    },
     Unary {
         op: String,
         expr: Box<Expr>,
@@ -473,6 +477,15 @@ impl Parser {
     }
 
     fn parse_prefix(&mut self) -> Expr {
+        if self.check_keyword("function") {
+            self.expect_keyword("function");
+            self.expect_symbol("(");
+            let params = self.parse_param_list();
+            let body = self.parse_block_until("end");
+            self.expect_keyword("end");
+            return Expr::Function { params, body };
+        }
+
         if self.check_symbol("(") {
             self.expect_symbol("(");
             let expr = self.parse_expr();
@@ -874,6 +887,21 @@ mod tests {
                 body,
                 ..
             } if var == "i" && body.len() == 1
+        ));
+    }
+
+    #[test]
+    fn parses_anonymous_function_expression() {
+        let mut parser = Parser::new(
+            "table.sort(numbers, function(a, b) return a < b end)",
+        );
+        let program = parser.parse_program();
+
+        assert!(matches!(
+            &program[0],
+            Stmt::Expr(Expr::Call { args, .. })
+                if matches!(args.get(1), Some(Expr::Function { params, body })
+                    if params.len() == 2 && body.len() == 1)
         ));
     }
 }

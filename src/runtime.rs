@@ -459,6 +459,11 @@ impl Runtime {
                         _ => Value::Varargs(values),
                     })
             }
+            Expr::Function { params, body } => Ok(Value::Function(Rc::new(Function::User {
+                params: params.clone(),
+                body: body.clone(),
+                env,
+            }))),
         }
     }
 
