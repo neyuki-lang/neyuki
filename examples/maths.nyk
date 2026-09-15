@@ -4,10 +4,13 @@ local table = require("@neyuki/table")
 local numbers = {}
 
 for i = 1, 10 do
-    numbers[i] = math.random(1, 2^32)
+    table.insert(numbers, math.random(1, 2^32))
 end
 
 print(table.unpack(numbers))
 print("Max:", math.max(table.unpack(numbers)))
 print("Min:", math.min(table.unpack(numbers)))
 print("Abs of first number:", math.abs(numbers[1]))
+
+table.sort(numbers, function(a, b) return a < b end)
+print("Sorted numbers:\n" .. table.concat(numbers, "\n"))
