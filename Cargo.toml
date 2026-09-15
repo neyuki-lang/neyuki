@@ -10,4 +10,7 @@ repository = "https://github.com/neyuki-lang/neyuki"
 homepage = "https://neyuki.cc/"
 
 [dependencies]
+num-bigint = "0.4"
+num-integer = "0.1"
+num-traits = "0.2"
 rand = "0.8"

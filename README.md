@@ -18,7 +18,7 @@ Neyuki aims to feel lightweight and readable without the usual Lua rough edges:
 - variables are introduced with `local`, `const`, or `global`
 - functions are first-class values
 - control flow includes `if`, `elseif`, `else`, `while`, `repeat`, `for`, `break`, and `continue`
-- numbers, strings, and tables are the core runtime values
+- arbitrary-precision integers, floating-point numbers, strings, and tables are the core runtime values
 - module-style loading is supported through `require()` for bundled packages
 
 ## Project layout
@@ -98,6 +98,10 @@ The current compiler/runtime supports a practical subset of a Lua-like language:
 - strings and string interpolation using `{...}` inside quoted literals
 - table literals and indexed access
 - builtins: `print`, `tostring`, `type`, `typeof`, `assert`, `int`, `float`, `try`, and `require`
+
+Integer literals and integer arithmetic use arbitrary precision. `type(value)` reports
+`"number"` for both integer and floating-point values, while `typeof(value)` reports
+`"bigint"` for integers and `"float"` for floating-point values.
 
 ## Builtins
 

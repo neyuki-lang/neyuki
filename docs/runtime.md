@@ -15,7 +15,7 @@ cargo run -- test
 
 ## Builtins
 
-The base runtime provides `print`, `tostring`, `type`, `typeof`, `assert`, `int`, `float`, `try`, and `require`. `type` groups integers and floats as `number`; `typeof` reports the concrete runtime category.
+The base runtime provides `print`, `tostring`, `type`, `typeof`, `assert`, `int`, `float`, `try`, and `require`. `type` groups integers and floats as `number`; `typeof` reports `bigint` for arbitrary-precision integers and `float` for floating-point values.
 
 `try(function, ...)` returns a leading boolean followed by the function result or an error message. The bundled `@neyuki/math` and `@neyuki/table` modules can be loaded with `require`.
 

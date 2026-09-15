@@ -16,4 +16,9 @@ assert(intDiv == 3, "double slash must floor int")
 local shifted = 1 << 65
 assert(typeof(shifted) == "bigint", "large shift should widen")
 
+local hex = 0x1_0000_0000_0000_0000
+local binary = 0b1_0000_0000
+assert(hex == 18446744073709551616, "hex bigint literal should stay exact")
+assert(binary == 256, "binary bigint literal should parse")
+
 print(`[pass] numbers & widening: 2^62 * 8 = {big} ({typeof(big)})`)

@@ -3,6 +3,9 @@ use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
 
+use num_bigint::BigInt;
+use num_integer::Integer as _;
+use num_traits::{FromPrimitive, ToPrimitive, Zero};
 use rand::Rng;
 
 use crate::parser::{Expr, Param, Stmt};
@@ -15,7 +18,7 @@ enum Value {
     Nil,
     Bool(bool),
     Number(f64),
-    Integer(i128),
+    Integer(BigInt),
     String(String),
     Table(Rc<RefCell<Table>>),
     Function(Rc<Function>),
@@ -79,7 +82,7 @@ impl Value {
             Value::Nil => "nil",
             Value::Bool(_) => "boolean",
             Value::Number(_) => "float",
-            Value::Integer(_) => "int",
+            Value::Integer(_) => "bigint",
             Value::String(_) => "string",
             Value::Table(_) => "table",
             Value::Function(_) => "function",
@@ -114,7 +117,10 @@ impl Runtime {
             ("int", native("int", builtin_int)),
             ("float", native("float", builtin_float)),
             ("__random_int", native("__random_int", builtin_random_int)),
-            ("__table_unpack", native("__table_unpack", builtin_table_unpack)),
+            (
+                "__table_unpack",
+                native("__table_unpack", builtin_table_unpack),
+            ),
             ("try", native("try", builtin_try)),
             ("require", native("require", builtin_require)),
         ] {
@@ -174,7 +180,7 @@ impl Runtime {
             }
             Stmt::Increment { target, amount } => {
                 let current = self.eval(target, env.clone())?;
-                let value = self.numeric(current, "+", Value::Integer(*amount as i128))?;
+                let value = self.numeric(current, "+", Value::Integer(BigInt::from(*amount)))?;
                 self.assign(target, value, env)?;
             }
             Stmt::Function {
@@ -266,7 +272,7 @@ impl Runtime {
                                 .array
                                 .iter()
                                 .enumerate()
-                                .map(|(i, v)| vec![Value::Integer((i + 1) as i128), v.clone()])
+                                .map(|(i, v)| vec![Value::Integer(BigInt::from(i + 1)), v.clone()])
                                 .collect()
                         } else if vars.len() > 1 {
                             table
@@ -312,19 +318,15 @@ impl Runtime {
                     return Err("numeric for step cannot be zero".to_string());
                 }
 
-                while (increment > 0.0 && current <= limit)
-                    || (increment < 0.0 && current >= limit)
+                while (increment > 0.0 && current <= limit) || (increment < 0.0 && current >= limit)
                 {
                     let loop_env = child(&env);
                     let loop_value = if current.fract() == 0.0 {
-                        Value::Integer(current as i128)
+                        Value::Integer(BigInt::from_f64(current).unwrap())
                     } else {
                         Value::Number(current)
                     };
-                    loop_env
-                        .borrow_mut()
-                        .values
-                        .insert(var.clone(), loop_value);
+                    loop_env.borrow_mut().values.insert(var.clone(), loop_value);
                     match self.exec_block(body, loop_env)? {
                         Flow::Normal | Flow::Continue => {}
                         Flow::Break => break,
@@ -418,11 +420,12 @@ impl Runtime {
                         }
                     }
                 }
-                self.call(function, values).map(|values| match values.as_slice() {
-                    [] => Value::Nil,
-                    [value] => value.clone(),
-                    _ => Value::Varargs(values),
-                })
+                self.call(function, values)
+                    .map(|values| match values.as_slice() {
+                        [] => Value::Nil,
+                        [value] => value.clone(),
+                        _ => Value::Varargs(values),
+                    })
             }
         }
     }
@@ -563,6 +566,26 @@ impl Runtime {
     }
 
     fn numeric(&self, left: Value, op: &str, right: Value) -> Result<Value, String> {
+        if let (Value::Integer(a), Value::Integer(b)) = (&left, &right) {
+            if (op == "//" || op == "%") && b.is_zero() {
+                return Err("division by zero".to_string());
+            }
+            return match op {
+                "+" => Ok(Value::Integer(a + b)),
+                "-" => Ok(Value::Integer(a - b)),
+                "*" => Ok(Value::Integer(a * b)),
+                "/" => Ok(Value::Number(number(left)? / number(right)?)),
+                "//" => Ok(Value::Integer(a.div_floor(b))),
+                "%" => Ok(Value::Integer(a.mod_floor(b))),
+                "^" if b.sign() != num_bigint::Sign::Minus => {
+                    let exponent = b
+                        .to_u32()
+                        .ok_or_else(|| "integer exponent is too large".to_string())?;
+                    Ok(Value::Integer(a.pow(exponent)))
+                }
+                _ => Ok(Value::Number(number(left)?.powf(number(right)?))),
+            };
+        }
         let a = number(left)?;
         let b = number(right)?;
         if (op == "//" || op == "%") && b == 0.0 {
@@ -580,24 +603,27 @@ impl Runtime {
             "^" => a.powf(b),
             _ => unreachable!(),
         };
-        if result.fract() == 0.0 && result.abs() <= i64::MAX as f64 {
-            Ok(Value::Integer(result as i128))
+        if result.fract() == 0.0 && result.is_finite() {
+            Ok(Value::Integer(BigInt::from_f64(result).ok_or_else(
+                || "integer result is out of range".to_string(),
+            )?))
         } else {
             Ok(Value::Number(result))
         }
     }
     fn number_unary(&self, value: Value, negate: bool) -> Result<Value, String> {
-        let value = number(value)?;
-        Ok(if negate {
-            Value::Integer((-value) as i128)
-        } else {
-            Value::Number(value)
-        })
+        match value {
+            Value::Integer(value) if negate => Ok(Value::Integer(-value)),
+            Value::Integer(value) => Ok(Value::Integer(value)),
+            Value::Number(value) if negate => Ok(Value::Number(-value)),
+            Value::Number(value) => Ok(Value::Number(value)),
+            _ => Err("expected a number".to_string()),
+        }
     }
     fn length(&self, value: Value) -> Result<Value, String> {
         match value {
-            Value::String(value) => Ok(Value::Integer(value.len() as i128)),
-            Value::Table(value) => Ok(Value::Integer(value.borrow().array.len() as i128)),
+            Value::String(value) => Ok(Value::Integer(BigInt::from(value.len()))),
+            Value::Table(value) => Ok(Value::Integer(BigInt::from(value.borrow().array.len()))),
             _ => Err("length expects a string or table".to_string()),
         }
     }
@@ -607,9 +633,14 @@ impl Runtime {
                 let table = table.borrow();
                 match index {
                     Value::String(key) => Ok(table.fields.get(key).cloned().unwrap_or(Value::Nil)),
-                    Value::Integer(index) if *index > 0 => Ok(table
+                    Value::Integer(index) if *index > BigInt::zero() => Ok(table
                         .array
-                        .get(*index as usize - 1)
+                        .get(
+                            index
+                                .to_usize()
+                                .ok_or_else(|| "table index is too large".to_string())?
+                                - 1,
+                        )
                         .cloned()
                         .unwrap_or(Value::Nil)),
                     _ => Err("table index must be a string or positive integer".to_string()),
@@ -646,8 +677,10 @@ impl Runtime {
                         table.fields.insert(key, value);
                         Ok(())
                     }
-                    Value::Integer(index) if index > 0 => {
-                        let index = index as usize;
+                    Value::Integer(index) if index > BigInt::zero() => {
+                        let index = index
+                            .to_usize()
+                            .ok_or_else(|| "table index is too large".to_string())?;
                         while table.array.len() < index {
                             table.array.push(Value::Nil);
                         }
@@ -694,14 +727,34 @@ fn parse_literal(value: &str) -> Result<Value, String> {
         "nil" => Ok(Value::Nil),
         "true" => Ok(Value::Bool(true)),
         "false" => Ok(Value::Bool(false)),
-        _ if value.parse::<i128>().is_ok() => Ok(Value::Integer(value.parse().unwrap())),
-        _ if value.parse::<f64>().is_ok() => Ok(Value::Number(value.parse().unwrap())),
-        _ => Ok(Value::String(value.to_string())),
+        _ => {
+            let normalized = value.replace('_', "");
+            let integer = if let Some(value) = normalized.strip_prefix("0x") {
+                BigInt::parse_bytes(value.as_bytes(), 16)
+            } else if let Some(value) = normalized.strip_prefix("0X") {
+                BigInt::parse_bytes(value.as_bytes(), 16)
+            } else if let Some(value) = normalized.strip_prefix("0b") {
+                BigInt::parse_bytes(value.as_bytes(), 2)
+            } else if let Some(value) = normalized.strip_prefix("0B") {
+                BigInt::parse_bytes(value.as_bytes(), 2)
+            } else {
+                BigInt::parse_bytes(normalized.as_bytes(), 10)
+            };
+            if let Some(value) = integer {
+                Ok(Value::Integer(value))
+            } else if let Ok(value) = normalized.parse::<f64>() {
+                Ok(Value::Number(value))
+            } else {
+                Ok(Value::String(value.to_string()))
+            }
+        }
     }
 }
 fn number(value: Value) -> Result<f64, String> {
     match value {
-        Value::Integer(value) => Ok(value as f64),
+        Value::Integer(value) => value
+            .to_f64()
+            .ok_or_else(|| "integer is too large for floating-point conversion".to_string()),
         Value::Number(value) => Ok(value),
         _ => Err("expected a number".to_string()),
     }
@@ -719,7 +772,7 @@ fn equal(left: &Value, right: &Value) -> bool {
         (Value::String(a), Value::String(b)) => a == b,
         (Value::Integer(a), Value::Integer(b)) => a == b,
         (Value::Integer(a), Value::Number(b)) | (Value::Number(b), Value::Integer(a)) => {
-            *a as f64 == *b
+            a.to_f64().is_some_and(|a| a == *b)
         }
         (Value::Number(a), Value::Number(b)) => a == b,
         _ => false,
@@ -741,14 +794,30 @@ fn compare(left: Value, op: &str, right: Value) -> Result<Value, String> {
     }))
 }
 fn bitwise(left: Value, op: &str, right: Value) -> Result<Value, String> {
-    let a = number(left)? as i128;
-    let b = number(right)? as i128;
+    let a = match left {
+        Value::Integer(value) => value,
+        value => BigInt::from_f64(number(value)?.trunc())
+            .ok_or_else(|| "expected an integer".to_string())?,
+    };
+    let b = match right {
+        Value::Integer(value) => value,
+        value => BigInt::from_f64(number(value)?.trunc())
+            .ok_or_else(|| "expected an integer".to_string())?,
+    };
     Ok(Value::Integer(match op {
         "&" => a & b,
         "|" => a | b,
         "~" => a ^ b,
-        "<<" => a << b,
-        ">>" => a >> b,
+        "<<" => {
+            a << b
+                .to_usize()
+                .ok_or_else(|| "shift is too large".to_string())?
+        }
+        ">>" => {
+            a >> b
+                .to_usize()
+                .ok_or_else(|| "shift is too large".to_string())?
+        }
         _ => return Err("unsupported bitwise operator".to_string()),
     }))
 }
@@ -797,9 +866,14 @@ fn builtin_error(args: Vec<Value>) -> Result<Vec<Value>, String> {
         .unwrap_or_else(|| "error".to_string()))
 }
 fn builtin_int(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    Ok(vec![Value::Integer(
-        number(args.first().cloned().unwrap_or(Value::Nil))? as i128,
-    )])
+    let value = args.first().cloned().unwrap_or(Value::Nil);
+    Ok(vec![match value {
+        Value::Integer(value) => Value::Integer(value),
+        value => Value::Integer(
+            BigInt::from_f64(number(value)?.trunc())
+                .ok_or_else(|| "value cannot be converted to an integer".to_string())?,
+        ),
+    }])
 }
 fn builtin_float(args: Vec<Value>) -> Result<Vec<Value>, String> {
     Ok(vec![Value::Number(number(
@@ -812,9 +886,9 @@ fn builtin_random_int(args: Vec<Value>) -> Result<Vec<Value>, String> {
     if min > max {
         return Err("random min must be less than or equal to max".to_string());
     }
-    Ok(vec![Value::Integer(
-        rand::thread_rng().gen_range(min..=max) as i128,
-    )])
+    Ok(vec![Value::Integer(BigInt::from(
+        rand::thread_rng().gen_range(min..=max),
+    ))])
 }
 
 fn builtin_table_unpack(args: Vec<Value>) -> Result<Vec<Value>, String> {
