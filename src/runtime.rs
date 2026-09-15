@@ -122,7 +122,6 @@ impl Runtime {
             ("error", native("error", builtin_error)),
             ("int", native("int", builtin_int)),
             ("float", native("float", builtin_float)),
-            ("__exp", native("__exp", builtin_exp)),
             ("__floor", native("__floor", builtin_floor)),
             ("__random_int", native("__random_int", builtin_random_int)),
             (
@@ -197,9 +196,16 @@ impl Runtime {
                     }
                 }
             }
-            Stmt::Assign { target, value } => {
+            Stmt::Assign {
+                target,
+                value,
+                is_const,
+            } => {
                 let value = self.eval(value, env.clone())?;
-                self.assign(target, value, env)?;
+                self.assign(target, value, env.clone())?;
+                if *is_const {
+                    self.protect_member(target, env)?;
+                }
             }
             Stmt::Increment { target, amount } => {
                 let current = self.eval(target, env.clone())?;
@@ -932,11 +938,6 @@ fn builtin_float(args: Vec<Value>) -> Result<Vec<Value>, String> {
     Ok(vec![Value::Number(number(
         args.first().cloned().unwrap_or(Value::Nil),
     )?)])
-}
-fn builtin_exp(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    Ok(vec![Value::Number(
-        number(args.first().cloned().unwrap_or(Value::Nil))?.exp(),
-    )])
 }
 fn builtin_floor(args: Vec<Value>) -> Result<Vec<Value>, String> {
     let value = args.first().cloned().unwrap_or(Value::Nil);

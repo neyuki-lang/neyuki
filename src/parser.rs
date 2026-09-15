@@ -55,6 +55,7 @@ pub enum Stmt {
     Assign {
         target: Expr,
         value: Expr,
+        is_const: bool,
     },
     Increment {
         target: Expr,
@@ -204,6 +205,7 @@ impl Parser {
             return Stmt::Assign {
                 target: expr,
                 value,
+                is_const: false,
             };
         }
         self.consume_bracket_attributes();
@@ -224,7 +226,26 @@ impl Parser {
             return self.parse_function(is_const);
         }
 
-        let name = self.expect_name();
+        let mut name = self.expect_name();
+        while self.match_symbol(".") {
+            name.push('.');
+            name.push_str(&self.expect_name());
+        }
+        if name.contains('.') {
+            self.expect_symbol("=");
+            let mut target = Expr::Variable(name.split('.').next().unwrap().to_string());
+            for field in name.split('.').skip(1) {
+                target = Expr::Member {
+                    object: Box::new(target),
+                    field: field.to_string(),
+                };
+            }
+            return Stmt::Assign {
+                target,
+                value: self.parse_expr(),
+                is_const,
+            };
+        }
         if self.check_symbol(",") {
             let mut names = vec![name];
             while self.match_symbol(",") {
@@ -490,6 +511,22 @@ impl Parser {
             self.expect_symbol("(");
             let expr = self.parse_expr();
             self.expect_symbol(")");
+            if self.match_symbol("(") {
+                let mut args = Vec::new();
+                if !self.check_symbol(")") {
+                    loop {
+                        args.push(self.parse_expr());
+                        if !self.match_symbol(",") {
+                            break;
+                        }
+                    }
+                }
+                self.expect_symbol(")");
+                return Expr::Call {
+                    callee: Box::new(expr),
+                    args,
+                };
+            }
             return expr;
         }
 
@@ -820,6 +857,38 @@ mod tests {
         );
 
         assert!(matches!(program[1], Stmt::Function { .. }));
+    }
+
+    #[test]
+    fn parses_dotted_const_binding_as_assignment() {
+        let mut parser = Parser::new("const math.e = 1");
+        let program = parser.parse_program();
+
+        assert_eq!(
+            program,
+            vec![Stmt::Assign {
+                target: Expr::Member {
+                    object: Box::new(Expr::Variable("math".to_string())),
+                    field: "e".to_string(),
+                },
+                value: Expr::Literal("1".to_string()),
+                is_const: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn parses_immediately_invoked_function_expression() {
+        let mut parser = Parser::new("local value = (function() return 1 end)()");
+        let program = parser.parse_program();
+
+        assert!(matches!(
+            program.first(),
+            Some(Stmt::Local {
+                initializer: Some(Expr::Call { .. }),
+                ..
+            })
+        ));
     }
 
     #[test]
