@@ -14,7 +14,7 @@ use std::time::Duration;
 use num_bigint::BigInt;
 use ureq::ResponseExt;
 
-use crate::runtime::{Value, new_table};
+use crate::runtime::{Int, Value, new_table};
 
 pub(crate) const NATIVES: &[(&str, crate::runtime::Native)] = &[
     ("__http_request", builtin_request),
@@ -178,7 +178,7 @@ fn record(fields: Vec<(&str, Value)>) -> Value {
 }
 
 fn integer(value: u64) -> Value {
-    Value::Integer(BigInt::from(value))
+    Value::Integer(Int::from_bigint(BigInt::from(value)))
 }
 
 /// `__http_request(method, url, headers?, body?, timeout?, follow?)` performs

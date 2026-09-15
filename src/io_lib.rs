@@ -8,7 +8,7 @@ use std::io::{self, BufRead, IsTerminal, Read, Write};
 
 use num_bigint::BigInt;
 
-use crate::runtime::Value;
+use crate::runtime::{Int, Value};
 
 pub(crate) const NATIVES: &[(&str, crate::runtime::Native)] = &[
     ("__io_read_line", builtin_read_line),
@@ -198,7 +198,7 @@ fn builtin_read_number(_args: Vec<Value>) -> Result<Vec<Value>, String> {
         BigInt::parse_bytes(token.as_bytes(), 10)
     };
     Ok(vec![if let Some(value) = integer {
-        Value::Integer(value)
+        Value::Integer(Int::from_bigint(value))
     } else if let Ok(value) = token.parse::<f64>() {
         Value::Number(value)
     } else {

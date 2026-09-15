@@ -4,7 +4,7 @@ use crate::lexer::{Lexer, Token};
 pub enum Expr {
     Literal(String),
     Str(String),
-    Interp(String),
+    Interp(Vec<InterpPart>),
     Variable(String),
     Vararg,
     Member {
@@ -38,6 +38,12 @@ pub enum Expr {
         right: Box<Expr>,
     },
     Table(Vec<TableEntry>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InterpPart {
+    Literal(String),
+    Expr(Expr),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -603,7 +609,7 @@ impl Parser {
             }
             "interp" => {
                 self.pos += 1;
-                Expr::Interp(token.value)
+                Expr::Interp(parse_interp_parts(&token.value))
             }
             "number" => {
                 self.pos += 1;
@@ -928,6 +934,39 @@ impl Parser {
 
         Some((value, prec))
     }
+}
+
+/// Splits a lexed interpolation token (e.g. `"x = {a + b}!"`) into literal
+/// and expression parts once, at parse time, so evaluating the same
+/// interpolated string repeatedly (e.g. inside a loop) never re-lexes or
+/// re-parses the embedded expressions.
+fn parse_interp_parts(value: &str) -> Vec<InterpPart> {
+    let mut parts = Vec::new();
+    let mut rest = value;
+    while let Some(start) = rest.find('{') {
+        if start > 0 {
+            parts.push(InterpPart::Literal(rest[..start].to_string()));
+        }
+        let after_start = &rest[start + 1..];
+        let end = after_start
+            .find('}')
+            .unwrap_or_else(|| panic!("unfinished interpolation in {:?}", value));
+        let expression = &after_start[..end];
+        let mut parser = Parser::new(expression);
+        let statements = parser.parse_program();
+        if statements.len() != 1 {
+            panic!("interpolation must contain one expression: {:?}", expression);
+        }
+        let Stmt::Expr(expression) = statements.into_iter().next().unwrap() else {
+            panic!("interpolation must contain an expression: {:?}", expression);
+        };
+        parts.push(InterpPart::Expr(expression));
+        rest = &after_start[end + 1..];
+    }
+    if !rest.is_empty() {
+        parts.push(InterpPart::Literal(rest.to_string()));
+    }
+    parts
 }
 
 #[cfg(test)]

@@ -11,7 +11,7 @@
 use num_bigint::{BigInt, Sign};
 use num_traits::{FromPrimitive, One, ToPrimitive, Zero};
 
-use crate::runtime::{Value, number, require_string};
+use crate::runtime::{Int, Value, number, require_string};
 
 pub(crate) const NATIVES: &[(&str, crate::runtime::Native)] = &[
     ("__string_byte", builtin_byte),
@@ -65,7 +65,7 @@ fn bytes_to_string(bytes: &[u8]) -> Value {
 }
 
 fn integer(value: i64) -> Value {
-    Value::Integer(BigInt::from(value))
+    Value::Integer(Int::from(value))
 }
 
 /// Translate a relative (possibly negative) 1-based start index, Lua style.
@@ -679,7 +679,7 @@ impl FormatSpec {
 
 fn format_integer_arg(value: Value) -> Result<BigInt, String> {
     match value {
-        Value::Integer(value) => Ok(value),
+        Value::Integer(value) => Ok(value.to_bigint()),
         Value::Number(value) if value.is_finite() && value.fract() == 0.0 => {
             BigInt::from_f64(value)
                 .ok_or_else(|| "number has no integer representation".to_string())
@@ -1404,11 +1404,11 @@ fn builtin_unpack(args: Vec<Value>) -> Result<Vec<Value>, String> {
         pos += padding;
         match kind {
             PackKind::Int | PackKind::Uint => {
-                values.push(Value::Integer(unpack_int(
+                values.push(Value::Integer(Int::from_bigint(unpack_int(
                     &data[pos..pos + size],
                     state.little,
                     kind == PackKind::Int,
-                )));
+                ))));
             }
             PackKind::Float => {
                 let bytes: [u8; 4] = data[pos..pos + 4].try_into().unwrap();

@@ -16,12 +16,264 @@ const BUNDLED_LIBRARIES: &[(&str, &str)] =
 pub(crate) type EnvRef = Rc<RefCell<Env>>;
 pub(crate) type Native = fn(Vec<Value>) -> Result<Vec<Value>, String>;
 
+/// Integer representation with an `i64` fast path. Most program integers
+/// (loop counters, small arithmetic) stay as a plain `i64` with no heap
+/// allocation; values that overflow `i64` promote to an `Rc<BigInt>` (`Rc`
+/// so cloning a big value, e.g. on every `Value::clone()`, stays O(1)).
+#[derive(Clone)]
+pub(crate) enum Int {
+    Small(i64),
+    Big(Rc<BigInt>),
+}
+
+impl Int {
+    pub(crate) fn from_bigint(value: BigInt) -> Int {
+        match value.to_i64() {
+            Some(small) => Int::Small(small),
+            None => Int::Big(Rc::new(value)),
+        }
+    }
+
+    pub(crate) fn to_bigint(&self) -> BigInt {
+        match self {
+            Int::Small(value) => BigInt::from(*value),
+            Int::Big(value) => (**value).clone(),
+        }
+    }
+
+    pub(crate) fn to_f64(&self) -> Option<f64> {
+        match self {
+            Int::Small(value) => Some(*value as f64),
+            Int::Big(value) => value.to_f64(),
+        }
+    }
+
+    pub(crate) fn to_u32(&self) -> Option<u32> {
+        match self {
+            Int::Small(value) => u32::try_from(*value).ok(),
+            Int::Big(value) => value.to_u32(),
+        }
+    }
+
+    pub(crate) fn to_i64(&self) -> Option<i64> {
+        match self {
+            Int::Small(value) => Some(*value),
+            Int::Big(value) => value.to_i64(),
+        }
+    }
+
+    pub(crate) fn to_usize(&self) -> Option<usize> {
+        match self {
+            Int::Small(value) => usize::try_from(*value).ok(),
+            Int::Big(value) => value.to_usize(),
+        }
+    }
+
+    pub(crate) fn is_zero(&self) -> bool {
+        match self {
+            Int::Small(value) => *value == 0,
+            Int::Big(value) => value.is_zero(),
+        }
+    }
+
+    pub(crate) fn is_positive(&self) -> bool {
+        match self {
+            Int::Small(value) => *value > 0,
+            Int::Big(value) => value.sign() == Sign::Plus,
+        }
+    }
+
+    pub(crate) fn is_negative(&self) -> bool {
+        match self {
+            Int::Small(value) => *value < 0,
+            Int::Big(value) => value.sign() == Sign::Minus,
+        }
+    }
+
+    pub(crate) fn checked_div_floor(&self, other: &Int) -> Int {
+        if let (Int::Small(a), Int::Small(b)) = (self, other) {
+            if !(*a == i64::MIN && *b == -1) {
+                return Int::Small(a.div_floor(b));
+            }
+        }
+        Int::from_bigint(self.to_bigint().div_floor(&other.to_bigint()))
+    }
+
+    pub(crate) fn mod_floor(&self, other: &Int) -> Int {
+        if let (Int::Small(a), Int::Small(b)) = (self, other) {
+            if !(*a == i64::MIN && *b == -1) {
+                return Int::Small(a.mod_floor(b));
+            }
+        }
+        Int::from_bigint(self.to_bigint().mod_floor(&other.to_bigint()))
+    }
+
+    pub(crate) fn shl(&self, bits: usize) -> Int {
+        if let Int::Small(value) = self {
+            if bits < 64 {
+                if let Some(result) = value.checked_shl(bits as u32).filter(|result| {
+                    (*result >> bits) == *value
+                }) {
+                    return Int::Small(result);
+                }
+            }
+        }
+        Int::from_bigint(self.to_bigint() << bits)
+    }
+
+    pub(crate) fn shr(&self, bits: usize) -> Int {
+        if let Int::Small(value) = self {
+            if bits < 64 {
+                return Int::Small(value >> bits.min(63));
+            }
+        }
+        Int::from_bigint(self.to_bigint() >> bits)
+    }
+
+    pub(crate) fn pow(&self, exponent: u32) -> Int {
+        if let Int::Small(base) = self {
+            if let Some(result) = base.checked_pow(exponent) {
+                return Int::Small(result);
+            }
+        }
+        Int::from_bigint(num_traits::Pow::pow(self.to_bigint(), exponent))
+    }
+}
+
+impl From<i64> for Int {
+    fn from(value: i64) -> Int {
+        Int::Small(value)
+    }
+}
+
+impl From<usize> for Int {
+    fn from(value: usize) -> Int {
+        match i64::try_from(value) {
+            Ok(value) => Int::Small(value),
+            Err(_) => Int::from_bigint(BigInt::from(value)),
+        }
+    }
+}
+
+impl fmt::Display for Int {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Int::Small(value) => write!(f, "{}", value),
+            Int::Big(value) => write!(f, "{}", value),
+        }
+    }
+}
+
+impl PartialEq for Int {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Int::Small(a), Int::Small(b)) => a == b,
+            _ => self.to_bigint() == other.to_bigint(),
+        }
+    }
+}
+
+impl Eq for Int {}
+
+impl PartialOrd for Int {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Int {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (self, other) {
+            (Int::Small(a), Int::Small(b)) => a.cmp(b),
+            _ => self.to_bigint().cmp(&other.to_bigint()),
+        }
+    }
+}
+
+impl std::ops::Add for &Int {
+    type Output = Int;
+    fn add(self, other: &Int) -> Int {
+        if let (Int::Small(a), Int::Small(b)) = (self, other) {
+            if let Some(result) = a.checked_add(*b) {
+                return Int::Small(result);
+            }
+        }
+        Int::from_bigint(self.to_bigint() + other.to_bigint())
+    }
+}
+
+impl std::ops::Sub for &Int {
+    type Output = Int;
+    fn sub(self, other: &Int) -> Int {
+        if let (Int::Small(a), Int::Small(b)) = (self, other) {
+            if let Some(result) = a.checked_sub(*b) {
+                return Int::Small(result);
+            }
+        }
+        Int::from_bigint(self.to_bigint() - other.to_bigint())
+    }
+}
+
+impl std::ops::Mul for &Int {
+    type Output = Int;
+    fn mul(self, other: &Int) -> Int {
+        if let (Int::Small(a), Int::Small(b)) = (self, other) {
+            if let Some(result) = a.checked_mul(*b) {
+                return Int::Small(result);
+            }
+        }
+        Int::from_bigint(self.to_bigint() * other.to_bigint())
+    }
+}
+
+impl std::ops::Neg for Int {
+    type Output = Int;
+    fn neg(self) -> Int {
+        if let Int::Small(value) = self {
+            if let Some(result) = value.checked_neg() {
+                return Int::Small(result);
+            }
+        }
+        Int::from_bigint(-self.to_bigint())
+    }
+}
+
+impl std::ops::BitAnd for &Int {
+    type Output = Int;
+    fn bitand(self, other: &Int) -> Int {
+        if let (Int::Small(a), Int::Small(b)) = (self, other) {
+            return Int::Small(a & b);
+        }
+        Int::from_bigint(self.to_bigint() & other.to_bigint())
+    }
+}
+
+impl std::ops::BitOr for &Int {
+    type Output = Int;
+    fn bitor(self, other: &Int) -> Int {
+        if let (Int::Small(a), Int::Small(b)) = (self, other) {
+            return Int::Small(a | b);
+        }
+        Int::from_bigint(self.to_bigint() | other.to_bigint())
+    }
+}
+
+impl std::ops::BitXor for &Int {
+    type Output = Int;
+    fn bitxor(self, other: &Int) -> Int {
+        if let (Int::Small(a), Int::Small(b)) = (self, other) {
+            return Int::Small(a ^ b);
+        }
+        Int::from_bigint(self.to_bigint() ^ other.to_bigint())
+    }
+}
+
 #[derive(Clone)]
 pub(crate) enum Value {
     Nil,
     Bool(bool),
     Number(f64),
-    Integer(BigInt),
+    Integer(Int),
     String(String),
     Table(Rc<RefCell<Table>>),
     Function(Rc<Function>),
@@ -268,7 +520,7 @@ impl Runtime {
             }
             Stmt::Increment { target, amount } => {
                 let current = self.eval(target, env.clone())?;
-                let value = self.numeric(current, "+", Value::Integer(BigInt::from(*amount)))?;
+                let value = self.numeric(current, "+", Value::Integer(Int::from(*amount as i64)))?;
                 self.assign(target, value, env)?;
             }
             Stmt::Function {
@@ -391,7 +643,7 @@ impl Runtime {
                                 .array
                                 .iter()
                                 .enumerate()
-                                .map(|(i, v)| vec![Value::Integer(BigInt::from(i + 1)), v.clone()])
+                                .map(|(i, v)| vec![Value::Integer(Int::from(i + 1)), v.clone()])
                                 .collect()
                         } else if vars.len() > 1 {
                             table
@@ -441,7 +693,7 @@ impl Runtime {
                 {
                     let loop_env = child(&env);
                     let loop_value = if current.fract() == 0.0 {
-                        Value::Integer(BigInt::from_f64(current).unwrap())
+                        Value::Integer(Int::from_bigint(BigInt::from_f64(current).unwrap()))
                     } else {
                         Value::Number(current)
                     };
@@ -654,30 +906,16 @@ impl Runtime {
         }
     }
 
-    fn interpolate(&self, value: &str, env: EnvRef) -> Result<Value, String> {
+    fn interpolate(&self, parts: &[crate::parser::InterpPart], env: EnvRef) -> Result<Value, String> {
         let mut output = String::new();
-        let mut rest = value;
-        while let Some(start) = rest.find('{') {
-            output.push_str(&rest[..start]);
-            let after_start = &rest[start + 1..];
-            let end = after_start
-                .find('}')
-                .ok_or_else(|| "unfinished interpolation".to_string())?;
-            let expression = &after_start[..end];
-            let mut parser = crate::parser::Parser::new(expression);
-            let expression =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| parser.parse_program()))
-                    .map_err(|_| "invalid interpolation expression".to_string())?;
-            if expression.len() != 1 {
-                return Err("interpolation must contain one expression".to_string());
+        for part in parts {
+            match part {
+                crate::parser::InterpPart::Literal(text) => output.push_str(text),
+                crate::parser::InterpPart::Expr(expr) => {
+                    output.push_str(&self.eval(expr, env.clone())?.to_string())
+                }
             }
-            let Stmt::Expr(expression) = &expression[0] else {
-                return Err("interpolation must contain an expression".to_string());
-            };
-            output.push_str(&self.eval(expression, env.clone())?.to_string());
-            rest = &after_start[end + 1..];
         }
-        output.push_str(rest);
         Ok(Value::String(output))
     }
 
@@ -725,9 +963,9 @@ impl Runtime {
                 "-" => Ok(Value::Integer(a - b)),
                 "*" => Ok(Value::Integer(a * b)),
                 "/" => Ok(Value::Number(number(left)? / number(right)?)),
-                "//" => Ok(Value::Integer(a.div_floor(b))),
+                "//" => Ok(Value::Integer(a.checked_div_floor(b))),
                 "%" => Ok(Value::Integer(a.mod_floor(b))),
-                "^" if b.sign() != num_bigint::Sign::Minus => {
+                "^" if !b.is_negative() => {
                     let exponent = b
                         .to_u32()
                         .ok_or_else(|| "integer exponent is too large".to_string())?;
@@ -754,9 +992,10 @@ impl Runtime {
             _ => unreachable!(),
         };
         if result.fract() == 0.0 && result.is_finite() {
-            Ok(Value::Integer(BigInt::from_f64(result).ok_or_else(
-                || "integer result is out of range".to_string(),
-            )?))
+            Ok(Value::Integer(Int::from_bigint(
+                BigInt::from_f64(result)
+                    .ok_or_else(|| "integer result is out of range".to_string())?,
+            )))
         } else {
             Ok(Value::Number(result))
         }
@@ -772,8 +1011,8 @@ impl Runtime {
     }
     fn length(&self, value: Value) -> Result<Value, String> {
         match value {
-            Value::String(value) => Ok(Value::Integer(BigInt::from(value.len()))),
-            Value::Table(value) => Ok(Value::Integer(BigInt::from(value.borrow().array.len()))),
+            Value::String(value) => Ok(Value::Integer(Int::from(value.len()))),
+            Value::Table(value) => Ok(Value::Integer(Int::from(value.borrow().array.len()))),
             _ => Err("length expects a string or table".to_string()),
         }
     }
@@ -783,7 +1022,7 @@ impl Runtime {
                 let table = table.borrow();
                 match index {
                     Value::String(key) => Ok(table.fields.get(key).cloned().unwrap_or(Value::Nil)),
-                    Value::Integer(index) if *index > BigInt::zero() => Ok(table
+                    Value::Integer(index) if index.is_positive() => Ok(table
                         .array
                         .get(
                             index
@@ -833,7 +1072,7 @@ impl Runtime {
                         table.fields.insert(key, value);
                         Ok(())
                     }
-                    Value::Integer(index) if index > BigInt::zero() => {
+                    Value::Integer(index) if index.is_positive() => {
                         let index = index
                             .to_usize()
                             .ok_or_else(|| "table index is too large".to_string())?;
@@ -899,24 +1138,30 @@ fn child(parent: &EnvRef) -> EnvRef {
     }))
 }
 fn lookup(env: &EnvRef, name: &str) -> Option<Value> {
-    env.borrow().values.get(name).cloned().or_else(|| {
-        env.borrow()
-            .parent
-            .as_ref()
-            .and_then(|parent| lookup(parent, name))
-    })
+    let borrowed = env.borrow();
+    if let Some(value) = borrowed.values.get(name) {
+        return Some(value.clone());
+    }
+    let parent = borrowed.parent.clone();
+    drop(borrowed);
+    parent.and_then(|parent| lookup(&parent, name))
 }
 fn assign_env(env: &EnvRef, name: &str, value: Value) -> Result<(), String> {
-    if env.borrow().values.contains_key(name) {
-        if env.borrow().const_names.contains(name) {
+    let mut borrowed = env.borrow_mut();
+    if borrowed.values.contains_key(name) {
+        if borrowed.const_names.contains(name) {
             return Err(format!("assignment to const name `{}`", name));
         }
-        env.borrow_mut().values.insert(name.to_string(), value);
+        borrowed.values.insert(name.to_string(), value);
         Ok(())
-    } else if let Some(parent) = env.borrow().parent.clone() {
-        assign_env(&parent, name, value)
     } else {
-        Err(format!("assignment to undefined name `{}`", name))
+        let parent = borrowed.parent.clone();
+        drop(borrowed);
+        if let Some(parent) = parent {
+            assign_env(&parent, name, value)
+        } else {
+            Err(format!("assignment to undefined name `{}`", name))
+        }
     }
 }
 fn parse_literal(value: &str) -> Result<Value, String> {
@@ -938,7 +1183,7 @@ fn parse_literal(value: &str) -> Result<Value, String> {
                 BigInt::parse_bytes(normalized.as_bytes(), 10)
             };
             if let Some(value) = integer {
-                Ok(Value::Integer(value))
+                Ok(Value::Integer(Int::from_bigint(value)))
             } else if let Ok(value) = normalized.parse::<f64>() {
                 Ok(Value::Number(value))
             } else {
@@ -981,6 +1226,7 @@ fn equal(left: &Value, right: &Value) -> bool {
 fn compare(left: Value, op: &str, right: Value) -> Result<Value, String> {
     let result = match (&left, &right) {
         (Value::String(a), Value::String(b)) => a.cmp(b),
+        (Value::Integer(a), Value::Integer(b)) => a.cmp(b),
         _ => number(left)?
             .partial_cmp(&number(right)?)
             .ok_or_else(|| "values are not comparable".to_string())?,
@@ -996,28 +1242,30 @@ fn compare(left: Value, op: &str, right: Value) -> Result<Value, String> {
 fn bitwise(left: Value, op: &str, right: Value) -> Result<Value, String> {
     let a = match left {
         Value::Integer(value) => value,
-        value => BigInt::from_f64(number(value)?.trunc())
-            .ok_or_else(|| "expected an integer".to_string())?,
+        value => Int::from_bigint(
+            BigInt::from_f64(number(value)?.trunc())
+                .ok_or_else(|| "expected an integer".to_string())?,
+        ),
     };
     let b = match right {
         Value::Integer(value) => value,
-        value => BigInt::from_f64(number(value)?.trunc())
-            .ok_or_else(|| "expected an integer".to_string())?,
+        value => Int::from_bigint(
+            BigInt::from_f64(number(value)?.trunc())
+                .ok_or_else(|| "expected an integer".to_string())?,
+        ),
     };
     Ok(Value::Integer(match op {
-        "&" => a & b,
-        "|" => a | b,
-        "~" => a ^ b,
-        "<<" => {
-            a << b
-                .to_usize()
-                .ok_or_else(|| "shift is too large".to_string())?
-        }
-        ">>" => {
-            a >> b
-                .to_usize()
-                .ok_or_else(|| "shift is too large".to_string())?
-        }
+        "&" => &a & &b,
+        "|" => &a | &b,
+        "~" => &a ^ &b,
+        "<<" => a.shl(
+            b.to_usize()
+                .ok_or_else(|| "shift is too large".to_string())?,
+        ),
+        ">>" => a.shr(
+            b.to_usize()
+                .ok_or_else(|| "shift is too large".to_string())?,
+        ),
         _ => return Err("unsupported bitwise operator".to_string()),
     }))
 }
@@ -1069,10 +1317,10 @@ fn builtin_int(args: Vec<Value>) -> Result<Vec<Value>, String> {
     let value = args.first().cloned().unwrap_or(Value::Nil);
     Ok(vec![match value {
         Value::Integer(value) => Value::Integer(value),
-        value => Value::Integer(
+        value => Value::Integer(Int::from_bigint(
             BigInt::from_f64(number(value)?.trunc())
                 .ok_or_else(|| "value cannot be converted to an integer".to_string())?,
-        ),
+        )),
     }])
 }
 fn builtin_float(args: Vec<Value>) -> Result<Vec<Value>, String> {
@@ -1084,10 +1332,10 @@ fn builtin_floor(args: Vec<Value>) -> Result<Vec<Value>, String> {
     let value = args.first().cloned().unwrap_or(Value::Nil);
     Ok(vec![match value {
         Value::Integer(value) => Value::Integer(value),
-        value => Value::Integer(
+        value => Value::Integer(Int::from_bigint(
             BigInt::from_f64(number(value)?.floor())
                 .ok_or_else(|| "value cannot be converted to an integer".to_string())?,
-        ),
+        )),
     }])
 }
 fn builtin_sqrt(args: Vec<Value>) -> Result<Vec<Value>, String> {
@@ -1105,9 +1353,10 @@ fn float_argument(args: &[Value], index: usize, name: &str) -> Result<f64, Strin
         .map_err(|_| format!("{} must be a number", name))
 }
 fn float_to_integer(value: f64) -> Result<Value, String> {
-    Ok(Value::Integer(BigInt::from_f64(value).ok_or_else(
-        || "value cannot be converted to an integer".to_string(),
-    )?))
+    Ok(Value::Integer(Int::from_bigint(
+        BigInt::from_f64(value)
+            .ok_or_else(|| "value cannot be converted to an integer".to_string())?,
+    )))
 }
 fn builtin_ceil(args: Vec<Value>) -> Result<Vec<Value>, String> {
     Ok(vec![match args.first().cloned().unwrap_or(Value::Nil) {
@@ -1214,7 +1463,7 @@ fn builtin_modf(args: Vec<Value>) -> Result<Vec<Value>, String> {
 fn builtin_frexp(args: Vec<Value>) -> Result<Vec<Value>, String> {
     let value = float_argument(&args, 0, "frexp argument")?;
     if value == 0.0 || !value.is_finite() {
-        return Ok(vec![Value::Number(value), Value::Integer(BigInt::zero())]);
+        return Ok(vec![Value::Number(value), Value::Integer(Int::Small(0))]);
     }
     // Decompose value = mantissa * 2^exponent with 0.5 <= |mantissa| < 1.
     let exponent_mask = 0x7ffu64 << 52;
@@ -1228,7 +1477,7 @@ fn builtin_frexp(args: Vec<Value>) -> Result<Vec<Value>, String> {
     let mantissa = f64::from_bits((bits & !exponent_mask) | (1022u64 << 52));
     Ok(vec![
         Value::Number(mantissa),
-        Value::Integer(BigInt::from(raw_exponent - bias)),
+        Value::Integer(Int::from(raw_exponent - bias)),
     ])
 }
 fn builtin_ldexp(args: Vec<Value>) -> Result<Vec<Value>, String> {
@@ -1368,7 +1617,7 @@ fn builtin_random_int(args: Vec<Value>) -> Result<Vec<Value>, String> {
     if min > max {
         return Err("random min must be less than or equal to max".to_string());
     }
-    Ok(vec![Value::Integer(BigInt::from(
+    Ok(vec![Value::Integer(Int::from(
         rand::thread_rng().gen_range(min..=max),
     ))])
 }
@@ -1397,7 +1646,7 @@ fn builtin_random_bigint(args: Vec<Value>) -> Result<Vec<Value>, String> {
         }
     };
 
-    Ok(vec![Value::Integer(min + offset)])
+    Ok(vec![Value::Integer(Int::from_bigint(min + offset))])
 }
 
 fn builtin_table_freeze(args: Vec<Value>) -> Result<Vec<Value>, String> {
@@ -1435,7 +1684,7 @@ fn integer_argument(value: Value, name: &str) -> Result<i64, String> {
 }
 fn bigint_argument(value: Value, name: &str) -> Result<BigInt, String> {
     match value {
-        Value::Integer(value) => Ok(value),
+        Value::Integer(value) => Ok(value.to_bigint()),
         Value::Number(value) if value.is_finite() && value.fract() == 0.0 => {
             BigInt::from_f64(value).ok_or_else(|| format!("random {} must be an integer", name))
         }

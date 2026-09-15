@@ -21,3 +21,12 @@ ureq = { version = "3", default-features = false, features = ["native-tls", "gzi
 
 [target.'cfg(windows)'.dependencies]
 schannel = ">=0.1.23, <0.1.28"
+
+# Optimized for speed and small binary size. `panic = "abort"` is intentionally
+# omitted: lint.rs/compiler.rs/runtime.rs rely on `catch_unwind` to turn parser
+# panics into recoverable errors, which abort would defeat.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
