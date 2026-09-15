@@ -47,7 +47,7 @@ const function table.clone(t: {any}): {any}
     return newTable
 end
 
-const function table.concat(t: {string}, sep: string, i: int?, j: int?): string
+const function table.concat(t: {any}, sep: string, i: int?, j: int?): string
     if (t == nil) then error("t must be provided") end
     if (type(t) != "table") then error("t must be a table") end
     if (sep == nil) then sep = "" end
@@ -56,7 +56,7 @@ const function table.concat(t: {string}, sep: string, i: int?, j: int?): string
 
     local result = ""
     for index = i, j do
-        result = result .. t[index]
+        result = result .. tostring(t[index])
         if index < j then
             result = result .. sep
         end
@@ -111,6 +111,24 @@ const function table.remove(t: {any}, i: int?): any
     end
     t[len] = nil
     return removedValue
+end
+
+const function table.sort(t: {any}, cmp: (a: any, b: any) -> bool?): nil
+    if (t == nil) then error("t must be provided") end
+    if (type(t) != "table") then error("t must be a table") end
+    if (cmp == nil) then error("cmp must be provided") end
+
+    local len = table.length(t)
+    for i = 1, len - 1 do
+        for j = i + 1, len do
+            if (not cmp(t[i], t[j])) then
+                local temp = t[i]
+                t[i] = t[j]
+                t[j] = temp
+            end
+        end
+    end
+    return nil
 end
 
 return table
