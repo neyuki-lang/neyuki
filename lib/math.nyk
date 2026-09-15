@@ -34,7 +34,7 @@ end
 
 const function math.min(n1: number, n2: number, ...: number): number
     local t = getNumberTable(n1, n2, {...})
-    local min = table[1]
+    local min = t[1]
     for _, n in t do
         if n < min then
             min = n
