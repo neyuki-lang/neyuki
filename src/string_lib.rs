@@ -72,9 +72,7 @@ fn integer(value: i64) -> Value {
 fn pos_relat_start(pos: i64, len: usize) -> usize {
     if pos > 0 {
         pos as usize
-    } else if pos == 0 {
-        1
-    } else if pos < -(len as i64) {
+    } else if pos == 0 || pos < -(len as i64) {
         1
     } else {
         (len as i64 + pos + 1) as usize
@@ -755,7 +753,7 @@ fn exponent_form(value: f64, precision: usize, upper: bool) -> String {
 }
 
 fn strip_trailing_zeros(text: String) -> String {
-    if let Some((mantissa, exponent)) = text.split_once(|c| c == 'e' || c == 'E') {
+    if let Some((mantissa, exponent)) = text.split_once(['e', 'E']) {
         let e = if text.contains('E') { "E" } else { "e" };
         return format!(
             "{}{}{}",
@@ -1128,7 +1126,7 @@ fn read_size(fmt: &[u8], i: &mut usize, default: usize) -> usize {
 
 fn int_size(fmt: &[u8], i: &mut usize, default: usize) -> Result<usize, String> {
     let size = read_size(fmt, i, default);
-    if size < 1 || size > MAX_INT_SIZE {
+    if !(1..=MAX_INT_SIZE).contains(&size) {
         return Err(format!(
             "integral size ({}) out of limits [1,{}]",
             size, MAX_INT_SIZE
@@ -1302,7 +1300,7 @@ fn builtin_pack(args: Vec<Value>) -> Result<Vec<Value>, String> {
     let mut arg_index = 1usize;
     while i < fmt.len() {
         let (kind, size, padding) = read_option_aligned(&mut state, fmt, &mut i, out.len())?;
-        out.extend(std::iter::repeat(0u8).take(padding));
+        out.extend(std::iter::repeat_n(0u8, padding));
         let next = |index: &mut usize| -> Result<Value, String> {
             let value = args
                 .get(*index)
@@ -1340,7 +1338,7 @@ fn builtin_pack(args: Vec<Value>) -> Result<Vec<Value>, String> {
                     return Err("string longer than given size".to_string());
                 }
                 out.extend(value.as_bytes());
-                out.extend(std::iter::repeat(0u8).take(size - value.len()));
+                out.extend(std::iter::repeat_n(0u8, size - value.len()));
             }
             PackKind::String => {
                 let value = require_string(next(&mut arg_index)?)?;
