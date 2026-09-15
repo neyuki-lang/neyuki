@@ -92,45 +92,49 @@ impl Int {
 
     pub(crate) fn checked_div_floor(&self, other: &Int) -> Int {
         if let (Int::Small(a), Int::Small(b)) = (self, other)
-            && !(*a == i64::MIN && *b == -1) {
-                return Int::Small(a.div_floor(b));
-            }
+            && !(*a == i64::MIN && *b == -1)
+        {
+            return Int::Small(a.div_floor(b));
+        }
         Int::from_bigint(self.to_bigint().div_floor(&other.to_bigint()))
     }
 
     pub(crate) fn mod_floor(&self, other: &Int) -> Int {
         if let (Int::Small(a), Int::Small(b)) = (self, other)
-            && !(*a == i64::MIN && *b == -1) {
-                return Int::Small(a.mod_floor(b));
-            }
+            && !(*a == i64::MIN && *b == -1)
+        {
+            return Int::Small(a.mod_floor(b));
+        }
         Int::from_bigint(self.to_bigint().mod_floor(&other.to_bigint()))
     }
 
     pub(crate) fn shl(&self, bits: usize) -> Int {
         if let Int::Small(value) = self
             && bits < 64
-                && let Some(result) = value
-                    .checked_shl(bits as u32)
-                    .filter(|result| (*result >> bits) == *value)
-                {
-                    return Int::Small(result);
-                }
+            && let Some(result) = value
+                .checked_shl(bits as u32)
+                .filter(|result| (*result >> bits) == *value)
+        {
+            return Int::Small(result);
+        }
         Int::from_bigint(self.to_bigint() << bits)
     }
 
     pub(crate) fn shr(&self, bits: usize) -> Int {
         if let Int::Small(value) = self
-            && bits < 64 {
-                return Int::Small(value >> bits.min(63));
-            }
+            && bits < 64
+        {
+            return Int::Small(value >> bits.min(63));
+        }
         Int::from_bigint(self.to_bigint() >> bits)
     }
 
     pub(crate) fn pow(&self, exponent: u32) -> Int {
         if let Int::Small(base) = self
-            && let Some(result) = base.checked_pow(exponent) {
-                return Int::Small(result);
-            }
+            && let Some(result) = base.checked_pow(exponent)
+        {
+            return Int::Small(result);
+        }
         Int::from_bigint(num_traits::Pow::pow(self.to_bigint(), exponent))
     }
 }
@@ -189,9 +193,10 @@ impl std::ops::Add for &Int {
     type Output = Int;
     fn add(self, other: &Int) -> Int {
         if let (Int::Small(a), Int::Small(b)) = (self, other)
-            && let Some(result) = a.checked_add(*b) {
-                return Int::Small(result);
-            }
+            && let Some(result) = a.checked_add(*b)
+        {
+            return Int::Small(result);
+        }
         Int::from_bigint(self.to_bigint() + other.to_bigint())
     }
 }
@@ -200,9 +205,10 @@ impl std::ops::Sub for &Int {
     type Output = Int;
     fn sub(self, other: &Int) -> Int {
         if let (Int::Small(a), Int::Small(b)) = (self, other)
-            && let Some(result) = a.checked_sub(*b) {
-                return Int::Small(result);
-            }
+            && let Some(result) = a.checked_sub(*b)
+        {
+            return Int::Small(result);
+        }
         Int::from_bigint(self.to_bigint() - other.to_bigint())
     }
 }
@@ -211,9 +217,10 @@ impl std::ops::Mul for &Int {
     type Output = Int;
     fn mul(self, other: &Int) -> Int {
         if let (Int::Small(a), Int::Small(b)) = (self, other)
-            && let Some(result) = a.checked_mul(*b) {
-                return Int::Small(result);
-            }
+            && let Some(result) = a.checked_mul(*b)
+        {
+            return Int::Small(result);
+        }
         Int::from_bigint(self.to_bigint() * other.to_bigint())
     }
 }
@@ -222,9 +229,10 @@ impl std::ops::Neg for Int {
     type Output = Int;
     fn neg(self) -> Int {
         if let Int::Small(value) = self
-            && let Some(result) = value.checked_neg() {
-                return Int::Small(result);
-            }
+            && let Some(result) = value.checked_neg()
+        {
+            return Int::Small(result);
+        }
         Int::from_bigint(-self.to_bigint())
     }
 }
