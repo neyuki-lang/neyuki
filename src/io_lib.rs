@@ -46,8 +46,7 @@ fn bool_arg(args: &[Value], index: usize, name: &str) -> Result<bool, String> {
 
 fn count_arg(args: &[Value], index: usize, name: &str) -> Result<usize, String> {
     let value = args.get(index).cloned().unwrap_or(Value::Nil);
-    let count =
-        crate::runtime::number(value).map_err(|_| format!("{} must be a number", name))?;
+    let count = crate::runtime::number(value).map_err(|_| format!("{} must be a number", name))?;
     if count < 0.0 || count.fract() != 0.0 {
         return Err(format!("{} must be a non-negative integer", name));
     }

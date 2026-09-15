@@ -989,8 +989,10 @@ mod tests {
 
     #[test]
     fn parses_compound_and_multiple_assignment() {
-        let mut parser = Parser::new("n += 2
-a, b = b, a");
+        let mut parser = Parser::new(
+            "n += 2
+a, b = b, a",
+        );
         let program = parser.parse_program();
 
         assert_eq!(
