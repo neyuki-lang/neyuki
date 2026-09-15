@@ -77,3 +77,4 @@ fn main() {
         eprintln!("Unknown action: {}", action);
         process::exit(1);
     }
+}
