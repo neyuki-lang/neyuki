@@ -14,3 +14,5 @@ print("Abs of first number:", math.abs(numbers[1]))
 
 table.sort(numbers, function(a, b) return a < b end)
 print("Sorted numbers:\n" .. table.concat(numbers, "\n"))
+
+print(math.pi)

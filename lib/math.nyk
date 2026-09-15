@@ -2,20 +2,18 @@ local table = require("@neyuki/table")
 
 local math = {}
 
-math.e = (function()
-    local e = 0
-    local factorial = 1
+function math.sqrt(n: number): number
+    if (n == nil) then error("n must be provided") end
+    if (type(n) != "number") then error("n must be a number") end
+    if (n < 0) then error("n must be non-negative") end
 
-    for n = 0, 50 do
-        if n > 0 then
-            factorial = factorial * n
-        end
-        e = e + (1 / factorial)
-    end
+    return __sqrt(n)
+end
 
-    return e
-end)()
 math.huge = 1 / 0
+math.phi = (1 + math.sqrt(5)) / 2
+math.e = 2.71828182845904523536
+math.pi = 3.14159265358979323846
 
 function math.random(min: number, max: number): number
     if (min == nil) or (max == nil) then
@@ -71,12 +69,8 @@ function math.min(n1: number, n2: number, ...: number): number
 end
 
 function math.exp(n: number): number -- exponent e^n
-    if (n == nil) then
-        error("n must be provided")
-    end
-    if (type(n) != "number") then
-        error("n must be a number")
-    end
+    if (n == nil) then error("n must be provided") end
+    if (type(n) != "number") then error("n must be a number") end
 
     return math.e ^ n
 end
@@ -90,9 +84,7 @@ function math.abs(n: number): number
 end
 
 function math.clamp(n: number, min: number, max: number): number
-    if (min > max) then
-        error("min must be less than or equal to max")
-    end
+    if (min > max) then error("min must be less than or equal to max") end
     if (n < min) then
         return min
     elseif (n > max) then
@@ -103,12 +95,8 @@ function math.clamp(n: number, min: number, max: number): number
 end
 
 function math.floor(n: number): int
-    if (n == nil) then
-        error("n must be provided")
-    end
-    if (type(n) != "number") then
-        error("n must be a number")
-    end
+    if (n == nil) then error("n must be provided") end
+    if (type(n) != "number") then error("n must be a number") end
 
     return __floor(n)
 end

@@ -124,6 +124,7 @@ impl Runtime {
             ("int", native("int", builtin_int)),
             ("float", native("float", builtin_float)),
             ("__floor", native("__floor", builtin_floor)),
+            ("__sqrt", native("__sqrt", builtin_sqrt)),
             ("__random_int", native("__random_int", builtin_random_int)),
             (
                 "__random_bigint",
@@ -962,6 +963,16 @@ fn builtin_floor(args: Vec<Value>) -> Result<Vec<Value>, String> {
                 .ok_or_else(|| "value cannot be converted to an integer".to_string())?,
         ),
     }])
+}
+fn builtin_sqrt(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let value = number(args.first().cloned().unwrap_or(Value::Nil))?;
+    if !value.is_finite() {
+        return Err("sqrt expects a finite number".to_string());
+    }
+    if value < 0.0 {
+        return Err("sqrt expects a non-negative number".to_string());
+    }
+    Ok(vec![Value::Number(value.sqrt())])
 }
 fn builtin_random_int(args: Vec<Value>) -> Result<Vec<Value>, String> {
     if args
