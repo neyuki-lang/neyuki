@@ -1,5 +1,3 @@
-// Register-based instruction set architecture for Neyuki VM.
-
 #[derive(Clone, Debug, PartialEq)]
 pub enum Instruction {
     // Load nil into register
