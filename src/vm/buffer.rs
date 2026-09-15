@@ -1,4 +1,4 @@
-// Raw binary buffer structure and memory manipulation for Neyuki VM.
+// Raw binary buffer structure and memory manipulation
 
 use std::convert::TryInto;
 
