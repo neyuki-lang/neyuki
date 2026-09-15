@@ -1,5 +1,3 @@
-// Memory tracking and garbage collection management for Neyuki VM.
-
 #[allow(dead_code)]
 pub struct GcTracker {
     pub bytes_allocated: usize,
