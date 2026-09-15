@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::rc::Rc;
 
@@ -31,6 +31,7 @@ enum Value {
 struct Table {
     pub array: Vec<Value>,
     pub fields: HashMap<String, Value>,
+    pub const_fields: HashSet<String>,
 }
 
 enum Function {
@@ -47,6 +48,7 @@ enum Function {
 
 struct Env {
     values: HashMap<String, Value>,
+    const_names: HashSet<String>,
     parent: Option<EnvRef>,
 }
 
@@ -108,6 +110,7 @@ impl Runtime {
     pub fn new() -> Self {
         let env = Rc::new(RefCell::new(Env {
             values: HashMap::new(),
+            const_names: HashSet::new(),
             parent: None,
         }));
         for (name, function) in [
@@ -159,17 +162,25 @@ impl Runtime {
     fn exec_stmt(&self, stmt: &Stmt, env: EnvRef) -> Result<Flow, String> {
         match stmt {
             Stmt::Local {
-                name, initializer, ..
+                name,
+                is_const,
+                initializer,
+                ..
             } => {
                 let value = initializer
                     .as_ref()
                     .map(|expr| self.eval(expr, env.clone()))
                     .transpose()?
                     .unwrap_or(Value::Nil);
-                env.borrow_mut().values.insert(name.clone(), value);
+                let mut env = env.borrow_mut();
+                env.values.insert(name.clone(), value);
+                if *is_const {
+                    env.const_names.insert(name.clone());
+                }
             }
             Stmt::LocalMany {
                 names,
+                is_const,
                 initializers,
             } => {
                 let values = initializers
@@ -181,6 +192,9 @@ impl Runtime {
                         name.clone(),
                         values.get(index).cloned().unwrap_or(Value::Nil),
                     );
+                    if *is_const {
+                        env.borrow_mut().const_names.insert(name.clone());
+                    }
                 }
             }
             Stmt::Assign { target, value } => {
@@ -194,6 +208,7 @@ impl Runtime {
             }
             Stmt::Function {
                 name: Some(name),
+                is_const,
                 params,
                 body,
                 ..
@@ -211,9 +226,16 @@ impl Runtime {
                             field: field.to_string(),
                         };
                     }
-                    self.assign(&target, value, env)?;
+                    self.assign(&target, value, env.clone())?;
+                    if *is_const {
+                        self.protect_member(&target, env)?;
+                    }
                 } else {
-                    env.borrow_mut().values.insert(name.clone(), value);
+                    let mut env = env.borrow_mut();
+                    env.values.insert(name.clone(), value);
+                    if *is_const {
+                        env.const_names.insert(name.clone());
+                    }
                 }
             }
             Stmt::Function { name: None, .. } => {
@@ -375,6 +397,7 @@ impl Runtime {
                 let mut table = Table {
                     array: Vec::new(),
                     fields: HashMap::new(),
+                    const_fields: HashSet::new(),
                 };
                 for entry in entries {
                     if matches!(entry.value, Expr::Vararg) {
@@ -455,6 +478,7 @@ impl Runtime {
                             let values = Table {
                                 array: args[arg_index..].to_vec(),
                                 fields: HashMap::new(),
+                                const_fields: HashSet::new(),
                             };
                             call_env.borrow_mut().values.insert(
                                 "__varargs".to_string(),
@@ -679,6 +703,9 @@ impl Runtime {
                 let mut table = table.borrow_mut();
                 match index {
                     Value::String(key) => {
+                        if table.const_fields.contains(&key) {
+                            return Err(format!("assignment to const field `{}`", key));
+                        }
                         table.fields.insert(key, value);
                         Ok(())
                     }
@@ -698,6 +725,18 @@ impl Runtime {
             _ => Err("assignment target is not a table".to_string()),
         }
     }
+
+    fn protect_member(&self, target: &Expr, env: EnvRef) -> Result<(), String> {
+        let Expr::Member { object, field } = target else {
+            return Err("invalid const function target".to_string());
+        };
+        let value = self.eval(object, env)?;
+        let Value::Table(table) = value else {
+            return Err("const function target is not a table".to_string());
+        };
+        table.borrow_mut().const_fields.insert(field.clone());
+        Ok(())
+    }
 }
 
 fn native(name: &'static str, call: Native) -> Value {
@@ -706,6 +745,7 @@ fn native(name: &'static str, call: Native) -> Value {
 fn child(parent: &EnvRef) -> EnvRef {
     Rc::new(RefCell::new(Env {
         values: HashMap::new(),
+        const_names: HashSet::new(),
         parent: Some(parent.clone()),
     }))
 }
@@ -719,6 +759,9 @@ fn lookup(env: &EnvRef, name: &str) -> Option<Value> {
 }
 fn assign_env(env: &EnvRef, name: &str, value: Value) -> Result<(), String> {
     if env.borrow().values.contains_key(name) {
+        if env.borrow().const_names.contains(name) {
+            return Err(format!("assignment to const name `{}`", name));
+        }
         env.borrow_mut().values.insert(name.to_string(), value);
         Ok(())
     } else if let Some(parent) = env.borrow().parent.clone() {

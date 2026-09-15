@@ -39,11 +39,13 @@ pub struct TableEntry {
 pub enum Stmt {
     Local {
         name: String,
+        is_const: bool,
         type_name: Option<String>,
         initializer: Option<Expr>,
     },
     LocalMany {
         names: Vec<String>,
+        is_const: bool,
         initializers: Vec<Expr>,
     },
     Assign {
@@ -56,6 +58,7 @@ pub enum Stmt {
     },
     Function {
         name: Option<String>,
+        is_const: bool,
         params: Vec<Param>,
         return_type: Option<String>,
         body: Vec<Stmt>,
@@ -142,7 +145,7 @@ impl Parser {
             return self.parse_binding();
         }
         if self.check_keyword("function") {
-            return self.parse_function();
+            return self.parse_function(false);
         }
         if self.check_keyword("if") {
             return self.parse_if();
@@ -204,15 +207,17 @@ impl Parser {
     }
 
     fn parse_binding(&mut self) -> Stmt {
+        let mut is_const = false;
         while self.check_keyword("local")
             || self.check_keyword("const")
             || self.check_keyword("global")
         {
+            is_const |= self.check_keyword("const");
             self.pos += 1;
         }
 
         if self.check_keyword("function") {
-            return self.parse_function();
+            return self.parse_function(is_const);
         }
 
         let name = self.expect_name();
@@ -228,6 +233,7 @@ impl Parser {
             }
             return Stmt::LocalMany {
                 names,
+                is_const,
                 initializers,
             };
         }
@@ -245,12 +251,13 @@ impl Parser {
 
         Stmt::Local {
             name,
+            is_const,
             type_name,
             initializer,
         }
     }
 
-    fn parse_function(&mut self) -> Stmt {
+    fn parse_function(&mut self, is_const: bool) -> Stmt {
         self.expect_keyword("function");
 
         let name = if self.peek().kind == "name" {
@@ -280,6 +287,7 @@ impl Parser {
         self.expect_keyword("end");
         Stmt::Function {
             name,
+            is_const,
             params,
             return_type,
             body,
@@ -769,6 +777,7 @@ mod tests {
             vec![
                 Stmt::Local {
                     name: "msg".to_string(),
+                    is_const: false,
                     type_name: None,
                     initializer: Some(Expr::Literal("hello".to_string())),
                 },
@@ -791,6 +800,7 @@ mod tests {
             program[0],
             Stmt::Local {
                 name: "small".to_string(),
+                is_const: false,
                 type_name: Some("int".to_string()),
                 initializer: Some(Expr::Literal("2".to_string())),
             }
@@ -810,6 +820,7 @@ mod tests {
             program[0],
             Stmt::Function {
                 name: Some("math.random".to_string()),
+                is_const: false,
                 params: vec![
                     super::Param {
                         name: "min".to_string(),

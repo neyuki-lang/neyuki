@@ -10,6 +10,18 @@ const greeting = "hello"
 global shared = nil
 ```
 
+Const bindings cannot be reassigned. A `const function` also protects the
+declared function field, while the containing table remains mutable:
+
+```lua
+local math = {}
+const function math.exp(n: number): number
+    return n
+end
+
+math.exp = 2 -- runtime error
+```
+
 Multiple local bindings are supported:
 
 ```lua
