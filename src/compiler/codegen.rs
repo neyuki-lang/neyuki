@@ -5,7 +5,7 @@ use std::str::FromStr;
 
 use crate::bytecode::instruction::Instruction;
 use crate::bytecode::proto::{Constant, Proto, UpvalueDesc};
-use crate::parser::{Expr, Param, Stmt};
+use crate::parser::{Expr, InterpPart, Param, Stmt};
 
 #[derive(Clone, Debug)]
 struct LocalVar {
@@ -255,6 +255,86 @@ impl Compiler {
                 let val_reg = self.compile_expr(value, None);
                 self.compile_assign(target, val_reg);
                 self.current_mut().free_reg(val_reg);
+            }
+            Stmt::AssignMany { targets, values } => {
+                if values.len() == 1 && matches!(values[0], Expr::Call { .. }) {
+                    let Expr::Call { callee, args } = &values[0] else { unreachable!() };
+                    let func_reg = self.current_mut().alloc_reg();
+                    self.compile_expr(callee, Some(func_reg));
+                    let mut arg_regs = Vec::new();
+                    for arg in args {
+                        let r = self.current_mut().alloc_reg();
+                        self.compile_expr(arg, Some(r));
+                        arg_regs.push(r);
+                    }
+                    let retc = targets.len() as u8;
+                    while self.current_mut().reg_top < func_reg + retc {
+                        self.current_mut().alloc_reg();
+                    }
+                    self.current_mut().emit(Instruction::Call {
+                        callee: func_reg,
+                        argc: args.len() as u8,
+                        retc,
+                    });
+                    for r in arg_regs.into_iter().rev() {
+                        self.current_mut().free_reg(r);
+                    }
+                    for (i, target) in targets.iter().enumerate() {
+                        self.compile_assign(target, func_reg + i as u8);
+                    }
+                    self.current_mut().reg_top = func_reg;
+                } else if values.len() == 1 && matches!(values[0], Expr::MethodCall { .. }) {
+                    let Expr::MethodCall { object, method, args } = &values[0] else { unreachable!() };
+                    let func_reg = self.current_mut().alloc_reg();
+                    let arg0 = self.current_mut().alloc_reg();
+                    self.compile_expr(object, Some(arg0));
+                    let key_k = self.current_mut().add_constant(Constant::String(method.clone()));
+                    self.current_mut().emit(Instruction::GetTableK {
+                        dst: func_reg,
+                        table: arg0,
+                        key_k,
+                    });
+                    let mut arg_regs = Vec::new();
+                    for arg in args {
+                        let r = self.current_mut().alloc_reg();
+                        self.compile_expr(arg, Some(r));
+                        arg_regs.push(r);
+                    }
+                    let retc = targets.len() as u8;
+                    while self.current_mut().reg_top < func_reg + retc {
+                        self.current_mut().alloc_reg();
+                    }
+                    self.current_mut().emit(Instruction::Call {
+                        callee: func_reg,
+                        argc: (args.len() + 1) as u8,
+                        retc,
+                    });
+                    for r in arg_regs.into_iter().rev() {
+                        self.current_mut().free_reg(r);
+                    }
+                    self.current_mut().free_reg(arg0);
+                    for (i, target) in targets.iter().enumerate() {
+                        self.compile_assign(target, func_reg + i as u8);
+                    }
+                    self.current_mut().reg_top = func_reg;
+                } else {
+                    let mut val_regs = Vec::new();
+                    for val in values {
+                        let r = self.compile_expr(val, None);
+                        val_regs.push(r);
+                    }
+                    while val_regs.len() < targets.len() {
+                        let r = self.current_mut().alloc_reg();
+                        self.current_mut().emit(Instruction::LoadNil { dst: r });
+                        val_regs.push(r);
+                    }
+                    for (target, r) in targets.iter().zip(val_regs.iter()) {
+                        self.compile_assign(target, *r);
+                    }
+                    for r in val_regs.into_iter().rev() {
+                        self.current_mut().free_reg(r);
+                    }
+                }
             }
             Stmt::Increment { target, amount } => {
                 let current = self.compile_expr(target, None);
@@ -689,9 +769,59 @@ impl Compiler {
                 let k = self.current_mut().add_constant(Constant::String(s.clone()));
                 self.current_mut().emit(Instruction::LoadK { dst, k });
             }
-            Expr::Interp(s) => {
-                let k = self.current_mut().add_constant(Constant::String(s.clone()));
-                self.current_mut().emit(Instruction::LoadK { dst, k });
+            Expr::Interp(parts) => {
+                if parts.is_empty() {
+                    let k = self.current_mut().add_constant(Constant::String(String::new()));
+                    self.current_mut().emit(Instruction::LoadK { dst, k });
+                } else if parts.iter().all(|p| matches!(p, InterpPart::Literal(_))) {
+                    let mut s = String::new();
+                    for p in parts {
+                        if let InterpPart::Literal(lit) = p {
+                            s.push_str(lit);
+                        }
+                    }
+                    let k = self.current_mut().add_constant(Constant::String(s));
+                    self.current_mut().emit(Instruction::LoadK { dst, k });
+                } else {
+                    let mut cur_reg = None;
+                    for part in parts {
+                        let part_reg = match part {
+                            InterpPart::Literal(lit) => {
+                                let r = self.current_mut().alloc_reg();
+                                let k = self.current_mut().add_constant(Constant::String(lit.clone()));
+                                self.current_mut().emit(Instruction::LoadK { dst: r, k });
+                                r
+                            }
+                            InterpPart::Expr(expr) => {
+                                self.compile_expr(expr, None)
+                            }
+                        };
+                        if let Some(prev) = cur_reg {
+                            let next = self.current_mut().alloc_reg();
+                            self.current_mut().emit(Instruction::Concat { dst: next, a: prev, b: part_reg });
+                            self.current_mut().free_reg(part_reg);
+                            self.current_mut().free_reg(prev);
+                            cur_reg = Some(next);
+                        } else if parts.len() == 1 {
+                            let empty_reg = self.current_mut().alloc_reg();
+                            let k = self.current_mut().add_constant(Constant::String(String::new()));
+                            self.current_mut().emit(Instruction::LoadK { dst: empty_reg, k });
+                            let next = self.current_mut().alloc_reg();
+                            self.current_mut().emit(Instruction::Concat { dst: next, a: empty_reg, b: part_reg });
+                            self.current_mut().free_reg(empty_reg);
+                            self.current_mut().free_reg(part_reg);
+                            cur_reg = Some(next);
+                        } else {
+                            cur_reg = Some(part_reg);
+                        }
+                    }
+                    if let Some(res) = cur_reg {
+                        if res != dst {
+                            self.current_mut().emit(Instruction::Move { dst, src: res });
+                        }
+                        self.current_mut().free_reg(res);
+                    }
+                }
             }
             Expr::Variable(name) => {
                 let (is_local, reg_or_upval) = self.resolve_variable(name);
@@ -861,6 +991,39 @@ impl Compiler {
                 for r in arg_regs.into_iter().rev() {
                     self.current_mut().free_reg(r);
                 }
+                self.current_mut().free_reg(func_reg);
+            }
+            Expr::MethodCall { object, method, args } => {
+                let func_reg = self.current_mut().alloc_reg();
+                let arg0 = self.current_mut().alloc_reg();
+                self.compile_expr(object, Some(arg0));
+                let key_k = self.current_mut().add_constant(Constant::String(method.clone()));
+                self.current_mut().emit(Instruction::GetTableK {
+                    dst: func_reg,
+                    table: arg0,
+                    key_k,
+                });
+                let mut arg_regs = Vec::new();
+                for arg in args {
+                    let r = self.current_mut().alloc_reg();
+                    self.compile_expr(arg, Some(r));
+                    arg_regs.push(r);
+                }
+                self.current_mut().emit(Instruction::Call {
+                    callee: func_reg,
+                    argc: (args.len() + 1) as u8,
+                    retc: 1,
+                });
+                if func_reg != dst {
+                    self.current_mut().emit(Instruction::Move {
+                        dst,
+                        src: func_reg,
+                    });
+                }
+                for r in arg_regs.into_iter().rev() {
+                    self.current_mut().free_reg(r);
+                }
+                self.current_mut().free_reg(arg0);
                 self.current_mut().free_reg(func_reg);
             }
             Expr::Function { params, body } => {

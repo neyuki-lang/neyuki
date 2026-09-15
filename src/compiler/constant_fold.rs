@@ -5,7 +5,7 @@ use num_integer::Integer as _;
 use num_traits::{FromPrimitive, Signed, ToPrimitive, Zero};
 use std::str::FromStr;
 
-use crate::parser::{Expr, Stmt, TableEntry};
+use crate::parser::{Expr, InterpPart, Stmt, TableEntry};
 
 #[derive(Clone, Debug, PartialEq)]
 enum FoldVal {
@@ -439,7 +439,30 @@ fn fold_builtin_call(callee: &Expr, args: &[FoldVal]) -> Option<FoldVal> {
 // Recursively optimize an AST expression by folding constants
 pub fn fold_expr(expr: Expr) -> Expr {
     match expr {
-        Expr::Literal(_) | Expr::Str(_) | Expr::Interp(_) | Expr::Variable(_) | Expr::Vararg => expr,
+        Expr::Literal(_) | Expr::Str(_) | Expr::Variable(_) | Expr::Vararg => expr,
+        Expr::Interp(parts) => {
+            let folded_parts: Vec<InterpPart> = parts
+                .into_iter()
+                .map(|p| match p {
+                    InterpPart::Literal(s) => InterpPart::Literal(s),
+                    InterpPart::Expr(e) => InterpPart::Expr(fold_expr(e)),
+                })
+                .collect();
+            let all_literals = folded_parts
+                .iter()
+                .all(|p| matches!(p, InterpPart::Literal(_)));
+            if all_literals {
+                let mut combined = String::new();
+                for p in folded_parts {
+                    if let InterpPart::Literal(s) = p {
+                        combined.push_str(&s);
+                    }
+                }
+                Expr::Str(combined)
+            } else {
+                Expr::Interp(folded_parts)
+            }
+        }
         Expr::Unary { op, expr: inner } => {
             let folded_inner = fold_expr(*inner);
             if let Some(c) = FoldVal::from_expr(&folded_inner) {
@@ -534,6 +557,15 @@ pub fn fold_expr(expr: Expr) -> Expr {
         Expr::Function { params, body } => Expr::Function {
             params,
             body: fold_program(body),
+        },
+        Expr::MethodCall {
+            object,
+            method,
+            args,
+        } => Expr::MethodCall {
+            object: Box::new(fold_expr(*object)),
+            method,
+            args: args.into_iter().map(fold_expr).collect(),
         },
         Expr::Table(entries) => Expr::Table(
             entries
@@ -664,6 +696,10 @@ pub fn fold_stmt(stmt: Stmt) -> Option<Stmt> {
         Stmt::Expr(expr) => Some(Stmt::Expr(fold_expr(expr))),
         Stmt::Break => Some(Stmt::Break),
         Stmt::Continue => Some(Stmt::Continue),
+        Stmt::AssignMany { targets, values } => Some(Stmt::AssignMany {
+            targets: targets.into_iter().map(fold_expr).collect(),
+            values: values.into_iter().map(fold_expr).collect(),
+        }),
     }
 }
 
