@@ -1,5 +1,3 @@
-// Register-based Virtual Machine module for Neyuki.
-
 pub mod buffer;
 pub mod frame;
 pub mod gc;
