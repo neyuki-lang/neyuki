@@ -5,7 +5,6 @@ edition = "2024"
 description = "A small Lua-like scripting language implemented in Rust"
 readme = "README.md"
 license = "MIT"
-license-file = "LICENSE"
 repository = "https://github.com/neyuki-lang/neyuki"
 homepage = "https://neyuki.cc/"
 
