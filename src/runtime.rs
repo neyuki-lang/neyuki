@@ -774,6 +774,13 @@ impl Runtime {
                     "not" => Ok(Value::Bool(!value.truthy_bool()?)),
                     "-" => self.number_unary(value, true),
                     "#" => self.length(value),
+                    "~" => match value {
+                        Value::Integer(i) => match i {
+                            Int::Small(s) => Ok(Value::Integer(Int::Small(!s))),
+                            Int::Big(b) => Ok(Value::Integer(Int::from_bigint(!(*b).clone()))),
+                        },
+                        _ => Err("bitwise not expects an integer".to_string()),
+                    },
                     _ => Err(format!("unsupported unary operator {}", op)),
                 }
             }
