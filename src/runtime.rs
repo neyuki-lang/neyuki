@@ -110,6 +110,7 @@ impl Runtime {
             ("type", native("type", builtin_type)),
             ("typeof", native("typeof", builtin_typeof)),
             ("assert", native("assert", builtin_assert)),
+            ("error", native("error", builtin_error)),
             ("int", native("int", builtin_int)),
             ("float", native("float", builtin_float)),
             ("__random_int", native("__random_int", builtin_random_int)),
@@ -788,6 +789,12 @@ fn builtin_assert(args: Vec<Value>) -> Result<Vec<Value>, String> {
             .unwrap_or_else(|| "assertion failed".to_string()));
     }
     Ok(args)
+}
+fn builtin_error(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    Err(args
+        .first()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "error".to_string()))
 }
 fn builtin_int(args: Vec<Value>) -> Result<Vec<Value>, String> {
     Ok(vec![Value::Integer(
