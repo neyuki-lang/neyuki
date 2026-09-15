@@ -8,14 +8,109 @@ const function table.length(t: {any}): int
     return n
 end
 
-const function table.insert(t: {any}, v: any): int
+const function table.insert(t: {any}, v: any, i: int?): int
     local len = table.length(t)
-    t[len + 1] = v
-    return len + 1
+    if (i == nil) then
+        i = len + 1
+    end
+    for j = len, i, -1 do
+        t[j + 1] = t[j]
+    end
+    t[i] = v
+    return i
 end
 
-const function table.unpack(t: {any}): ...: any
+const function table.unpack(t: {any}): ...any
+if (t == nil) then error("t must be provided") end
+    if (type(t) != "table") then error("t must be a table") end
     return __table_unpack(t)
+end
+
+const function table.clear(t: {any}): nil
+    if (t == nil) then error("t must be provided") end
+    if (type(t) != "table") then error("t must be a table") end
+
+    for k, _ in t do
+        t[k] = nil
+    end
+    return nil
+end
+
+const function table.clone(t: {any}): {any}
+    if (t == nil) then error("t must be provided") end
+    if (type(t) != "table") then error("t must be a table") end
+
+    local newTable = {}
+    for k, v in t do
+        newTable[k] = v
+    end
+    return newTable
+end
+
+const function table.concat(t: {string}, sep: string, i: int?, j: int?): string
+    if (t == nil) then error("t must be provided") end
+    if (type(t) != "table") then error("t must be a table") end
+    if (sep == nil) then sep = "" end
+    if (i == nil) then i = 1 end
+    if (j == nil) then j = table.length(t) end
+
+    local result = ""
+    for index = i, j do
+        result = result .. t[index]
+        if index < j then
+            result = result .. sep
+        end
+    end
+    return result
+end
+
+const function table.create(n: int, v: any): {any}
+    if (n == nil) then error("n must be provided") end
+    if (type(n) != "number") then error("n must be a number") end
+    if (n < 0) then error("n must be non-negative") end
+
+    local t = {}
+    for i = 1, n do
+        t[i] = v
+    end
+    return t
+end
+
+const function table.find(t: {any}, v: any): int?
+    if (t == nil) then error("t must be provided") end
+    if (type(t) != "table") then error("t must be a table") end
+    if (v == nil) then error("v must be provided") end
+
+    for k, val in t do
+        if (val == v) then
+            return k
+        end
+    end
+    return nil
+end
+
+const function table.pack(...: any): {any}
+    local t = {...}
+    return t
+end
+
+const function table.remove(t: {any}, i: int?): any
+    if (t == nil) then error("t must be provided") end
+    if (type(t) != "table") then error("t must be a table") end
+    local len = table.length(t)
+    if (i == nil) then
+        i = len
+    end
+    if (i < 1 or i > len) then
+        error("index out of bounds")
+    end
+
+    local removedValue = t[i]
+    for j = i, len - 1 do
+        t[j] = t[j + 1]
+    end
+    t[len] = nil
+    return removedValue
 end
 
 return table
