@@ -1105,7 +1105,10 @@ fn builtin_modf(args: Vec<Value>) -> Result<Vec<Value>, String> {
     if value.is_infinite() {
         return Ok(vec![Value::Number(value), Value::Number(0.0)]);
     }
-    Ok(vec![Value::Number(value.trunc()), Value::Number(value.fract())])
+    Ok(vec![
+        Value::Number(value.trunc()),
+        Value::Number(value.fract()),
+    ])
 }
 fn builtin_frexp(args: Vec<Value>) -> Result<Vec<Value>, String> {
     let value = float_argument(&args, 0, "frexp argument")?;
