@@ -55,9 +55,33 @@ const function math.min(n1: number, n2: number, ...: number): number
     return min
 end
 
+const function math.exp(n: number): number -- exponent e^n
+    if (n == nil) then
+        error("n must be provided")
+    end
+    if (type(n) != "number") then
+        error("n must be a number")
+    end
+
+    return __exp(n)
+end
+
 const function math.abs(n: number): number
     if (n < 0) then
         return -n
+    else
+        return n
+    end
+end
+
+const function math.clamp(n: number, min: number, max: number): number
+    if (min > max) then
+        error("min must be less than or equal to max")
+    end
+    if (n < min) then
+        return min
+    elseif (n > max) then
+        return max
     else
         return n
     end

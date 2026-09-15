@@ -119,6 +119,7 @@ impl Runtime {
             ("error", native("error", builtin_error)),
             ("int", native("int", builtin_int)),
             ("float", native("float", builtin_float)),
+            ("__exp", native("__exp", builtin_exp)),
             ("__random_int", native("__random_int", builtin_random_int)),
             (
                 "__random_bigint",
@@ -882,6 +883,11 @@ fn builtin_float(args: Vec<Value>) -> Result<Vec<Value>, String> {
     Ok(vec![Value::Number(number(
         args.first().cloned().unwrap_or(Value::Nil),
     )?)])
+}
+fn builtin_exp(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    Ok(vec![Value::Number(
+        number(args.first().cloned().unwrap_or(Value::Nil))?.exp(),
+    )])
 }
 fn builtin_random_int(args: Vec<Value>) -> Result<Vec<Value>, String> {
     if args

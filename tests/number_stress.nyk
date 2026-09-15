@@ -20,5 +20,8 @@ local hex = 0x1_0000_0000_0000_0000
 local binary = 0b1_0000_0000
 assert(hex == 18446744073709551616, "hex bigint literal should stay exact")
 assert(binary == 256, "binary bigint literal should parse")
+assert(math.exp(0) == 1, "exp(0) should equal 1")
+assert(math.exp(1) > 2.71828, "exp(1) should be greater than 2.71828")
+assert(math.exp(1) < 2.71829, "exp(1) should be less than 2.71829")
 
 print(`[pass] numbers & widening: 2^62 * 8 = {big} ({typeof(big)})`)
