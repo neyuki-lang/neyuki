@@ -5,6 +5,15 @@ for i in {1, 2, 3, 4, 5, 6, 7, 8, 9, 10} do
     assert(value >= 1 and value <= 10, "random value is outside the requested range")
 end
 
+local largeMin = 0x1_0000_0000_0000_0000
+local largeMax = largeMin + 10
+local largeValue = math.random(largeMin, largeMax)
+assert(typeof(largeValue) == "bigint", "bigint random should return a bigint")
+assert(largeValue >= largeMin and largeValue <= largeMax, "bigint random value is outside the requested range")
+
+local directValue = __random_bigint(largeMin, largeMax)
+assert(directValue >= largeMin and directValue <= largeMax, "direct bigint random value is outside the requested range")
+
 local ok, err = try(math.random, 10, 1)
 assert(not ok, "random should reject an inverted range")
 

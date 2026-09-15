@@ -3,10 +3,10 @@ use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
 
-use num_bigint::BigInt;
+use num_bigint::{BigInt, Sign};
 use num_integer::Integer as _;
 use num_traits::{FromPrimitive, ToPrimitive, Zero};
-use rand::Rng;
+use rand::{Rng, RngCore};
 
 use crate::parser::{Expr, Param, Stmt};
 
@@ -120,6 +120,10 @@ impl Runtime {
             ("int", native("int", builtin_int)),
             ("float", native("float", builtin_float)),
             ("__random_int", native("__random_int", builtin_random_int)),
+            (
+                "__random_bigint",
+                native("__random_bigint", builtin_random_bigint),
+            ),
             (
                 "__table_unpack",
                 native("__table_unpack", builtin_table_unpack),
@@ -880,6 +884,15 @@ fn builtin_float(args: Vec<Value>) -> Result<Vec<Value>, String> {
     )?)])
 }
 fn builtin_random_int(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    if args
+        .first()
+        .is_some_and(|value| matches!(value, Value::Integer(_)))
+        || args
+            .get(1)
+            .is_some_and(|value| matches!(value, Value::Integer(_)))
+    {
+        return builtin_random_bigint(args);
+    }
     let min = integer_argument(args.first().cloned().unwrap_or(Value::Nil), "min")?;
     let max = integer_argument(args.get(1).cloned().unwrap_or(Value::Nil), "max")?;
     if min > max {
@@ -888,6 +901,33 @@ fn builtin_random_int(args: Vec<Value>) -> Result<Vec<Value>, String> {
     Ok(vec![Value::Integer(BigInt::from(
         rand::thread_rng().gen_range(min..=max),
     ))])
+}
+
+fn builtin_random_bigint(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let min = bigint_argument(args.first().cloned().unwrap_or(Value::Nil), "min")?;
+    let max = bigint_argument(args.get(1).cloned().unwrap_or(Value::Nil), "max")?;
+    if min > max {
+        return Err("random min must be less than or equal to max".to_string());
+    }
+
+    let range = &max - &min;
+    let bit_count = range.bits();
+    let byte_count = ((bit_count + 7) / 8) as usize;
+    let excess_bits = (byte_count as u64 * 8).saturating_sub(bit_count);
+    let mut bytes = vec![0; byte_count];
+    let mut rng = rand::thread_rng();
+    let offset = loop {
+        rng.fill_bytes(&mut bytes);
+        if excess_bits > 0 {
+            bytes[0] &= u8::MAX >> excess_bits;
+        }
+        let offset = BigInt::from_bytes_be(Sign::Plus, &bytes);
+        if offset <= range {
+            break offset;
+        }
+    };
+
+    Ok(vec![Value::Integer(min + offset)])
 }
 
 fn builtin_table_unpack(args: Vec<Value>) -> Result<Vec<Value>, String> {
@@ -906,6 +946,15 @@ fn integer_argument(value: Value, name: &str) -> Result<i64, String> {
         return Err(format!("random {} must be an integer", name));
     }
     Ok(value as i64)
+}
+fn bigint_argument(value: Value, name: &str) -> Result<BigInt, String> {
+    match value {
+        Value::Integer(value) => Ok(value),
+        Value::Number(value) if value.is_finite() && value.fract() == 0.0 => {
+            BigInt::from_f64(value).ok_or_else(|| format!("random {} must be an integer", name))
+        }
+        _ => Err(format!("random {} must be an integer", name)),
+    }
 }
 fn builtin_try(args: Vec<Value>) -> Result<Vec<Value>, String> {
     let Some(Value::Function(function)) = args.first() else {
