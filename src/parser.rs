@@ -955,7 +955,10 @@ fn parse_interp_parts(value: &str) -> Vec<InterpPart> {
         let mut parser = Parser::new(expression);
         let statements = parser.parse_program();
         if statements.len() != 1 {
-            panic!("interpolation must contain one expression: {:?}", expression);
+            panic!(
+                "interpolation must contain one expression: {:?}",
+                expression
+            );
         }
         let Stmt::Expr(expression) = statements.into_iter().next().unwrap() else {
             panic!("interpolation must contain an expression: {:?}", expression);
