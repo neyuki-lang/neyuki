@@ -9,8 +9,9 @@ use crate::bytecode::proto::{Constant, Proto};
 use crate::vm::frame::CallFrame;
 use crate::vm::gc::GcTracker;
 use crate::vm::libs::{
-    create_bit_lib, create_buffer_lib, create_coroutine_lib, create_debug_lib, create_json_lib,
-    create_math_lib, create_os_lib, create_string_lib, create_table_lib, create_utf8_lib,
+    create_bit_lib, create_buffer_lib, create_coroutine_lib, create_crypto_lib, create_debug_lib,
+    create_json_lib, create_math_lib, create_os_lib, create_string_lib, create_table_lib,
+    create_utf8_lib,
 };
 use crate::vm::value::{NativeFn, Value, VmClosure, VmTable};
 
@@ -47,6 +48,7 @@ impl VM {
         self.globals.insert("debug".to_string(), create_debug_lib());
         self.globals.insert("json".to_string(), create_json_lib());
         self.globals.insert("utf8".to_string(), create_utf8_lib());
+        self.globals.insert("crypto".to_string(), create_crypto_lib());
     }
 
     pub fn register_native(&mut self, name: &'static str, func: NativeFn) {
@@ -1078,6 +1080,14 @@ mod tests {
         let res = vm.execute(proto);
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("exceeds maximum limit"));
+    }
+
+    #[test]
+    fn test_vm_crypto_library() {
+        let code = "local c = require(\"@neyuki/crypto\")\nlocal h = c.hash(\"hello world\", \"sha256\")\nreturn h";
+        let res = run_code(code);
+        // sha256("hello world") = b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9
+        assert_eq!(res.to_string(), "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9");
     }
 }
 
