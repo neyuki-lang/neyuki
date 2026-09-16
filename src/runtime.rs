@@ -41,7 +41,7 @@ impl Int {
         }
     }
 
-    // The low 64 bits in two's complement, as an unsigned word.
+    /// The low 64 bits in two's complement, as an unsigned word.
     pub(crate) fn low_u64(&self) -> u64 {
         match self {
             Int::Small(value) => *value as u64,
@@ -1513,28 +1513,14 @@ fn bitwise(left: Value, op: &str, right: Value) -> Result<Value, String> {
         "&" => &a & &b,
         "|" => &a | &b,
         "~" => &a ^ &b,
-        "<<" => {
-            if let Some(shift) = b.to_i64() {
-                if shift < 0 {
-                    a.shr((-shift) as usize)
-                } else {
-                    a.shl(shift as usize)
-                }
-            } else {
-                return Err("shift is too large".to_string());
-            }
-        }
-        ">>" => {
-            if let Some(shift) = b.to_i64() {
-                if shift < 0 {
-                    a.shl((-shift) as usize)
-                } else {
-                    a.shr(shift as usize)
-                }
-            } else {
-                return Err("shift is too large".to_string());
-            }
-        }
+        "<<" => a.shl(
+            b.to_usize()
+                .ok_or_else(|| "shift is too large".to_string())?,
+        ),
+        ">>" => a.shr(
+            b.to_usize()
+                .ok_or_else(|| "shift is too large".to_string())?,
+        ),
         "<<<" | ">>>" => {
             // Logical shifts act on the low 64 bits as an unsigned word, so
             // the result is always in 0..2^64 and shifting by 64+ yields 0.

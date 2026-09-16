@@ -74,7 +74,14 @@ print(file:read())
 
 Arithmetic operators are `+`, `-`, `*`, `/`, `//`, `%`, and `^`. Comparisons are `==`, `!=`, `<`, `<=`, `>`, and `>=`; tables and functions compare by identity, so a table is equal only to itself. Boolean operators are `and`, `or`, and `not`; `??` selects its right side only when the left side is `nil`. `..` concatenates strings and `#` returns string or array length.
 
-Bitwise operators include `&`, `|`, `~`, `<<`, and `>>`.
+Bitwise operators include `&`, `|`, `~`, `<<`, and `>>`. `>>` is an arithmetic shift, so it keeps the sign of negative numbers. The logical shifts `<<<` and `>>>` treat the left operand as an unsigned 64-bit word: bits shifted past the 64th are dropped, zeros are shifted in, and the result is never negative.
+
+```lua
+print(-8 >> 1)      -- -4
+print(-1 >>> 60)    -- 15
+print(1 <<< 63)     -- 9223372036854775808
+print(1 <<< 64)     -- 0
+```
 
 Increment and decrement are statement operators for assignable targets:
 
