@@ -3,6 +3,7 @@
 pub mod bit;
 pub mod buffer;
 pub mod coroutine;
+pub mod crypto;
 pub mod debug;
 pub mod json;
 pub mod math;
@@ -14,6 +15,7 @@ pub mod utf8;
 pub use bit::create_bit_lib;
 pub use buffer::create_buffer_lib;
 pub use coroutine::create_coroutine_lib;
+pub use crypto::create_crypto_lib;
 pub use debug::create_debug_lib;
 pub use json::create_json_lib;
 pub use math::create_math_lib;
