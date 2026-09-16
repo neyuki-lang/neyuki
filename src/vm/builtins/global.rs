@@ -149,6 +149,7 @@ pub fn builtin_require(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String
         "@neyuki/debug" | "debug" => "debug",
         "@neyuki/json" | "json" => "json",
         "@neyuki/utf8" | "utf8" => "utf8",
+        "@neyuki/crypto" | "crypto" => "crypto",
         other => {
             let path = if other.ends_with(".nyk") || other.ends_with(".nykb") {
                 other.to_string()
