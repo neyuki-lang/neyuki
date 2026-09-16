@@ -19,7 +19,15 @@ pub fn compile_source(source: &str) -> Result<Vec<Stmt>, String> {
         let mut parser = Parser::new(source);
         parser.parse_program()
     }))
-    .map_err(|_| "syntax error".to_string())
+    .map_err(|payload| {
+        if let Some(s) = payload.downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = payload.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "syntax error".to_string()
+        }
+    })
 }
 
 // Read and parse source file into AST statements
@@ -83,5 +91,20 @@ mod tests {
         let proto = compile_to_proto(&stmts);
         assert!(proto.max_registers >= 1);
         assert!(!proto.instructions.is_empty());
+    }
+
+    #[test]
+    fn test_compile_error_on_invalid_interpolation() {
+        // Unfinished interpolation must fail compilation
+        let code = "local s = `hello {name`";
+        let res = compile_source(code);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_lowercase().contains("unfinished"));
+
+        // Multi-statement in interpolation must fail compilation
+        let code2 = "local s = `hello {a; b}`";
+        let res2 = compile_source(code2);
+        assert!(res2.is_err());
+        assert!(res2.unwrap_err().contains("exactly one expression"));
     }
 }

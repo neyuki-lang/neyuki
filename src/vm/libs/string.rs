@@ -51,13 +51,31 @@ fn string_rep(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     if n <= 0 {
         return Ok(vec![Value::String(String::new())]);
     }
+    const MAX_REP_COUNT: isize = 10_000_000;
+    if n > MAX_REP_COUNT {
+        return Err(format!("count exceeds maximum limit ({}) in 'string.rep'", MAX_REP_COUNT));
+    }
     let sep = if let Some(sep_val) = args.get(2) {
         to_string_arg(sep_val)?
     } else {
         String::new()
     };
-    let parts = vec![s; n as usize];
-    Ok(vec![Value::String(parts.join(&sep))])
+    if s.is_empty() && sep.is_empty() {
+        return Ok(vec![Value::String(String::new())]);
+    }
+    let unit = s.len() + sep.len();
+    let total = unit.saturating_mul(n as usize);
+    if total > i32::MAX as usize || total > 100 * 1024 * 1024 {
+        return Err(format!("string.rep result too large: {} bytes", total));
+    }
+    let mut out = String::with_capacity(total);
+    for i in 0..n {
+        if i > 0 && !sep.is_empty() {
+            out.push_str(&sep);
+        }
+        out.push_str(&s);
+    }
+    Ok(vec![Value::String(out)])
 }
 
 fn string_sub(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {

@@ -262,6 +262,8 @@ impl Compiler {
                             "~" => self.current_mut().emit(Instruction::BitXor { dst, a, b }),
                             "<<" => self.current_mut().emit(Instruction::Shl { dst, a, b }),
                             ">>" => self.current_mut().emit(Instruction::Shr { dst, a, b }),
+                            "<<<" => self.current_mut().emit(Instruction::LShl { dst, a, b }),
+                            ">>>" => self.current_mut().emit(Instruction::LShr { dst, a, b }),
                             ".." => self.current_mut().emit(Instruction::Concat { dst, a, b }),
                             _ => {
                                 self.emit_error("unsupported operator");

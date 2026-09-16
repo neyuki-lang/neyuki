@@ -18,14 +18,24 @@ pub fn create_json_lib() -> Value {
     Value::Table(t.clone())
 }
 
+const MAX_JSON_DEPTH: usize = 256;
+
+pub(crate) fn encode_to_string(val: &Value) -> Result<String, String> {
+    let mut out = String::new();
+    encode_value(val, &mut out, 0)?;
+    Ok(out)
+}
+
 fn json_encode(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let val = args.first().unwrap_or(&Value::Nil);
-    let mut out = String::new();
-    encode_value(val, &mut out)?;
+    let out = encode_to_string(val)?;
     Ok(vec![Value::String(out)])
 }
 
-fn encode_value(val: &Value, out: &mut String) -> Result<(), String> {
+fn encode_value(val: &Value, out: &mut String, depth: usize) -> Result<(), String> {
+    if depth >= MAX_JSON_DEPTH {
+        return Err("JSON nesting depth limit (256) exceeded during encode".to_string());
+    }
     match val {
         Value::Nil => out.push_str("null"),
         Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
@@ -47,7 +57,7 @@ fn encode_value(val: &Value, out: &mut String) -> Result<(), String> {
                     if idx > 0 {
                         out.push(',');
                     }
-                    encode_value(item, out)?;
+                    encode_value(item, out, depth + 1)?;
                 }
                 out.push(']');
             } else {
@@ -61,7 +71,7 @@ fn encode_value(val: &Value, out: &mut String) -> Result<(), String> {
                     first = false;
                     encode_string(key, out);
                     out.push(':');
-                    encode_value(item, out)?;
+                    encode_value(item, out, depth + 1)?;
                 }
                 // If array elements also exist in mixed table, include them as numeric string keys
                 for (idx, item) in tbl.array.iter().enumerate() {
@@ -71,7 +81,7 @@ fn encode_value(val: &Value, out: &mut String) -> Result<(), String> {
                     first = false;
                     encode_string(&(idx + 1).to_string(), out);
                     out.push(':');
-                    encode_value(item, out)?;
+                    encode_value(item, out, depth + 1)?;
                 }
                 out.push('}');
             }
@@ -101,24 +111,30 @@ fn encode_string(s: &str, out: &mut String) {
     out.push('"');
 }
 
-fn json_decode(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let s = match args.first() {
-        Some(Value::String(s)) => s.as_str(),
-        _ => return Err("bad argument #1 to 'json.decode' (string expected)".to_string()),
-    };
-
+pub(crate) fn decode_from_str(s: &str) -> Result<Value, String> {
     let mut parser = JsonParser::new(s);
     let val = parser.parse_value()?;
     parser.skip_whitespace();
     if parser.cursor < parser.chars.len() {
         return Err(format!("unexpected trailing data at position {}", parser.cursor));
     }
+    Ok(val)
+}
+
+fn json_decode(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let s = match args.first() {
+        Some(Value::String(s)) => s.as_str(),
+        _ => return Err("bad argument #1 to 'json.decode' (string expected)".to_string()),
+    };
+
+    let val = decode_from_str(s)?;
     Ok(vec![val])
 }
 
 struct JsonParser {
     chars: Vec<char>,
     cursor: usize,
+    depth: usize,
 }
 
 impl JsonParser {
@@ -126,6 +142,7 @@ impl JsonParser {
         Self {
             chars: input.chars().collect(),
             cursor: 0,
+            depth: 0,
         }
     }
 
@@ -250,6 +267,16 @@ impl JsonParser {
     }
 
     fn parse_array(&mut self) -> Result<Value, String> {
+        if self.depth >= MAX_JSON_DEPTH {
+            return Err("JSON nesting depth limit (256) exceeded during decode".to_string());
+        }
+        self.depth += 1;
+        let res = self.parse_array_inner();
+        self.depth -= 1;
+        res
+    }
+
+    fn parse_array_inner(&mut self) -> Result<Value, String> {
         self.advance(); // consume '['
         self.skip_whitespace();
 
@@ -281,6 +308,16 @@ impl JsonParser {
     }
 
     fn parse_object(&mut self) -> Result<Value, String> {
+        if self.depth >= MAX_JSON_DEPTH {
+            return Err("JSON nesting depth limit (256) exceeded during decode".to_string());
+        }
+        self.depth += 1;
+        let res = self.parse_object_inner();
+        self.depth -= 1;
+        res
+    }
+
+    fn parse_object_inner(&mut self) -> Result<Value, String> {
         self.advance(); // consume '{'
         self.skip_whitespace();
 

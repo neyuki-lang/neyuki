@@ -34,6 +34,23 @@ impl Int {
         }
     }
 
+    pub(crate) fn from_u64(value: u64) -> Int {
+        match i64::try_from(value) {
+            Ok(small) => Int::Small(small),
+            Err(_) => Int::Big(Rc::new(BigInt::from(value))),
+        }
+    }
+
+    // The low 64 bits in two's complement, as an unsigned word.
+    pub(crate) fn low_u64(&self) -> u64 {
+        match self {
+            Int::Small(value) => *value as u64,
+            Int::Big(value) => ((**value).clone() & BigInt::from(u64::MAX))
+                .to_u64()
+                .unwrap_or(0),
+        }
+    }
+
     pub(crate) fn to_bigint(&self) -> BigInt {
         match self {
             Int::Small(value) => BigInt::from(*value),
@@ -355,8 +372,16 @@ pub fn run_file(path: &str) -> Result<(), String> {
     runtime.execute(&program).map(|_| ())
 }
 
+#[allow(dead_code)]
+pub fn run_source(source: &str) -> Result<(), String> {
+    let program = crate::compiler::compile_source(source)?;
+    let mut runtime = Runtime::new();
+    runtime.execute(&program).map(|_| ())
+}
+
 pub struct Runtime {
     global: EnvRef,
+    call_depth: std::cell::Cell<usize>,
 }
 
 impl Runtime {
@@ -423,6 +448,11 @@ impl Runtime {
             ("rawset", native("rawset", builtin_rawset)),
             ("rawget", native("rawget", builtin_rawget)),
             ("rawequal", native("rawequal", builtin_rawequal)),
+            ("__os_clock", native("__os_clock", builtin_os_clock)),
+            ("__os_time", native("__os_time", builtin_os_time)),
+            ("__os_difftime", native("__os_difftime", builtin_os_difftime)),
+            ("__os_getenv", native("__os_getenv", builtin_os_getenv)),
+            ("__random_float", native("__random_float", builtin_random_float)),
         ] {
             env.borrow_mut().values.insert(name.to_string(), function);
         }
@@ -436,7 +466,10 @@ impl Runtime {
                 .values
                 .insert(name.to_string(), native(name, *call));
         }
-        Self { global: env }
+        Self {
+            global: env,
+            call_depth: std::cell::Cell::new(0),
+        }
     }
 
     fn execute(&mut self, program: &[Stmt]) -> Result<Vec<Value>, String> {
@@ -851,6 +884,21 @@ impl Runtime {
     }
 
     fn call(&self, function: Value, args: Vec<Value>) -> Result<Vec<Value>, String> {
+        const MAX_CALL_DEPTH: usize = 512;
+        let depth = self.call_depth.get();
+        if depth >= MAX_CALL_DEPTH {
+            return Err(format!(
+                "call stack overflow: exceeded maximum call depth of {}",
+                MAX_CALL_DEPTH
+            ));
+        }
+        self.call_depth.set(depth + 1);
+        let res = self.call_inner(function, args);
+        self.call_depth.set(depth);
+        res
+    }
+
+    fn call_inner(&self, function: Value, args: Vec<Value>) -> Result<Vec<Value>, String> {
         match function {
             Value::Function(function) => match &*function {
                 Function::Native { name: "try", .. } => self.call_try(args),
@@ -918,11 +966,78 @@ impl Runtime {
         }
     }
 
+    fn create_json_lib(&self) -> Value {
+        let mut tbl = Table {
+            array: Vec::new(),
+            fields: HashMap::new(),
+            const_fields: HashSet::new(),
+            frozen: true,
+            metatable: None,
+        };
+        tbl.fields.insert("encode".to_string(), native("json.encode", runtime_json_encode));
+        tbl.fields.insert("decode".to_string(), native("json.decode", runtime_json_decode));
+        Value::Table(Rc::new(RefCell::new(tbl)))
+    }
+
+    fn create_utf8_lib(&self) -> Value {
+        let mut tbl = Table {
+            array: Vec::new(),
+            fields: HashMap::new(),
+            const_fields: HashSet::new(),
+            frozen: true,
+            metatable: None,
+        };
+        tbl.fields.insert("char".to_string(), native("utf8.char", runtime_utf8_char));
+        tbl.fields.insert("len".to_string(), native("utf8.len", runtime_utf8_len));
+        tbl.fields.insert("codepoint".to_string(), native("utf8.codepoint", runtime_utf8_codepoint));
+        tbl.fields.insert("offset".to_string(), native("utf8.offset", runtime_utf8_offset));
+        tbl.fields.insert("charpattern".to_string(), Value::String("[\\0-\\x7F\\xC2-\\xFD][\\x80-\\xBF]*".to_string()));
+        Value::Table(Rc::new(RefCell::new(tbl)))
+    }
+
+    fn create_debug_lib(&self) -> Value {
+        let mut tbl = Table {
+            array: Vec::new(),
+            fields: HashMap::new(),
+            const_fields: HashSet::new(),
+            frozen: true,
+            metatable: None,
+        };
+        tbl.fields.insert("traceback".to_string(), native("debug.traceback", runtime_debug_traceback));
+        tbl.fields.insert("getinfo".to_string(), native("debug.getinfo", runtime_debug_getinfo));
+        Value::Table(Rc::new(RefCell::new(tbl)))
+    }
+
+    fn create_coroutine_lib(&self) -> Value {
+        let mut tbl = Table {
+            array: Vec::new(),
+            fields: HashMap::new(),
+            const_fields: HashSet::new(),
+            frozen: true,
+            metatable: None,
+        };
+        tbl.fields.insert("create".to_string(), native("coroutine.create", runtime_coroutine_create));
+        tbl.fields.insert("resume".to_string(), native("coroutine.resume", runtime_coroutine_resume));
+        tbl.fields.insert("status".to_string(), native("coroutine.status", runtime_coroutine_status));
+        tbl.fields.insert("running".to_string(), native("coroutine.running", runtime_coroutine_running));
+        Value::Table(Rc::new(RefCell::new(tbl)))
+    }
+
     fn call_require(&self, args: Vec<Value>) -> Result<Vec<Value>, String> {
         let Some(Value::String(package)) = args.first() else {
             return Err("require expects a string path".to_string());
         };
-        let Some((_, source)) = BUNDLED_LIBRARIES.iter().find(|(name, _)| *name == package) else {
+        let clean = package.strip_prefix("@neyuki/").unwrap_or(package.as_str());
+        match clean {
+            "json" => return Ok(vec![self.create_json_lib()]),
+            "utf8" => return Ok(vec![self.create_utf8_lib()]),
+            "debug" => return Ok(vec![self.create_debug_lib()]),
+            "coroutine" => return Ok(vec![self.create_coroutine_lib()]),
+            _ => {}
+        }
+        let Some((_, source)) = BUNDLED_LIBRARIES.iter().find(|(name, _)| {
+            *name == package.as_str() || name.strip_prefix("@neyuki/") == Some(clean)
+        }) else {
             return Err(format!(
                 "package `{}` is not bundled; add it to the project manually",
                 package
@@ -1013,7 +1128,7 @@ impl Runtime {
             "==" => Ok(Value::Bool(equal(&left, &right))),
             "!=" => Ok(Value::Bool(!equal(&left, &right))),
             "<" | "<=" | ">" | ">=" => compare(left, op, right),
-            "&" | "|" | "~" | "<<" | ">>" => bitwise(left, op, right),
+            "&" | "|" | "~" | "<<" | ">>" | "<<<" | ">>>" => bitwise(left, op, right),
             _ => Err(format!("unsupported operator {}", op)),
         }
     }
@@ -1082,6 +1197,13 @@ impl Runtime {
         }
     }
     fn index(&self, object: &Value, index: &Value) -> Result<Value, String> {
+        self.index_depth(object, index, 0)
+    }
+
+    fn index_depth(&self, object: &Value, index: &Value, depth: usize) -> Result<Value, String> {
+        if depth >= 100 {
+            return Err("loop in gettable / __index metamethods (depth limit 100 exceeded)".to_string());
+        }
         match object {
             Value::Table(table) => {
                 let borrowed = table.borrow();
@@ -1109,7 +1231,7 @@ impl Runtime {
                     let h_opt = mt.borrow().fields.get("__index").cloned();
                     if let Some(h) = h_opt {
                         match &h {
-                            Value::Table(_) => return self.index(&h, index),
+                            Value::Table(_) => return self.index_depth(&h, index, depth + 1),
                             Value::Function(_) => {
                                 let results = self.call(h, vec![object.clone(), index.clone()])?;
                                 return Ok(collapse_values(results));
@@ -1144,6 +1266,13 @@ impl Runtime {
         }
     }
     fn assign_index(&self, object: &Value, index: Value, value: Value) -> Result<(), String> {
+        self.assign_index_depth(object, index, value, 0)
+    }
+
+    fn assign_index_depth(&self, object: &Value, index: Value, value: Value, depth: usize) -> Result<(), String> {
+        if depth >= 100 {
+            return Err("loop in settable / __newindex metamethods (depth limit 100 exceeded)".to_string());
+        }
         match object {
             Value::Table(table) => {
                 let has_existing_or_no_mt = {
@@ -1173,7 +1302,7 @@ impl Runtime {
 
                     if let Some(h) = mt_newindex {
                         match &h {
-                            Value::Table(_) => return self.assign_index(&h, index, value),
+                            Value::Table(_) => return self.assign_index_depth(&h, index, value, depth + 1),
                             Value::Function(_) => {
                                 self.call(h, vec![object.clone(), index, value])?;
                                 return Ok(());
@@ -1405,6 +1534,17 @@ fn bitwise(left: Value, op: &str, right: Value) -> Result<Value, String> {
             } else {
                 return Err("shift is too large".to_string());
             }
+        }
+        "<<<" | ">>>" => {
+            // Logical shifts act on the low 64 bits as an unsigned word, so
+            // the result is always in 0..2^64 and shifting by 64+ yields 0.
+            let word = a.low_u64();
+            let bits = b.to_usize().unwrap_or(usize::MAX);
+            Int::from_u64(match (op, bits) {
+                (_, 64..) => 0,
+                ("<<<", _) => word << bits,
+                (_, _) => word >> bits,
+            })
         }
         _ => return Err("unsupported bitwise operator".to_string()),
     }))
@@ -1975,3 +2115,287 @@ fn builtin_try(args: Vec<Value>) -> Result<Vec<Value>, String> {
 fn builtin_require(_args: Vec<Value>) -> Result<Vec<Value>, String> {
     Err("require must be called through the runtime".to_string())
 }
+
+fn builtin_os_clock(_args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    Ok(vec![Value::Number(now.as_secs_f64())])
+}
+
+fn builtin_os_time(_args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    Ok(vec![Value::Integer(Int::from(now.as_secs() as i64))])
+}
+
+fn builtin_os_difftime(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let t2 = number(args.first().cloned().unwrap_or(Value::Nil))?;
+    let t1 = number(args.get(1).cloned().unwrap_or(Value::Nil))?;
+    Ok(vec![Value::Number(t2 - t1)])
+}
+
+fn builtin_os_getenv(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let Some(Value::String(var)) = args.first() else {
+        return Err("os.getenv expects a string variable name".to_string());
+    };
+    match std::env::var(var) {
+        Ok(val) => Ok(vec![Value::String(val)]),
+        Err(_) => Ok(vec![Value::Nil]),
+    }
+}
+
+fn builtin_random_float(_args: Vec<Value>) -> Result<Vec<Value>, String> {
+    Ok(vec![Value::Number(rand::thread_rng().gen_range(0.0..1.0))])
+}
+
+fn runtime_to_vm_val(val: &Value, depth: usize) -> Result<crate::vm::value::Value, String> {
+    if depth > 256 {
+        return Err("JSON nesting depth limit (256) exceeded during encode".to_string());
+    }
+    match val {
+        Value::Nil => Ok(crate::vm::value::Value::Nil),
+        Value::Bool(b) => Ok(crate::vm::value::Value::Bool(*b)),
+        Value::Number(f) => Ok(crate::vm::value::Value::Float(*f)),
+        Value::Integer(i) => Ok(crate::vm::value::Value::Int(i.to_bigint())),
+        Value::String(s) => Ok(crate::vm::value::Value::String(s.clone())),
+        Value::Table(t) => {
+            let borrowed = t.borrow();
+            let mut tbl = crate::vm::value::VmTable::new();
+            for item in &borrowed.array {
+                tbl.array.push(runtime_to_vm_val(item, depth + 1)?);
+            }
+            for (k, item) in &borrowed.fields {
+                tbl.fields.insert(k.clone(), runtime_to_vm_val(item, depth + 1)?);
+            }
+            Ok(crate::vm::value::Value::Table(Rc::new(RefCell::new(tbl))))
+        }
+        _ => Err("cannot serialize function to JSON".to_string()),
+    }
+}
+
+fn vm_to_runtime_val(val: &crate::vm::value::Value, depth: usize) -> Result<Value, String> {
+    if depth > 256 {
+        return Err("JSON nesting depth limit (256) exceeded during decode".to_string());
+    }
+    match val {
+        crate::vm::value::Value::Nil => Ok(Value::Nil),
+        crate::vm::value::Value::Bool(b) => Ok(Value::Bool(*b)),
+        crate::vm::value::Value::Float(f) => Ok(Value::Number(*f)),
+        crate::vm::value::Value::Int(i) => Ok(Value::Integer(Int::from_bigint(i.clone()))),
+        crate::vm::value::Value::String(s) => Ok(Value::String(s.clone())),
+        crate::vm::value::Value::Table(t) => {
+            let borrowed = t.borrow();
+            let mut array = Vec::new();
+            for item in &borrowed.array {
+                array.push(vm_to_runtime_val(item, depth + 1)?);
+            }
+            let mut fields = HashMap::new();
+            for (k, item) in &borrowed.fields {
+                fields.insert(k.clone(), vm_to_runtime_val(item, depth + 1)?);
+            }
+            let tbl = Table {
+                array,
+                fields,
+                const_fields: HashSet::new(),
+                frozen: borrowed.frozen,
+                metatable: None,
+            };
+            Ok(Value::Table(Rc::new(RefCell::new(tbl))))
+        }
+        _ => Ok(Value::Nil),
+    }
+}
+
+fn runtime_json_encode(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let val = args.first().cloned().unwrap_or(Value::Nil);
+    let vm_val = runtime_to_vm_val(&val, 0)?;
+    let s = crate::vm::libs::json::encode_to_string(&vm_val)?;
+    Ok(vec![Value::String(s)])
+}
+
+fn runtime_json_decode(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let Some(Value::String(s)) = args.first() else {
+        return Err("json.decode expects a string".to_string());
+    };
+    let vm_val = crate::vm::libs::json::decode_from_str(s)?;
+    let runtime_val = vm_to_runtime_val(&vm_val, 0)?;
+    Ok(vec![runtime_val])
+}
+
+fn runtime_utf8_char(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let mut out = String::new();
+    for a in args {
+        let cp = match a {
+            Value::Integer(i) => match i {
+                Int::Small(v) => v as u32,
+                Int::Big(b) => b.to_u32().ok_or_else(|| "codepoint out of range".to_string())?,
+            },
+            Value::Number(f) => f as u32,
+            _ => return Err("utf8.char expects integer codepoints".to_string()),
+        };
+        let c = char::from_u32(cp).ok_or_else(|| format!("invalid Unicode codepoint {}", cp))?;
+        out.push(c);
+    }
+    Ok(vec![Value::String(out)])
+}
+
+fn runtime_utf8_len(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let Some(Value::String(s)) = args.first() else {
+        return Err("utf8.len expects string as first argument".to_string());
+    };
+    let count = s.chars().count();
+    Ok(vec![Value::Integer(Int::from(count as i64))])
+}
+
+fn runtime_utf8_codepoint(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let Some(Value::String(s)) = args.first() else {
+        return Err("utf8.codepoint expects string".to_string());
+    };
+    let chars: Vec<char> = s.chars().collect();
+    let i = args.get(1).and_then(|v| match v {
+        Value::Integer(Int::Small(idx)) => Some(*idx as usize),
+        _ => None,
+    }).unwrap_or(1);
+    let j = args.get(2).and_then(|v| match v {
+        Value::Integer(Int::Small(idx)) => Some(*idx as usize),
+        _ => None,
+    }).unwrap_or(i);
+    let mut results = Vec::new();
+    if i >= 1 && i <= chars.len() {
+        for idx in i..=j.min(chars.len()) {
+            results.push(Value::Integer(Int::from(chars[idx - 1] as i64)));
+        }
+    }
+    Ok(results)
+}
+
+fn runtime_utf8_offset(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let Some(Value::String(s)) = args.first() else {
+        return Err("utf8.offset expects string".to_string());
+    };
+    let n = match args.get(1) {
+        Some(Value::Integer(Int::Small(i))) => *i,
+        _ => return Err("utf8.offset expects n".to_string()),
+    };
+    if n == 0 {
+        return Err("utf8.offset position must not be 0".to_string());
+    }
+    let char_indices: Vec<(usize, char)> = s.char_indices().collect();
+    if n > 0 {
+        let idx = (n - 1) as usize;
+        if idx < char_indices.len() {
+            Ok(vec![Value::Integer(Int::from((char_indices[idx].0 + 1) as i64))])
+        } else if idx == char_indices.len() {
+            Ok(vec![Value::Integer(Int::from((s.len() + 1) as i64))])
+        } else {
+            Ok(vec![Value::Nil])
+        }
+    } else {
+        let count = char_indices.len() as i64;
+        let target = count + n;
+        if target >= 0 && (target as usize) < char_indices.len() {
+            Ok(vec![Value::Integer(Int::from((char_indices[target as usize].0 + 1) as i64))])
+        } else {
+            Ok(vec![Value::Nil])
+        }
+    }
+}
+
+fn runtime_debug_traceback(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let msg = match args.first() {
+        Some(Value::String(s)) => format!("{}\n", s),
+        _ => String::new(),
+    };
+    Ok(vec![Value::String(format!("{}stack traceback:\n\t[tree-walker runtime]", msg))])
+}
+
+fn runtime_debug_getinfo(_args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let mut tbl = Table {
+        array: Vec::new(),
+        fields: HashMap::new(),
+        const_fields: HashSet::new(),
+        frozen: false,
+        metatable: None,
+    };
+    tbl.fields.insert("source".to_string(), Value::String("=[runtime]".to_string()));
+    tbl.fields.insert("what".to_string(), Value::String("main".to_string()));
+    tbl.fields.insert("currentline".to_string(), Value::Integer(Int::Small(1)));
+    Ok(vec![Value::Table(Rc::new(RefCell::new(tbl)))])
+}
+
+fn runtime_coroutine_create(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let Some(f) = args.first().cloned() else {
+        return Err("coroutine.create expects a function".to_string());
+    };
+    let mut tbl = Table {
+        array: vec![f],
+        fields: HashMap::new(),
+        const_fields: HashSet::new(),
+        frozen: false,
+        metatable: None,
+    };
+    tbl.fields.insert("status".to_string(), Value::String("suspended".to_string()));
+    Ok(vec![Value::Table(Rc::new(RefCell::new(tbl)))])
+}
+
+fn runtime_coroutine_resume(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let Some(Value::Table(t)) = args.first() else {
+        return Err("coroutine.resume expects a thread".to_string());
+    };
+    let mut borrowed = t.borrow_mut();
+    let current_status = borrowed.fields.get("status").and_then(|v| match v {
+        Value::String(s) => Some(s.as_str()),
+        _ => None,
+    }).unwrap_or("dead");
+    if current_status == "dead" {
+        return Ok(vec![Value::Bool(false), Value::String("cannot resume dead coroutine".to_string())]);
+    }
+    let f = borrowed.array.first().cloned().unwrap_or(Value::Nil);
+    borrowed.fields.insert("status".to_string(), Value::String("dead".to_string()));
+    drop(borrowed);
+    match f {
+        Value::Function(func) => {
+            let call_args = args[1..].to_vec();
+            match &*func {
+                Function::Native { call, .. } => {
+                    let mut res = call(call_args)?;
+                    res.insert(0, Value::Bool(true));
+                    Ok(res)
+                }
+                Function::User { params, body, env } => {
+                    let call_env = child(env);
+                    for (i, p) in params.iter().enumerate() {
+                        call_env.borrow_mut().values.insert(p.name.clone(), call_args.get(i).cloned().unwrap_or(Value::Nil));
+                    }
+                    let rt = Runtime {
+                        global: call_env.clone(),
+                        call_depth: std::cell::Cell::new(0),
+                    };
+                    let res = match rt.exec_block(body, call_env)? {
+                        Flow::Return(vals) => vals,
+                        _ => vec![Value::Nil],
+                    };
+                    let mut out = vec![Value::Bool(true)];
+                    out.extend(res);
+                    Ok(out)
+                }
+            }
+        }
+        _ => Err("cannot resume non-function coroutine".to_string()),
+    }
+}
+
+fn runtime_coroutine_status(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let Some(Value::Table(t)) = args.first() else {
+        return Err("coroutine.status expects a thread".to_string());
+    };
+    let st = t.borrow().fields.get("status").cloned().unwrap_or(Value::String("dead".to_string()));
+    Ok(vec![st])
+}
+
+fn runtime_coroutine_running(_args: Vec<Value>) -> Result<Vec<Value>, String> {
+    Ok(vec![Value::Nil])
+}
+

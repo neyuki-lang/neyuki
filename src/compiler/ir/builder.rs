@@ -156,6 +156,8 @@ impl IrBuilder {
                     "~" => IrBinaryOp::BitXor,
                     "<<" => IrBinaryOp::Shl,
                     ">>" => IrBinaryOp::Shr,
+                    "<<<" => IrBinaryOp::LShl,
+                    ">>>" => IrBinaryOp::LShr,
                     ".." => IrBinaryOp::Concat,
                     "==" => IrBinaryOp::Eq,
                     "!=" => IrBinaryOp::Ne,

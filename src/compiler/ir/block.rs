@@ -28,7 +28,21 @@ pub struct IrFunction {
     pub protos: Vec<IrFunction>,
 }
 
+impl IrFunction {
+    pub fn new(name: Option<String>, num_params: u8, is_vararg: bool) -> Self {
+        Self {
+            name,
+            params: Vec::new(),
+            num_params,
+            is_vararg,
+            instructions: Vec::new(),
+            protos: Vec::new(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct IrModule {
     pub main: IrFunction,
 }
+

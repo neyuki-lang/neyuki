@@ -217,6 +217,22 @@ fn fold_binary_op(op: &str, left: FoldVal, right: FoldVal) -> Option<FoldVal> {
                 Some(FoldVal::Int(ia >> shift))
             }
         }
+        "<<<" => {
+            let ia = left.to_bigint()?;
+            let ib = right.to_bigint()?;
+            let word = (ia & BigInt::from(u64::MAX)).to_u64().unwrap_or(0);
+            let bits = ib.to_usize().unwrap_or(usize::MAX);
+            let res = if bits >= 64 { 0 } else { word << bits };
+            Some(FoldVal::Int(BigInt::from(res)))
+        }
+        ">>>" => {
+            let ia = left.to_bigint()?;
+            let ib = right.to_bigint()?;
+            let word = (ia & BigInt::from(u64::MAX)).to_u64().unwrap_or(0);
+            let bits = ib.to_usize().unwrap_or(usize::MAX);
+            let res = if bits >= 64 { 0 } else { word >> bits };
+            Some(FoldVal::Int(BigInt::from(res)))
+        }
         ".." => {
             let sa = match left {
                 FoldVal::Str(s) => s,

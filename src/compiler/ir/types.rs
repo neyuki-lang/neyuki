@@ -33,6 +33,8 @@ pub enum IrBinaryOp {
     BitXor,
     Shl,
     Shr,
+    LShl,
+    LShr,
     Concat,
     Eq,
     Ne,

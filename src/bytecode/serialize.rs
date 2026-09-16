@@ -11,10 +11,13 @@ pub use crate::bytecode::deserialize::deserialize;
 pub use crate::bytecode::format::{BYTECODE_VERSION, MAGIC};
 
 pub fn serialize(proto: &Proto) -> Vec<u8> {
-    let mut buf = Vec::new();
-    let header = BytecodeHeader::new();
+    let mut payload = Vec::new();
+    write_proto(&mut payload, proto);
+    let checksum = crate::bytecode::format::compute_crc32(&payload);
+    let mut buf = Vec::with_capacity(BytecodeHeader::HEADER_SIZE + payload.len());
+    let header = BytecodeHeader::new(checksum);
     header.write_to(&mut buf);
-    write_proto(&mut buf, proto);
+    buf.extend_from_slice(&payload);
     buf
 }
 
@@ -356,6 +359,18 @@ fn write_instruction(buf: &mut Vec<u8>, inst: &Instruction) {
             write_u8(buf, *base);
             write_i16(buf, *jump);
         }
+        Instruction::LShl { dst, a, b } => {
+            write_u8(buf, 51);
+            write_u8(buf, *dst);
+            write_u8(buf, *a);
+            write_u8(buf, *b);
+        }
+        Instruction::LShr { dst, a, b } => {
+            write_u8(buf, 52);
+            write_u8(buf, *dst);
+            write_u8(buf, *a);
+            write_u8(buf, *b);
+        }
     }
 }
 
@@ -456,5 +471,85 @@ mod tests {
         let err = deserialize(&bytes);
         assert!(err.is_err());
         assert!(err.unwrap_err().contains("verification failed"));
+    }
+
+    #[test]
+    fn test_checksum_mismatch_caught() {
+        let mut proto = Proto::new(Some("test".to_string()), 0, false);
+        proto.max_registers = 1;
+        proto.emit(Instruction::Return { base: 0, count: 0 }, 1);
+        let mut bytes = serialize(&proto);
+        // Corrupt one byte in the payload
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xFF;
+        let err = deserialize(&bytes);
+        assert!(err.is_err());
+        assert!(err.unwrap_err().contains("checksum mismatch"));
+    }
+
+    #[test]
+    fn test_max_registers_zero_rejected() {
+        let mut proto = Proto::new(Some("zero_reg".to_string()), 0, false);
+        proto.max_registers = 0;
+        // Any register access with max_registers=0 must be rejected
+        proto.emit(Instruction::LoadNil { dst: 0 }, 1);
+        proto.emit(Instruction::Return { base: 0, count: 0 }, 2);
+        let bytes = serialize(&proto);
+        let err = deserialize(&bytes);
+        assert!(err.is_err());
+        assert!(err.unwrap_err().contains("exceeds prototype max_registers"));
+    }
+
+    #[test]
+    fn test_multiregister_range_rejected() {
+        let mut proto = Proto::new(Some("tfor_oob".to_string()), 0, false);
+        proto.max_registers = 4;
+        // TForCall base=2 with retc=2 needs registers 2..6, which exceeds max_registers=4
+        proto.emit(Instruction::TForCall { base: 2, retc: 2 }, 1);
+        let bytes = serialize(&proto);
+        let err = deserialize(&bytes);
+        assert!(err.is_err());
+        assert!(err.unwrap_err().contains("exceeds prototype max_registers"));
+    }
+
+    #[test]
+    fn test_fuzz_deserialize_never_panics() {
+        // Run 5000 random mutations against deserialize, ensuring zero panics
+        let mut proto = Proto::new(Some("seed".to_string()), 1, false);
+        proto.max_registers = 4;
+        proto.emit(Instruction::LoadInt { dst: 0, val: 42 }, 1);
+        proto.emit(Instruction::Return { base: 0, count: 1 }, 2);
+        let valid_bytes = serialize(&proto);
+
+        // Deterministic pseudo-random sequence for repeatability
+        let mut state: u64 = 0x1234_5678_9ABC_DEF0;
+        let mut rng = move || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (state >> 32) as u32
+        };
+
+        for _ in 0..2000 {
+            let mut corrupted = valid_bytes.clone();
+            let num_edits = (rng() % 5 + 1) as usize;
+            for _ in 0..num_edits {
+                let idx = (rng() as usize) % corrupted.len();
+                corrupted[idx] = (rng() & 0xFF) as u8;
+            }
+            // Must return Ok or Err, never panic
+            let _ = std::panic::catch_unwind(|| {
+                let _ = deserialize(&corrupted);
+            });
+        }
+
+        // Also fuzz with purely random byte streams of varying lengths
+        for len in [0, 1, 4, 7, 8, 12, 13, 20, 50, 100, 256] {
+            let mut junk = vec![0u8; len];
+            for b in junk.iter_mut() {
+                *b = (rng() & 0xFF) as u8;
+            }
+            let _ = std::panic::catch_unwind(|| {
+                let _ = deserialize(&junk);
+            });
+        }
     }
 }

@@ -8,11 +8,18 @@ use crate::compiler::ir::block::{IrFunction, IrModule};
 use crate::compiler::ir::inst::IrInst;
 use crate::compiler::ir::types::{IrBinaryOp, IrConstant, IrLabel, IrUnaryOp, IrVar};
 
-pub fn ir_to_bytecode(module: &IrModule) -> Proto {
-    ir_function_to_proto(&module.main)
+pub fn ir_to_bytecode(module: &IrModule) -> Result<Proto, String> {
+    ir_function_to_proto(&module.main, 0)
 }
 
-fn ir_function_to_proto(func: &IrFunction) -> Proto {
+fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String> {
+    const MAX_IR_DEPTH: usize = 64;
+    if depth >= MAX_IR_DEPTH {
+        return Err(format!(
+            "IR lowering depth limit ({}) exceeded: function nesting too deep",
+            MAX_IR_DEPTH
+        ));
+    }
     let mut proto = Proto::new(func.name.clone(), func.num_params, func.is_vararg);
 
     let mut var_to_reg: HashMap<IrVar, u8> = HashMap::new();
@@ -124,6 +131,8 @@ fn ir_function_to_proto(func: &IrFunction) -> Proto {
                             IrBinaryOp::BitXor => Instruction::BitXor { dst: rd, a: ra, b: rb },
                             IrBinaryOp::Shl => Instruction::Shl { dst: rd, a: ra, b: rb },
                             IrBinaryOp::Shr => Instruction::Shr { dst: rd, a: ra, b: rb },
+                            IrBinaryOp::LShl => Instruction::LShl { dst: rd, a: ra, b: rb },
+                            IrBinaryOp::LShr => Instruction::LShr { dst: rd, a: ra, b: rb },
                             IrBinaryOp::Concat => Instruction::Concat { dst: rd, a: ra, b: rb },
                             IrBinaryOp::Coalesce => Instruction::Coalesce { dst: rd, a: ra, b: rb },
                             _ => unreachable!(),
@@ -282,9 +291,9 @@ fn ir_function_to_proto(func: &IrFunction) -> Proto {
 
     // Lower nested function prototypes
     for child in &func.protos {
-        let child_proto = ir_function_to_proto(child);
+        let child_proto = ir_function_to_proto(child, depth + 1)?;
         proto.protos.push(child_proto);
     }
 
-    proto
+    Ok(proto)
 }

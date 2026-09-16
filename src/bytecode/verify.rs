@@ -25,7 +25,21 @@ impl std::fmt::Display for BytecodeVerifyError {
 
 impl std::error::Error for BytecodeVerifyError {}
 
+const MAX_VERIFY_DEPTH: usize = 512;
+
 pub fn verify_proto(proto: &Proto) -> Result<(), BytecodeVerifyError> {
+    verify_proto_depth(proto, 0)
+}
+
+fn verify_proto_depth(proto: &Proto, depth: usize) -> Result<(), BytecodeVerifyError> {
+    if depth >= MAX_VERIFY_DEPTH {
+        return Err(BytecodeVerifyError {
+            message: format!("nested prototype depth limit ({}) exceeded", MAX_VERIFY_DEPTH),
+            proto_name: proto.name.clone(),
+            pc: None,
+        });
+    }
+
     let name = proto.name.clone();
     let num_constants = proto.constants.len();
     let num_protos = proto.protos.len();
@@ -33,7 +47,9 @@ pub fn verify_proto(proto: &Proto) -> Result<(), BytecodeVerifyError> {
     let num_insts = proto.instructions.len();
 
     let check_reg = |reg: u8, pc: usize| -> Result<(), BytecodeVerifyError> {
-        if proto.max_registers > 0 && reg >= proto.max_registers {
+        // Fixed: was `proto.max_registers > 0 && ...` which silently allowed
+        // all registers when max_registers==0. Now always enforce the limit.
+        if reg >= proto.max_registers {
             return Err(BytecodeVerifyError {
                 message: format!("register R{} exceeds prototype max_registers ({})", reg, proto.max_registers),
                 proto_name: name.clone(),
@@ -59,6 +75,19 @@ pub fn verify_proto(proto: &Proto) -> Result<(), BytecodeVerifyError> {
         if target_ip < 0 || target_ip > num_insts as isize {
             return Err(BytecodeVerifyError {
                 message: format!("jump offset {} targets invalid instruction index {} (total: {})", offset, target_ip, num_insts),
+                proto_name: name.clone(),
+                pc: Some(pc),
+            });
+        }
+        Ok(())
+    };
+
+    // Check that reg + span - 1 does not exceed max_registers
+    let check_reg_range = |base: u8, span: usize, pc: usize| -> Result<(), BytecodeVerifyError> {
+        let top = base as usize + span;
+        if top > proto.max_registers as usize {
+            return Err(BytecodeVerifyError {
+                message: format!("register range R{}..R{} exceeds prototype max_registers ({})", base, top - 1, proto.max_registers),
                 proto_name: name.clone(),
                 pc: Some(pc),
             });
@@ -97,6 +126,8 @@ pub fn verify_proto(proto: &Proto) -> Result<(), BytecodeVerifyError> {
             | Instruction::BitXor { dst, a, b }
             | Instruction::Shl { dst, a, b }
             | Instruction::Shr { dst, a, b }
+            | Instruction::LShl { dst, a, b }
+            | Instruction::LShr { dst, a, b }
             | Instruction::Concat { dst, a, b } => {
                 check_reg(*dst, pc)?;
                 check_reg(*a, pc)?;
@@ -143,13 +174,8 @@ pub fn verify_proto(proto: &Proto) -> Result<(), BytecodeVerifyError> {
             }
             Instruction::SetList { table, base, count } => {
                 check_reg(*table, pc)?;
-                if (*base as usize) + (*count as usize) > 256 {
-                    return Err(BytecodeVerifyError {
-                        message: format!("SetList base {} + count {} exceeds register address space", base, count),
-                        proto_name: name.clone(),
-                        pc: Some(pc),
-                    });
-                }
+                // base .. base+count must all be valid
+                check_reg_range(*base, *count as usize, pc)?;
             }
             Instruction::GetGlobal { dst, name_k } => {
                 check_reg(*dst, pc)?;
@@ -191,10 +217,13 @@ pub fn verify_proto(proto: &Proto) -> Result<(), BytecodeVerifyError> {
             }
             Instruction::Call { callee, argc, retc } => {
                 check_reg(*callee, pc)?;
-                let max_slot = (*callee as usize) + (*argc as usize).max(*retc as usize);
-                if max_slot > 256 {
+                // callee+1 .. callee+argc are args; callee .. callee+retc-1 are results
+                let args_top = (*callee as usize) + 1 + (*argc as usize);
+                let rets_top = (*callee as usize) + (*retc as usize);
+                let max_top = args_top.max(rets_top);
+                if max_top > proto.max_registers as usize {
                     return Err(BytecodeVerifyError {
-                        message: format!("call callee R{} with argc {} / retc {} exceeds register space", callee, argc, retc),
+                        message: format!("call callee R{} with argc {} / retc {} exceeds max_registers ({})", callee, argc, retc, proto.max_registers),
                         proto_name: name.clone(),
                         pc: Some(pc),
                     });
@@ -202,7 +231,8 @@ pub fn verify_proto(proto: &Proto) -> Result<(), BytecodeVerifyError> {
             }
             Instruction::Return { base, count } => {
                 if *count > 0 {
-                    check_reg(*base, pc)?;
+                    // Return range: base .. base+count-1
+                    check_reg_range(*base, *count as usize, pc)?;
                 }
             }
             Instruction::Vararg { dst, count: _ } => {
@@ -226,27 +256,33 @@ pub fn verify_proto(proto: &Proto) -> Result<(), BytecodeVerifyError> {
                 check_jump(*jump_if_false, pc)?;
             }
             Instruction::ForPrep { base, jump } => {
-                check_reg(*base, pc)?;
+                // ForPrep uses R(base), R(base+1), R(base+2) for limit/step/index
+                check_reg_range(*base, 3, pc)?;
                 check_jump(*jump, pc)?;
             }
             Instruction::ForLoop { base, jump } => {
-                check_reg(*base, pc)?;
+                // ForLoop uses the same range as ForPrep
+                check_reg_range(*base, 3, pc)?;
                 check_jump(*jump, pc)?;
             }
-            Instruction::TForCall { base, retc: _ } => {
-                check_reg(*base, pc)?;
+            Instruction::TForCall { base, retc } => {
+                // TForCall: R(base)=iter, R(base+1)=state, R(base+2)=ctrl, results at base+3..base+3+retc
+                let needed = 3 + (*retc as usize);
+                check_reg_range(*base, needed, pc)?;
             }
             Instruction::TForLoop { base, jump } => {
-                check_reg(*base, pc)?;
+                // TForLoop reads R(base+3) and writes R(base+2)
+                check_reg_range(*base, 4, pc)?;
                 check_jump(*jump, pc)?;
             }
         }
     }
 
-    // Recursively verify all nested prototypes
+    // Recursively verify all nested prototypes with incremented depth
     for child in &proto.protos {
-        verify_proto(child)?;
+        verify_proto_depth(child, depth + 1)?;
     }
 
     Ok(())
 }
+

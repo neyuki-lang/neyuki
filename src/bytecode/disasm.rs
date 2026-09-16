@@ -94,6 +94,8 @@ fn format_instruction(inst: &Instruction) -> String {
         Instruction::BitXor { dst, a, b } => format!("BITXOR       R{}, R{}, R{}", dst, a, b),
         Instruction::Shl { dst, a, b } => format!("SHL          R{}, R{}, R{}", dst, a, b),
         Instruction::Shr { dst, a, b } => format!("SHR          R{}, R{}, R{}", dst, a, b),
+        Instruction::LShl { dst, a, b } => format!("LSHL         R{}, R{}, R{}", dst, a, b),
+        Instruction::LShr { dst, a, b } => format!("LSHR         R{}, R{}, R{}", dst, a, b),
         Instruction::Concat { dst, a, b } => format!("CONCAT       R{}, R{}, R{}", dst, a, b),
         Instruction::Unm { dst, src } => format!("UNM          R{}, R{}", dst, src),
         Instruction::Not { dst, src } => format!("NOT          R{}, R{}", dst, src),

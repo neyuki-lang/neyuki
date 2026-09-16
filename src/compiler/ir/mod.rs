@@ -34,7 +34,7 @@ mod tests {
         let mut module = ast_to_ir(&stmts);
         dead_code_elimination(&mut module);
         constant_propagation(&mut module);
-        let proto = ir_to_bytecode(&module);
+        let proto = ir_to_bytecode(&module).expect("ir lowering failed");
         assert_eq!(proto.name, Some("main".to_string()));
     }
 
@@ -60,7 +60,7 @@ mod tests {
 
         dead_code_elimination(&mut ir_module);
 
-        let proto = ir_to_bytecode(&ir_module);
+        let proto = ir_to_bytecode(&ir_module).expect("ir lowering failed");
         let mut vm = VM::new();
         let res = vm.execute(proto).expect("execution failed");
         assert_eq!(res.to_string(), "30");
@@ -73,7 +73,7 @@ mod tests {
         let mut ir_module = ast_to_ir(&stmts);
         constant_propagation(&mut ir_module);
         dead_code_elimination(&mut ir_module);
-        let proto = ir_to_bytecode(&ir_module);
+        let proto = ir_to_bytecode(&ir_module).expect("ir lowering failed");
 
         let mut vm = VM::new();
         let val = vm.execute(proto).expect("exec failed");
@@ -85,7 +85,7 @@ mod tests {
         let code = "local sum = 0\nlocal i = 1\nwhile i <= 4 do sum = sum + i; i = i + 1 end\nreturn sum";
         let stmts = compile_source(code).expect("syntax error");
         let ir_module = ast_to_ir(&stmts);
-        let proto = ir_to_bytecode(&ir_module);
+        let proto = ir_to_bytecode(&ir_module).expect("ir lowering failed");
 
         let mut vm = VM::new();
         let val = vm.execute(proto).expect("exec failed");
@@ -97,7 +97,7 @@ mod tests {
         let code = "local a = 0\nrepeat a += 1 until a == 3\nlocal msg = `val: {a}`\nreturn msg";
         let stmts = compile_source(code).expect("syntax error");
         let ir_module = ast_to_ir(&stmts);
-        let proto = ir_to_bytecode(&ir_module);
+        let proto = ir_to_bytecode(&ir_module).expect("ir lowering failed");
 
         let mut vm = VM::new();
         let val = vm.execute(proto).expect("exec failed");
@@ -109,10 +109,25 @@ mod tests {
         let code = "local function make_adder(x)\n  return x + 5\nend\nreturn make_adder(10)";
         let stmts = compile_source(code).expect("syntax error");
         let ir_module = ast_to_ir(&stmts);
-        let proto = ir_to_bytecode(&ir_module);
+        let proto = ir_to_bytecode(&ir_module).expect("ir lowering failed");
 
         let mut vm = VM::new();
         let val = vm.execute(proto).expect("exec failed");
         assert_eq!(val.to_string(), "15");
+    }
+
+    #[test]
+    fn test_ir_depth_limit_rejected() {
+        // Construct an IrModule with 65 levels of nested functions
+        let mut curr = IrFunction::new(Some("level_65".to_string()), 0, false);
+        for lvl in (0..65).rev() {
+            let mut parent = IrFunction::new(Some(format!("level_{}", lvl)), 0, false);
+            parent.protos.push(curr);
+            curr = parent;
+        }
+        let module = IrModule { main: curr };
+        let result = ir_to_bytecode(&module);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("depth limit (64) exceeded"));
     }
 }

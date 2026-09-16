@@ -42,6 +42,8 @@ pub enum Instruction {
     BitXor { dst: u8, a: u8, b: u8 },
     Shl { dst: u8, a: u8, b: u8 },
     Shr { dst: u8, a: u8, b: u8 },
+    LShl { dst: u8, a: u8, b: u8 },
+    LShr { dst: u8, a: u8, b: u8 },
 
     // String concatenation: dst = a .. b
     Concat { dst: u8, a: u8, b: u8 },

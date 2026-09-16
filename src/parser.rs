@@ -6,13 +6,18 @@ pub use crate::ast::*;
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    depth: usize,
 }
 
 impl Parser {
     pub fn new(source: &str) -> Self {
         let mut lexer = Lexer::new(source);
         let tokens = lexer.tokenize();
-        Self { tokens, pos: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            depth: 0,
+        }
     }
 
     pub fn parse_program(&mut self) -> Vec<Stmt> {
@@ -410,9 +415,10 @@ impl Parser {
             self.pos += 1;
             let next_min = prec + 1;
             let right = self.parse_precedence(next_min);
+            let op = if op == "~=" { "!=".to_string() } else { op };
             left = Expr::Binary {
                 left: Box::new(left),
-                op: op.clone(),
+                op,
                 right: Box::new(right),
             };
         }
@@ -421,6 +427,17 @@ impl Parser {
     }
 
     fn parse_prefix(&mut self) -> Expr {
+        const MAX_PARSE_DEPTH: usize = 500;
+        if self.depth >= MAX_PARSE_DEPTH {
+            panic!("parse recursion depth limit (500) exceeded");
+        }
+        self.depth += 1;
+        let res = self.parse_prefix_inner();
+        self.depth -= 1;
+        res
+    }
+
+    fn parse_prefix_inner(&mut self) -> Expr {
         if self.check_keyword("function") {
             self.expect_keyword("function");
             self.expect_symbol("(");
@@ -727,8 +744,9 @@ impl Parser {
     /// Consumes an `op=` token and returns the binary operator it applies, so
     /// `a op= b` can be desugared to `a = a op b`.
     fn match_compound_assignment(&mut self) -> Option<String> {
-        const OPERATORS: [&str; 13] = [
-            "+=", "-=", "*=", "/=", "//=", "%=", "^=", "..=", "<<=", ">>=", "&=", "|=", "??=",
+        const OPERATORS: [&str; 15] = [
+            "+=", "-=", "*=", "/=", "//=", "%=", "^=", "..=", "<<=", ">>=", "<<<=", ">>>=", "&=",
+            "|=", "??=",
         ];
         let token = self.peek();
         if token.kind != "symbol" || !OPERATORS.contains(&token.value.as_str()) {
@@ -804,11 +822,11 @@ impl Parser {
         let prec = match value.as_str() {
             "or" => 1,
             "and" => 2,
-            "==" | "!=" | "<" | "<=" | ">" | ">=" => 3,
+            "==" | "!=" | "~=" | "<" | "<=" | ">" | ">=" => 3,
             "|" => 4,
             "~" => 5,
             "&" => 6,
-            "<<" | ">>" => 7,
+            "<<" | ">>" | "<<<" | ">>>" => 7,
             ".." => 8,
             "+" | "-" => 9,
             "*" | "/" | "//" | "%" => 10,
@@ -833,22 +851,32 @@ fn parse_interp_parts(value: &str) -> Vec<InterpPart> {
             parts.push(InterpPart::Literal(rest[..start].to_string()));
         }
         let after_start = &rest[start + 1..];
-        let end = after_start
-            .find('}')
-            .unwrap_or_else(|| panic!("unfinished interpolation in {:?}", value));
+        let end = match after_start.find('}') {
+            Some(e) => e,
+            None => {
+                panic!("syntax error: unfinished string interpolation in {:?}", value);
+            }
+        };
         let expression = &after_start[..end];
         let mut parser = Parser::new(expression);
         let statements = parser.parse_program();
         if statements.len() != 1 {
             panic!(
-                "interpolation must contain one expression: {:?}",
+                "syntax error: string interpolation must contain exactly one expression: {:?}",
                 expression
             );
         }
-        let Stmt::Expr(expression) = statements.into_iter().next().unwrap() else {
-            panic!("interpolation must contain an expression: {:?}", expression);
-        };
-        parts.push(InterpPart::Expr(expression));
+        match statements.into_iter().next().unwrap() {
+            Stmt::Expr(expr) => {
+                parts.push(InterpPart::Expr(expr));
+            }
+            _ => {
+                panic!(
+                    "syntax error: string interpolation must contain an expression: {:?}",
+                    expression
+                );
+            }
+        }
         rest = &after_start[end + 1..];
     }
     if !rest.is_empty() {

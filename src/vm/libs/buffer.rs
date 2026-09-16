@@ -32,6 +32,10 @@ fn to_usize(val: &Value, name: &str) -> Result<usize, String> {
 
 fn buf_create(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let size = to_usize(args.first().ok_or_else(|| "buffer.create expects size".to_string())?, "size")?;
+    const MAX_BUFFER_SIZE: usize = 100 * 1024 * 1024;
+    if size > MAX_BUFFER_SIZE {
+        return Err(format!("buffer.create requested size ({}) exceeds maximum limit (100MB)", size));
+    }
     let buf = VmBuffer::new(size);
     let rc = Rc::new(RefCell::new(buf));
     vm.gc.register_buffer(&rc);

@@ -141,6 +141,24 @@ pub fn eval_shr(a: Value, b: Value) -> Result<Value, String> {
     }
 }
 
+pub fn eval_lshl(a: Value, b: Value) -> Result<Value, String> {
+    let ia = to_bigint(a)?;
+    let ib = to_bigint(b)?;
+    let word = (ia & BigInt::from(u64::MAX)).to_u64().unwrap_or(0);
+    let bits = ib.to_usize().unwrap_or(usize::MAX);
+    let res = if bits >= 64 { 0 } else { word << bits };
+    Ok(Value::Int(BigInt::from(res)))
+}
+
+pub fn eval_lshr(a: Value, b: Value) -> Result<Value, String> {
+    let ia = to_bigint(a)?;
+    let ib = to_bigint(b)?;
+    let word = (ia & BigInt::from(u64::MAX)).to_u64().unwrap_or(0);
+    let bits = ib.to_usize().unwrap_or(usize::MAX);
+    let res = if bits >= 64 { 0 } else { word >> bits };
+    Ok(Value::Int(BigInt::from(res)))
+}
+
 pub fn eval_lt(a: &Value, b: &Value) -> Result<bool, String> {
     match (a, b) {
         (Value::Int(ia), Value::Int(ib)) => Ok(ia < ib),

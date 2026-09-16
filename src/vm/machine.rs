@@ -95,6 +95,13 @@ impl VM {
     }
 
     pub fn call_function(&mut self, func: Value, args: &[Value]) -> Result<Vec<Value>, String> {
+        const MAX_CALL_DEPTH: usize = 512;
+        if self.frames.len() >= MAX_CALL_DEPTH {
+            return Err(format!(
+                "call stack overflow: exceeded maximum call depth of {}",
+                MAX_CALL_DEPTH
+            ));
+        }
         match func {
             Value::Native(_, f) => f(self, args),
             Value::Closure(c) => {
@@ -397,6 +404,18 @@ impl VM {
                     let res = crate::vm::ops::eval_shr(va, vb)?;
                     self.set_reg(dst, res);
                 }
+                Instruction::LShl { dst, a, b } => {
+                    let va = self.get_reg(a);
+                    let vb = self.get_reg(b);
+                    let res = crate::vm::ops::eval_lshl(va, vb)?;
+                    self.set_reg(dst, res);
+                }
+                Instruction::LShr { dst, a, b } => {
+                    let va = self.get_reg(a);
+                    let vb = self.get_reg(b);
+                    let res = crate::vm::ops::eval_lshr(va, vb)?;
+                    self.set_reg(dst, res);
+                }
                 Instruction::Concat { dst, a, b } => {
                     let va = self.get_reg(a);
                     let vb = self.get_reg(b);
@@ -615,6 +634,13 @@ impl VM {
 
                     match callee_val {
                         Value::Closure(closure) => {
+                            const MAX_CALL_DEPTH: usize = 512;
+                            if self.frames.len() >= MAX_CALL_DEPTH {
+                                return Err(format!(
+                                    "call stack overflow: exceeded maximum call depth of {}",
+                                    MAX_CALL_DEPTH
+                                ));
+                            }
                             let new_base = base + callee as usize + 1;
                             let needed = new_base + closure.proto.max_registers as usize;
                             if needed >= self.stack.len() {
@@ -843,6 +869,13 @@ mod tests {
     }
 
     #[test]
+    fn test_vm_logical_shifts() {
+        let res = run_code("local a = -1 >>> 60\nlocal b = 1 <<< 4\nreturn a + b");
+        // 15 + 16 = 31
+        assert_eq!(res.to_string(), "31");
+    }
+
+    #[test]
     fn test_vm_functions_and_calls() {
         let code = "function add(x, y) return x + y end\nreturn add(15, 27)";
         let res = run_code(code);
@@ -1021,6 +1054,30 @@ mod tests {
         let code = "local co = require(\"@neyuki/coroutine\")\nlocal f = function(x) return x * 10 end\nlocal t = co.create(f)\nlocal ok, val = co.resume(t, 5)\nassert(ok == true)\nassert(val == 50)\nassert(co.status(t) == \"dead\")\nreturn val";
         let res = run_code(code);
         assert_eq!(res.to_string(), "50");
+    }
+
+    #[test]
+    fn test_vm_call_stack_overflow_caught() {
+        // Infinite recursion via Instruction::Call must be caught by MAX_CALL_DEPTH = 512
+        let code = "local function f()\n  return f()\nend\nreturn f()";
+        let stmts = crate::compiler::compile_source(code).expect("syntax error");
+        let proto = crate::compiler::compile_to_proto(&stmts);
+        let mut vm = VM::new();
+        let res = vm.execute(proto);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("call stack overflow"));
+    }
+
+    #[test]
+    fn test_vm_string_rep_limits() {
+        // Empty string with giant n should be caught without allocating GBs of memory
+        let code = "return string.rep(\"\", 2000000000)";
+        let stmts = crate::compiler::compile_source(code).expect("syntax error");
+        let proto = crate::compiler::compile_to_proto(&stmts);
+        let mut vm = VM::new();
+        let res = vm.execute(proto);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("exceeds maximum limit"));
     }
 }
 
