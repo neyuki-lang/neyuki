@@ -1,0 +1,3 @@
+local crypto = require("@neyuki/crypto")
+
+print(crypto.hash("test", "sha256"))

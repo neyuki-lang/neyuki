@@ -1,0 +1,142 @@
+local table = require("@neyuki/table")
+local string = require("@neyuki/string")
+
+local crypto = {}
+
+const MASK32 = 0xffffffff
+
+-- SHA-256 [FIPS 180-4]
+-- Neyuki integers are arbitrary-precision, so every operation that can grow
+-- past 32 bits (addition, left shift) is masked back down with `& MASK32`.
+
+-- round constants [§4.2.2]
+const K = {
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+}
+
+-- initial hash value [§5.3.3]
+const H0 = {
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
+}
+
+function rotr(x: int, n: int): int
+    return ((x >> n) | (x << (32 - n))) & MASK32
+end
+
+-- logical functions [§4.1.2]
+function ch(x: int, y: int, z: int): int
+    return (x & y) ~ ((x ~ MASK32) & z)
+end
+
+function maj(x: int, y: int, z: int): int
+    return (x & y) ~ (x & z) ~ (y & z)
+end
+
+function bigSigma0(x: int): int
+    return rotr(x, 2) ~ rotr(x, 13) ~ rotr(x, 22)
+end
+
+function bigSigma1(x: int): int
+    return rotr(x, 6) ~ rotr(x, 11) ~ rotr(x, 25)
+end
+
+function smallSigma0(x: int): int
+    return rotr(x, 7) ~ rotr(x, 18) ~ (x >> 3)
+end
+
+function smallSigma1(x: int): int
+    return rotr(x, 17) ~ rotr(x, 19) ~ (x >> 10)
+end
+
+function sha256(msg: string): string
+    -- PREPROCESSING [§5.1.1]: work on the UTF-8 bytes of msg; append 0x80,
+    -- zero-pad to 56 mod 64 bytes, then the original length in bits as a
+    -- 64-bit big-endian integer
+    const bitLength = #msg * 8
+    -- (appending via `bytes[#bytes + 1]` rather than table.insert, which
+    -- rescans the table to find its length and would make this quadratic)
+    local bytes = {}
+    for offset = 1, #msg, 4096 do
+        for _, byte in {string.byte(msg, offset, offset + 4095)} do
+            bytes[#bytes + 1] = byte
+        end
+    end
+    bytes[#bytes + 1] = 0x80
+    while (#bytes % 64 != 56) do
+        bytes[#bytes + 1] = 0
+    end
+    for shift = 56, 0, -8 do
+        bytes[#bytes + 1] = (bitLength >> shift) & 0xff
+    end
+
+    local H = table.clone(H0)
+    local W = {}
+
+    -- HASH COMPUTATION [§6.2.2], one 64-byte block at a time
+    for offset = 0, #bytes - 1, 64 do
+        -- 1 - prepare message schedule W (big-endian words)
+        for t = 1, 16 do
+            const i = offset + (t - 1) * 4
+            W[t] = (bytes[i + 1] << 24) | (bytes[i + 2] << 16) | (bytes[i + 3] << 8) | bytes[i + 4]
+        end
+        for t = 17, 64 do
+            W[t] = (smallSigma1(W[t - 2]) + W[t - 7] + smallSigma0(W[t - 15]) + W[t - 16]) & MASK32
+        end
+
+        -- 2 - initialise working variables with the previous hash value
+        local a, b, c, d, e, f, g, h = H[1], H[2], H[3], H[4], H[5], H[6], H[7], H[8]
+
+        -- 3 - main loop
+        for t = 1, 64 do
+            const T1 = (h + bigSigma1(e) + ch(e, f, g) + K[t] + W[t]) & MASK32
+            const T2 = (bigSigma0(a) + maj(a, b, c)) & MASK32
+            h = g
+            g = f
+            f = e
+            e = (d + T1) & MASK32
+            d = c
+            c = b
+            b = a
+            a = (T1 + T2) & MASK32
+        end
+
+        -- 4 - compute the new intermediate hash value
+        H[1] = (H[1] + a) & MASK32
+        H[2] = (H[2] + b) & MASK32
+        H[3] = (H[3] + c) & MASK32
+        H[4] = (H[4] + d) & MASK32
+        H[5] = (H[5] + e) & MASK32
+        H[6] = (H[6] + f) & MASK32
+        H[7] = (H[7] + g) & MASK32
+        H[8] = (H[8] + h) & MASK32
+    end
+
+    -- hex digest, 8 zero-padded digits per word
+    local parts = {}
+    for i, word in H do
+        parts[i] = string.format("%08x", word)
+    end
+    return table.concat(parts, "")
+end
+
+function crypto.hash(s: string, algorithm: "sha256"): string
+    if (s == nil) then error("s must be provided") end
+    if (type(s) != "string") then error("s must be a string") end
+    if (algorithm == nil) then error("algorithm must be provided") end
+    if (type(algorithm) != "string") then error("algorithm must be a string") end
+
+    if (algorithm == "sha256") then
+        return sha256(s)
+    end
+
+    error("unknown algorithm, '" .. algorithm .. "'")
+end
+
+return table.freeze(crypto)
