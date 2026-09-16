@@ -1,4 +1,4 @@
-// Commercial-grade integration test runner for Neyuki `.nyk` test scripts.
+// integration test runner for Neyuki `.nyk` test scripts.
 
 use std::fs;
 use std::path::{Path, PathBuf};
