@@ -34,6 +34,23 @@ impl Int {
         }
     }
 
+    pub(crate) fn from_u64(value: u64) -> Int {
+        match i64::try_from(value) {
+            Ok(small) => Int::Small(small),
+            Err(_) => Int::Big(Rc::new(BigInt::from(value))),
+        }
+    }
+
+    /// The low 64 bits in two's complement, as an unsigned word.
+    pub(crate) fn low_u64(&self) -> u64 {
+        match self {
+            Int::Small(value) => *value as u64,
+            Int::Big(value) => ((**value).clone() & BigInt::from(u64::MAX))
+                .to_u64()
+                .unwrap_or(0),
+        }
+    }
+
     pub(crate) fn to_bigint(&self) -> BigInt {
         match self {
             Int::Small(value) => BigInt::from(*value),
@@ -952,7 +969,7 @@ impl Runtime {
             "==" => Ok(Value::Bool(equal(&left, &right))),
             "!=" => Ok(Value::Bool(!equal(&left, &right))),
             "<" | "<=" | ">" | ">=" => compare(left, op, right),
-            "&" | "|" | "~" | "<<" | ">>" => bitwise(left, op, right),
+            "&" | "|" | "~" | "<<" | ">>" | "<<<" | ">>>" => bitwise(left, op, right),
             _ => Err(format!("unsupported operator {}", op)),
         }
     }
@@ -1270,6 +1287,17 @@ fn bitwise(left: Value, op: &str, right: Value) -> Result<Value, String> {
             b.to_usize()
                 .ok_or_else(|| "shift is too large".to_string())?,
         ),
+        "<<<" | ">>>" => {
+            // Logical shifts act on the low 64 bits as an unsigned word, so
+            // the result is always in 0..2^64 and shifting by 64+ yields 0.
+            let word = a.low_u64();
+            let bits = b.to_usize().unwrap_or(usize::MAX);
+            Int::from_u64(match (op, bits) {
+                (_, 64..) => 0,
+                ("<<<", _) => word << bits,
+                (_, _) => word >> bits,
+            })
+        }
         _ => return Err("unsupported bitwise operator".to_string()),
     }))
 }

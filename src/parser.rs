@@ -842,8 +842,9 @@ impl Parser {
     /// Consumes an `op=` token and returns the binary operator it applies, so
     /// `a op= b` can be desugared to `a = a op b`.
     fn match_compound_assignment(&mut self) -> Option<String> {
-        const OPERATORS: [&str; 13] = [
-            "+=", "-=", "*=", "/=", "//=", "%=", "^=", "..=", "<<=", ">>=", "&=", "|=", "??=",
+        const OPERATORS: [&str; 15] = [
+            "+=", "-=", "*=", "/=", "//=", "%=", "^=", "..=", "<<=", ">>=", "<<<=", ">>>=", "&=",
+            "|=", "??=",
         ];
         let token = self.peek();
         if token.kind != "symbol" || !OPERATORS.contains(&token.value.as_str()) {
@@ -923,7 +924,7 @@ impl Parser {
             "|" => 4,
             "~" => 5,
             "&" => 6,
-            "<<" | ">>" => 7,
+            "<<" | ">>" | "<<<" | ">>>" => 7,
             ".." => 8,
             "+" | "-" => 9,
             "*" | "/" | "//" | "%" => 10,

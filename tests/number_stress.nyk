@@ -30,4 +30,19 @@ assert(math.floor(3.9) == 3, "floor should round positive floats down")
 assert(math.floor(-3.1) == -4, "floor should round negative floats down")
 assert(math.floor(4) == 4, "floor should preserve integers")
 
+-- logical shifts: unsigned 64-bit word semantics
+assert(-1 >>> 60 == 15, "logical right shift fills with zeros")
+assert(-8 >> 1 == -4, "arithmetic right shift keeps the sign")
+assert(-8 >>> 1 == 9223372036854775804, "logical right shift of negative is positive")
+assert(1 <<< 63 == 9223372036854775808, "logical left shift into the top bit is positive")
+assert(1 <<< 64 == 0, "logical left shift by width or more is zero")
+assert(-1 >>> 64 == 0, "logical right shift by width or more is zero")
+assert((1 << 70) <<< 0 == 0, "logical shift only sees the low 64 bits")
+assert((1 << 70 | 5) >>> 0 == 5, "logical shift truncates bigints to 64 bits")
+assert(0xFF <<< 4 == 0xFF0, "logical left shift small value")
+local w = 0xF0
+w <<<= 4
+w >>>= 2
+assert(w == 0x3C0, "compound logical shift assignments")
+
 print(`[pass] numbers & widening: 2^62 * 8 = {big} ({typeof(big)})`)
