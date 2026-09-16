@@ -284,6 +284,7 @@ pub(crate) struct Table {
     pub fields: HashMap<String, Value>,
     pub const_fields: HashSet<String>,
     pub frozen: bool,
+    pub metatable: Option<Rc<RefCell<Table>>>,
 }
 
 pub(crate) enum Function {
@@ -417,6 +418,11 @@ impl Runtime {
             ),
             ("try", native("try", builtin_try)),
             ("require", native("require", builtin_require)),
+            ("setmetatable", native("setmetatable", builtin_setmetatable)),
+            ("getmetatable", native("getmetatable", builtin_getmetatable)),
+            ("rawset", native("rawset", builtin_rawset)),
+            ("rawget", native("rawget", builtin_rawget)),
+            ("rawequal", native("rawequal", builtin_rawequal)),
         ] {
             env.borrow_mut().values.insert(name.to_string(), function);
         }
@@ -740,6 +746,7 @@ impl Runtime {
                     fields: HashMap::new(),
                     const_fields: HashSet::new(),
                     frozen: false,
+                    metatable: None,
                 };
                 for entry in entries {
                     if matches!(entry.value, Expr::Vararg) {
@@ -774,6 +781,17 @@ impl Runtime {
                     "not" => Ok(Value::Bool(!value.truthy_bool()?)),
                     "-" => self.number_unary(value, true),
                     "#" => self.length(value),
+                    "~" => match value {
+                        Value::Integer(i) => match i {
+                            Int::Small(s) => Ok(Value::Integer(Int::Small(!s))),
+                            Int::Big(b) => Ok(Value::Integer(Int::from_bigint(!(*b).clone()))),
+                        },
+                        Value::Number(f) => {
+                            let i = f.trunc() as i64;
+                            Ok(Value::Integer(Int::Small(!i)))
+                        }
+                        _ => Err("bitwise not expects an integer".to_string()),
+                    },
                     _ => Err(format!("unsupported unary operator {}", op)),
                 }
             }
@@ -850,6 +868,7 @@ impl Runtime {
                                 fields: HashMap::new(),
                                 const_fields: HashSet::new(),
                                 frozen: false,
+                                metatable: None,
                             };
                             call_env.borrow_mut().values.insert(
                                 "__varargs".to_string(),
@@ -870,6 +889,18 @@ impl Runtime {
                     }
                 }
             },
+            Value::Table(table) => {
+                let mt_call = {
+                    let tbl = table.borrow();
+                    tbl.metatable.as_ref().and_then(|mt| mt.borrow().fields.get("__call").cloned())
+                };
+                if let Some(call_fn) = mt_call {
+                    let mut full_args = vec![Value::Table(table)];
+                    full_args.extend(args);
+                    return self.call(call_fn, full_args);
+                }
+                Err("value is not callable".to_string())
+            }
             _ => Err("value is not callable".to_string()),
         }
     }
@@ -935,6 +966,36 @@ impl Runtime {
             ));
         }
         let right = first_value(self.eval(right, env)?);
+
+        let metamethod_name = match op {
+            "+" => Some("__add"),
+            "-" => Some("__sub"),
+            "*" => Some("__mul"),
+            "/" => Some("__div"),
+            "//" => Some("__idiv"),
+            "%" => Some("__mod"),
+            "^" => Some("__pow"),
+            ".." => Some("__concat"),
+            "==" => Some("__eq"),
+            "<" => Some("__lt"),
+            "<=" => Some("__le"),
+            _ => None,
+        };
+
+        if let Some(mm) = metamethod_name {
+            let find_meta = |v: &Value| -> Option<Value> {
+                if let Value::Table(tbl) = v {
+                    tbl.borrow().metatable.as_ref().and_then(|mt| mt.borrow().fields.get(mm).cloned())
+                } else {
+                    None
+                }
+            };
+            if let Some(h) = find_meta(&left).or_else(|| find_meta(&right)) {
+                let res = self.call(h, vec![left.clone(), right.clone()])?;
+                return Ok(collapse_values(res));
+            }
+        }
+
         match op {
             "??" => {
                 if matches!(left, Value::Nil) {
@@ -1023,21 +1084,42 @@ impl Runtime {
     fn index(&self, object: &Value, index: &Value) -> Result<Value, String> {
         match object {
             Value::Table(table) => {
-                let table = table.borrow();
-                match index {
-                    Value::String(key) => Ok(table.fields.get(key).cloned().unwrap_or(Value::Nil)),
-                    Value::Integer(index) if index.is_positive() => Ok(table
-                        .array
-                        .get(
-                            index
-                                .to_usize()
-                                .ok_or_else(|| "table index is too large".to_string())?
-                                - 1,
-                        )
-                        .cloned()
-                        .unwrap_or(Value::Nil)),
-                    _ => Err("table index must be a string or positive integer".to_string()),
+                let borrowed = table.borrow();
+                let found = match index {
+                    Value::String(key) => borrowed.fields.get(key).cloned(),
+                    Value::Integer(index) if index.is_positive() => {
+                        let idx = index
+                            .to_usize()
+                            .ok_or_else(|| "table index is too large".to_string())?
+                            - 1;
+                        borrowed.array.get(idx).cloned()
+                    }
+                    _ => None,
+                };
+
+                if let Some(v) = found
+                    && !matches!(v, Value::Nil) {
+                        return Ok(v);
                 }
+
+                let mt_opt = borrowed.metatable.clone();
+                drop(borrowed);
+
+                if let Some(mt) = mt_opt {
+                    let h_opt = mt.borrow().fields.get("__index").cloned();
+                    if let Some(h) = h_opt {
+                        match &h {
+                            Value::Table(_) => return self.index(&h, index),
+                            Value::Function(_) => {
+                                let results = self.call(h, vec![object.clone(), index.clone()])?;
+                                return Ok(collapse_values(results));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                Ok(Value::Nil)
             }
             Value::String(_) => {
                 Err("string members require a user-provided string package".to_string())
@@ -1064,6 +1146,43 @@ impl Runtime {
     fn assign_index(&self, object: &Value, index: Value, value: Value) -> Result<(), String> {
         match object {
             Value::Table(table) => {
+                let has_existing_or_no_mt = {
+                    let borrowed = table.borrow();
+                    if borrowed.frozen {
+                        return Err("assignment to frozen table".to_string());
+                    }
+                    if borrowed.metatable.is_none() {
+                        true
+                    } else {
+                        match &index {
+                            Value::String(k) => borrowed.fields.contains_key(k),
+                            Value::Integer(i) if i.is_positive() => {
+                                let idx = i.to_usize().unwrap_or(0);
+                                idx > 0 && idx <= borrowed.array.len() && !matches!(borrowed.array[idx - 1], Value::Nil)
+                            }
+                            _ => false,
+                        }
+                    }
+                };
+
+                if !has_existing_or_no_mt {
+                    let mt_newindex = {
+                        let borrowed = table.borrow();
+                        borrowed.metatable.as_ref().and_then(|mt| mt.borrow().fields.get("__newindex").cloned())
+                    };
+
+                    if let Some(h) = mt_newindex {
+                        match &h {
+                            Value::Table(_) => return self.assign_index(&h, index, value),
+                            Value::Function(_) => {
+                                self.call(h, vec![object.clone(), index, value])?;
+                                return Ok(());
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
                 let mut table = table.borrow_mut();
                 if table.frozen {
                     return Err("assignment to frozen table".to_string());
@@ -1132,6 +1251,7 @@ pub(crate) fn new_table(array: Vec<Value>) -> Value {
         fields: HashMap::new(),
         const_fields: HashSet::new(),
         frozen: false,
+        metatable: None,
     })))
 }
 fn child(parent: &EnvRef) -> EnvRef {
@@ -1208,7 +1328,9 @@ pub(crate) fn number(value: Value) -> Result<f64, String> {
 pub(crate) fn require_string(value: Value) -> Result<String, String> {
     match value {
         Value::String(value) => Ok(value),
-        _ => Err("expected a string".to_string()),
+        Value::Integer(i) => Ok(i.to_string()),
+        Value::Number(f) => Ok(f.to_string()),
+        _ => Err("expected a string or number".to_string()),
     }
 }
 fn equal(left: &Value, right: &Value) -> bool {
@@ -1262,14 +1384,28 @@ fn bitwise(left: Value, op: &str, right: Value) -> Result<Value, String> {
         "&" => &a & &b,
         "|" => &a | &b,
         "~" => &a ^ &b,
-        "<<" => a.shl(
-            b.to_usize()
-                .ok_or_else(|| "shift is too large".to_string())?,
-        ),
-        ">>" => a.shr(
-            b.to_usize()
-                .ok_or_else(|| "shift is too large".to_string())?,
-        ),
+        "<<" => {
+            if let Some(shift) = b.to_i64() {
+                if shift < 0 {
+                    a.shr((-shift) as usize)
+                } else {
+                    a.shl(shift as usize)
+                }
+            } else {
+                return Err("shift is too large".to_string());
+            }
+        }
+        ">>" => {
+            if let Some(shift) = b.to_i64() {
+                if shift < 0 {
+                    a.shl((-shift) as usize)
+                } else {
+                    a.shr(shift as usize)
+                }
+            } else {
+                return Err("shift is too large".to_string());
+            }
+        }
         _ => return Err("unsupported bitwise operator".to_string()),
     }))
 }
@@ -1284,9 +1420,132 @@ fn builtin_print(args: Vec<Value>) -> Result<Vec<Value>, String> {
     Ok(vec![Value::Nil])
 }
 fn builtin_tostring(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    Ok(vec![Value::String(
-        args.first().cloned().unwrap_or(Value::Nil).to_string(),
-    )])
+    let value = args.into_iter().next().unwrap_or(Value::Nil);
+    if let Value::Table(tbl) = &value {
+        let tostring_fn = {
+            let b = tbl.borrow();
+            b.metatable
+                .as_ref()
+                .and_then(|mt| mt.borrow().fields.get("__tostring").cloned())
+        };
+        if let Some(func) = tostring_fn {
+            let rt = Runtime::new();
+            match rt.call(func, vec![value.clone()]) {
+                Ok(res) => {
+                    if let Some(s) = res.into_iter().next() {
+                        return Ok(vec![Value::String(s.to_string())]);
+                    }
+                }
+                Err(err) => return Err(format!("error in __tostring: {}", err)),
+            }
+        }
+    }
+    Ok(vec![Value::String(value.to_string())])
+}
+
+fn builtin_setmetatable(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let target = args
+        .first()
+        .ok_or_else(|| "setmetatable expects table as first argument".to_string())?;
+    let mt = args
+        .get(1)
+        .ok_or_else(|| "setmetatable expects metatable as second argument".to_string())?;
+    match target {
+        Value::Table(tbl) => {
+            let mt_table = match mt {
+                Value::Nil => None,
+                Value::Table(mt_ref) => Some(mt_ref.clone()),
+                _ => return Err("metatable must be a table or nil".to_string()),
+            };
+            tbl.borrow_mut().metatable = mt_table;
+            Ok(vec![target.clone()])
+        }
+        _ => Err("setmetatable expects table as first argument".to_string()),
+    }
+}
+
+fn builtin_getmetatable(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let target = args
+        .first()
+        .ok_or_else(|| "getmetatable expects an argument".to_string())?;
+    match target {
+        Value::Table(tbl) => {
+            if let Some(mt) = &tbl.borrow().metatable {
+                Ok(vec![Value::Table(mt.clone())])
+            } else {
+                Ok(vec![Value::Nil])
+            }
+        }
+        _ => Ok(vec![Value::Nil]),
+    }
+}
+
+fn builtin_rawset(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let target = args
+        .first()
+        .ok_or_else(|| "rawset expects table as first argument".to_string())?;
+    let key = args
+        .get(1)
+        .ok_or_else(|| "rawset expects key as second argument".to_string())?;
+    let val = args.get(2).cloned().unwrap_or(Value::Nil);
+    match target {
+        Value::Table(tbl) => {
+            let mut borrowed = tbl.borrow_mut();
+            match key {
+                Value::String(s) => {
+                    borrowed.fields.insert(s.clone(), val);
+                }
+                Value::Integer(idx) if idx.is_positive() => {
+                    let i = idx
+                        .to_usize()
+                        .ok_or_else(|| "table index is too large".to_string())?;
+                    while borrowed.array.len() < i {
+                        borrowed.array.push(Value::Nil);
+                    }
+                    borrowed.array[i - 1] = val;
+                }
+                _ => return Err("rawset expects string or integer key".to_string()),
+            }
+            Ok(vec![target.clone()])
+        }
+        _ => Err("rawset expects table as first argument".to_string()),
+    }
+}
+
+fn builtin_rawget(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let target = args
+        .first()
+        .ok_or_else(|| "rawget expects table as first argument".to_string())?;
+    let key = args
+        .get(1)
+        .ok_or_else(|| "rawget expects key as second argument".to_string())?;
+    match target {
+        Value::Table(tbl) => {
+            let borrowed = tbl.borrow();
+            let v = match key {
+                Value::String(s) => borrowed.fields.get(s).cloned().unwrap_or(Value::Nil),
+                Value::Integer(idx) if idx.is_positive() => {
+                    let i = idx
+                        .to_usize()
+                        .ok_or_else(|| "table index is too large".to_string())?
+                        - 1;
+                    borrowed.array.get(i).cloned().unwrap_or(Value::Nil)
+                }
+                _ => Value::Nil,
+            };
+            Ok(vec![v])
+        }
+        _ => Err("rawget expects table as first argument".to_string()),
+    }
+}
+
+fn builtin_rawequal(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let a = args.first().unwrap_or(&Value::Nil);
+    let b = args.get(1).unwrap_or(&Value::Nil);
+    match (a, b) {
+        (Value::Table(t1), Value::Table(t2)) => Ok(vec![Value::Bool(Rc::ptr_eq(t1, t2))]),
+        _ => Ok(vec![Value::Bool(equal(a, b))]),
+    }
 }
 fn builtin_type(args: Vec<Value>) -> Result<Vec<Value>, String> {
     Ok(vec![Value::String(

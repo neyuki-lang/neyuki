@@ -1,0 +1,423 @@
+// Binary deserialization for Neyuki bytecode files with integrated verification.
+
+use num_bigint::{BigInt, Sign};
+use crate::bytecode::format::BytecodeHeader;
+use crate::bytecode::instruction::Instruction;
+use crate::bytecode::proto::{Constant, Proto, UpvalueDesc};
+use crate::bytecode::verify::verify_proto;
+
+pub fn deserialize(bytes: &[u8]) -> Result<Proto, String> {
+    let (_header, mut cursor) = BytecodeHeader::parse(bytes)?;
+    let proto = read_proto(bytes, &mut cursor)?;
+    // Verify bytecode integrity before allowing execution
+    verify_proto(&proto).map_err(|e| e.to_string())?;
+    Ok(proto)
+}
+
+fn read_u8(bytes: &[u8], cursor: &mut usize) -> Result<u8, String> {
+    if *cursor >= bytes.len() {
+        return Err("unexpected end of bytecode".to_string());
+    }
+    let val = bytes[*cursor];
+    *cursor += 1;
+    Ok(val)
+}
+
+fn read_u16(bytes: &[u8], cursor: &mut usize) -> Result<u16, String> {
+    if *cursor + 2 > bytes.len() {
+        return Err("unexpected end of bytecode".to_string());
+    }
+    let val = u16::from_le_bytes([bytes[*cursor], bytes[*cursor + 1]]);
+    *cursor += 2;
+    Ok(val)
+}
+
+fn read_i16(bytes: &[u8], cursor: &mut usize) -> Result<i16, String> {
+    if *cursor + 2 > bytes.len() {
+        return Err("unexpected end of bytecode".to_string());
+    }
+    let val = i16::from_le_bytes([bytes[*cursor], bytes[*cursor + 1]]);
+    *cursor += 2;
+    Ok(val)
+}
+
+fn read_u32(bytes: &[u8], cursor: &mut usize) -> Result<u32, String> {
+    if *cursor + 4 > bytes.len() {
+        return Err("unexpected end of bytecode".to_string());
+    }
+    let val = u32::from_le_bytes([
+        bytes[*cursor],
+        bytes[*cursor + 1],
+        bytes[*cursor + 2],
+        bytes[*cursor + 3],
+    ]);
+    *cursor += 4;
+    Ok(val)
+}
+
+fn read_i32(bytes: &[u8], cursor: &mut usize) -> Result<i32, String> {
+    if *cursor + 4 > bytes.len() {
+        return Err("unexpected end of bytecode".to_string());
+    }
+    let val = i32::from_le_bytes([
+        bytes[*cursor],
+        bytes[*cursor + 1],
+        bytes[*cursor + 2],
+        bytes[*cursor + 3],
+    ]);
+    *cursor += 4;
+    Ok(val)
+}
+
+fn read_f64(bytes: &[u8], cursor: &mut usize) -> Result<f64, String> {
+    if *cursor + 8 > bytes.len() {
+        return Err("unexpected end of bytecode".to_string());
+    }
+    let mut b = [0u8; 8];
+    b.copy_from_slice(&bytes[*cursor..*cursor + 8]);
+    *cursor += 8;
+    Ok(f64::from_le_bytes(b))
+}
+
+fn read_string(bytes: &[u8], cursor: &mut usize) -> Result<String, String> {
+    let len = read_u32(bytes, cursor)? as usize;
+    if *cursor + len > bytes.len() {
+        return Err("unexpected end of bytecode in string".to_string());
+    }
+    let s = std::str::from_utf8(&bytes[*cursor..*cursor + len])
+        .map_err(|e| format!("invalid utf-8: {}", e))?
+        .to_string();
+    *cursor += len;
+    Ok(s)
+}
+
+fn read_bigint(bytes: &[u8], cursor: &mut usize) -> Result<BigInt, String> {
+    let sign_byte = read_u8(bytes, cursor)?;
+    let sign = match sign_byte {
+        0 => Sign::Minus,
+        1 => Sign::NoSign,
+        2 => Sign::Plus,
+        _ => return Err("invalid bigint sign".to_string()),
+    };
+    let len = read_u32(bytes, cursor)? as usize;
+    if *cursor + len > bytes.len() {
+        return Err("unexpected end of bytecode in bigint".to_string());
+    }
+    let b = BigInt::from_bytes_le(sign, &bytes[*cursor..*cursor + len]);
+    *cursor += len;
+    Ok(b)
+}
+
+fn read_constant(bytes: &[u8], cursor: &mut usize) -> Result<Constant, String> {
+    let tag = read_u8(bytes, cursor)?;
+    match tag {
+        0 => Ok(Constant::Nil),
+        1 => {
+            let b = read_u8(bytes, cursor)? != 0;
+            Ok(Constant::Bool(b))
+        }
+        2 => {
+            let bi = read_bigint(bytes, cursor)?;
+            Ok(Constant::Int(bi))
+        }
+        3 => {
+            let f = read_f64(bytes, cursor)?;
+            Ok(Constant::Float(f))
+        }
+        4 => {
+            let s = read_string(bytes, cursor)?;
+            Ok(Constant::String(s))
+        }
+        _ => Err(format!("invalid constant tag: {}", tag)),
+    }
+}
+
+fn read_instruction(bytes: &[u8], cursor: &mut usize) -> Result<Instruction, String> {
+    let tag = read_u8(bytes, cursor)?;
+    match tag {
+        1 => Ok(Instruction::LoadNil { dst: read_u8(bytes, cursor)? }),
+        2 => Ok(Instruction::LoadBool {
+            dst: read_u8(bytes, cursor)?,
+            val: read_u8(bytes, cursor)? != 0,
+        }),
+        3 => Ok(Instruction::LoadInt {
+            dst: read_u8(bytes, cursor)?,
+            val: read_i32(bytes, cursor)?,
+        }),
+        4 => Ok(Instruction::LoadK {
+            dst: read_u8(bytes, cursor)?,
+            k: read_u16(bytes, cursor)?,
+        }),
+        5 => Ok(Instruction::Move {
+            dst: read_u8(bytes, cursor)?,
+            src: read_u8(bytes, cursor)?,
+        }),
+        6 => Ok(Instruction::GetGlobal {
+            dst: read_u8(bytes, cursor)?,
+            name_k: read_u16(bytes, cursor)?,
+        }),
+        7 => Ok(Instruction::SetGlobal {
+            src: read_u8(bytes, cursor)?,
+            name_k: read_u16(bytes, cursor)?,
+        }),
+        8 => Ok(Instruction::GetUpval {
+            dst: read_u8(bytes, cursor)?,
+            upval_idx: read_u8(bytes, cursor)?,
+        }),
+        9 => Ok(Instruction::SetUpval {
+            src: read_u8(bytes, cursor)?,
+            upval_idx: read_u8(bytes, cursor)?,
+        }),
+        10 => Ok(Instruction::NewTable { dst: read_u8(bytes, cursor)? }),
+        11 => Ok(Instruction::GetTable {
+            dst: read_u8(bytes, cursor)?,
+            table: read_u8(bytes, cursor)?,
+            key: read_u8(bytes, cursor)?,
+        }),
+        12 => Ok(Instruction::SetTable {
+            table: read_u8(bytes, cursor)?,
+            key: read_u8(bytes, cursor)?,
+            val: read_u8(bytes, cursor)?,
+        }),
+        13 => Ok(Instruction::GetTableK {
+            dst: read_u8(bytes, cursor)?,
+            table: read_u8(bytes, cursor)?,
+            key_k: read_u16(bytes, cursor)?,
+        }),
+        14 => Ok(Instruction::SetTableK {
+            table: read_u8(bytes, cursor)?,
+            key_k: read_u16(bytes, cursor)?,
+            val: read_u8(bytes, cursor)?,
+        }),
+        15 => Ok(Instruction::AppendArray {
+            table: read_u8(bytes, cursor)?,
+            src: read_u8(bytes, cursor)?,
+        }),
+        16 => Ok(Instruction::Add {
+            dst: read_u8(bytes, cursor)?,
+            a: read_u8(bytes, cursor)?,
+            b: read_u8(bytes, cursor)?,
+        }),
+        17 => Ok(Instruction::Sub {
+            dst: read_u8(bytes, cursor)?,
+            a: read_u8(bytes, cursor)?,
+            b: read_u8(bytes, cursor)?,
+        }),
+        18 => Ok(Instruction::Mul {
+            dst: read_u8(bytes, cursor)?,
+            a: read_u8(bytes, cursor)?,
+            b: read_u8(bytes, cursor)?,
+        }),
+        19 => Ok(Instruction::Div {
+            dst: read_u8(bytes, cursor)?,
+            a: read_u8(bytes, cursor)?,
+            b: read_u8(bytes, cursor)?,
+        }),
+        20 => Ok(Instruction::IDiv {
+            dst: read_u8(bytes, cursor)?,
+            a: read_u8(bytes, cursor)?,
+            b: read_u8(bytes, cursor)?,
+        }),
+        21 => Ok(Instruction::Mod {
+            dst: read_u8(bytes, cursor)?,
+            a: read_u8(bytes, cursor)?,
+            b: read_u8(bytes, cursor)?,
+        }),
+        22 => Ok(Instruction::Pow {
+            dst: read_u8(bytes, cursor)?,
+            a: read_u8(bytes, cursor)?,
+            b: read_u8(bytes, cursor)?,
+        }),
+        23 => Ok(Instruction::BitAnd {
+            dst: read_u8(bytes, cursor)?,
+            a: read_u8(bytes, cursor)?,
+            b: read_u8(bytes, cursor)?,
+        }),
+        24 => Ok(Instruction::BitOr {
+            dst: read_u8(bytes, cursor)?,
+            a: read_u8(bytes, cursor)?,
+            b: read_u8(bytes, cursor)?,
+        }),
+        25 => Ok(Instruction::BitXor {
+            dst: read_u8(bytes, cursor)?,
+            a: read_u8(bytes, cursor)?,
+            b: read_u8(bytes, cursor)?,
+        }),
+        26 => Ok(Instruction::Shl {
+            dst: read_u8(bytes, cursor)?,
+            a: read_u8(bytes, cursor)?,
+            b: read_u8(bytes, cursor)?,
+        }),
+        27 => Ok(Instruction::Shr {
+            dst: read_u8(bytes, cursor)?,
+            a: read_u8(bytes, cursor)?,
+            b: read_u8(bytes, cursor)?,
+        }),
+        28 => Ok(Instruction::Concat {
+            dst: read_u8(bytes, cursor)?,
+            a: read_u8(bytes, cursor)?,
+            b: read_u8(bytes, cursor)?,
+        }),
+        29 => Ok(Instruction::Unm {
+            dst: read_u8(bytes, cursor)?,
+            src: read_u8(bytes, cursor)?,
+        }),
+        30 => Ok(Instruction::Not {
+            dst: read_u8(bytes, cursor)?,
+            src: read_u8(bytes, cursor)?,
+        }),
+        31 => Ok(Instruction::Len {
+            dst: read_u8(bytes, cursor)?,
+            src: read_u8(bytes, cursor)?,
+        }),
+        32 => Ok(Instruction::BitNot {
+            dst: read_u8(bytes, cursor)?,
+            src: read_u8(bytes, cursor)?,
+        }),
+        33 => Ok(Instruction::Coalesce {
+            dst: read_u8(bytes, cursor)?,
+            a: read_u8(bytes, cursor)?,
+            b: read_u8(bytes, cursor)?,
+        }),
+        34 => Ok(Instruction::Eq {
+            a: read_u8(bytes, cursor)?,
+            b: read_u8(bytes, cursor)?,
+            jump_if_false: read_i16(bytes, cursor)?,
+        }),
+        35 => Ok(Instruction::Ne {
+            a: read_u8(bytes, cursor)?,
+            b: read_u8(bytes, cursor)?,
+            jump_if_false: read_i16(bytes, cursor)?,
+        }),
+        36 => Ok(Instruction::Lt {
+            a: read_u8(bytes, cursor)?,
+            b: read_u8(bytes, cursor)?,
+            jump_if_false: read_i16(bytes, cursor)?,
+        }),
+        37 => Ok(Instruction::Le {
+            a: read_u8(bytes, cursor)?,
+            b: read_u8(bytes, cursor)?,
+            jump_if_false: read_i16(bytes, cursor)?,
+        }),
+        38 => Ok(Instruction::Gt {
+            a: read_u8(bytes, cursor)?,
+            b: read_u8(bytes, cursor)?,
+            jump_if_false: read_i16(bytes, cursor)?,
+        }),
+        39 => Ok(Instruction::Ge {
+            a: read_u8(bytes, cursor)?,
+            b: read_u8(bytes, cursor)?,
+            jump_if_false: read_i16(bytes, cursor)?,
+        }),
+        40 => Ok(Instruction::Test {
+            reg: read_u8(bytes, cursor)?,
+            jump_if_false: read_i16(bytes, cursor)?,
+        }),
+        41 => Ok(Instruction::Jump { offset: read_i16(bytes, cursor)? }),
+        42 => Ok(Instruction::Call {
+            callee: read_u8(bytes, cursor)?,
+            argc: read_u8(bytes, cursor)?,
+            retc: read_u8(bytes, cursor)?,
+        }),
+        43 => Ok(Instruction::Return {
+            base: read_u8(bytes, cursor)?,
+            count: read_u8(bytes, cursor)?,
+        }),
+        44 => Ok(Instruction::Closure {
+            dst: read_u8(bytes, cursor)?,
+            proto_idx: read_u16(bytes, cursor)?,
+        }),
+        45 => Ok(Instruction::Vararg {
+            dst: read_u8(bytes, cursor)?,
+            count: read_u8(bytes, cursor)?,
+        }),
+        46 => Ok(Instruction::ForPrep {
+            base: read_u8(bytes, cursor)?,
+            jump: read_i16(bytes, cursor)?,
+        }),
+        47 => Ok(Instruction::ForLoop {
+            base: read_u8(bytes, cursor)?,
+            jump: read_i16(bytes, cursor)?,
+        }),
+        48 => Ok(Instruction::SetList {
+            table: read_u8(bytes, cursor)?,
+            base: read_u8(bytes, cursor)?,
+            count: read_u8(bytes, cursor)?,
+        }),
+        49 => Ok(Instruction::TForCall {
+            base: read_u8(bytes, cursor)?,
+            retc: read_u8(bytes, cursor)?,
+        }),
+        50 => Ok(Instruction::TForLoop {
+            base: read_u8(bytes, cursor)?,
+            jump: read_i16(bytes, cursor)?,
+        }),
+        _ => Err(format!("unknown instruction tag: {}", tag)),
+    }
+}
+
+fn read_proto(bytes: &[u8], cursor: &mut usize) -> Result<Proto, String> {
+    let has_name = read_u8(bytes, cursor)? != 0;
+    let name = if has_name {
+        Some(read_string(bytes, cursor)?)
+    } else {
+        None
+    };
+    let num_params = read_u8(bytes, cursor)?;
+    let max_registers = read_u8(bytes, cursor)?;
+    let is_vararg = read_u8(bytes, cursor)? != 0;
+
+    let num_constants = read_u32(bytes, cursor)? as usize;
+    let mut constants = Vec::with_capacity(num_constants);
+    for _ in 0..num_constants {
+        constants.push(read_constant(bytes, cursor)?);
+    }
+
+    let num_instructions = read_u32(bytes, cursor)? as usize;
+    let mut instructions = Vec::with_capacity(num_instructions);
+    for _ in 0..num_instructions {
+        instructions.push(read_instruction(bytes, cursor)?);
+    }
+
+    let num_protos = read_u32(bytes, cursor)? as usize;
+    let mut protos = Vec::with_capacity(num_protos);
+    for _ in 0..num_protos {
+        protos.push(read_proto(bytes, cursor)?);
+    }
+
+    let num_upvalues = read_u32(bytes, cursor)? as usize;
+    let mut upvalues = Vec::with_capacity(num_upvalues);
+    for _ in 0..num_upvalues {
+        let in_stack = read_u8(bytes, cursor)? != 0;
+        let index = read_u8(bytes, cursor)?;
+        upvalues.push(UpvalueDesc { in_stack, index });
+    }
+
+    let num_lines = read_u32(bytes, cursor)? as usize;
+    let mut lines = Vec::with_capacity(num_lines);
+    for _ in 0..num_lines {
+        lines.push(read_u32(bytes, cursor)?);
+    }
+
+    let num_locals = read_u32(bytes, cursor)? as usize;
+    let mut local_names = Vec::with_capacity(num_locals);
+    for _ in 0..num_locals {
+        let name = read_string(bytes, cursor)?;
+        let from_pc = read_u32(bytes, cursor)?;
+        let to_pc = read_u32(bytes, cursor)?;
+        local_names.push(crate::bytecode::proto::LocalVarInfo { name, from_pc, to_pc });
+    }
+
+    Ok(Proto {
+        name,
+        num_params,
+        max_registers,
+        is_vararg,
+        constants,
+        instructions,
+        protos,
+        upvalues,
+        lines,
+        local_names,
+    })
+}
