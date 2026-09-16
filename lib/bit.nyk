@@ -1,7 +1,6 @@
-local bit = bit or {}
+local bit = {}
 
 function bit.band(...: number): number
-    if bit.band ~= nil then return bit.band(...) end
     local res = -1
     for _, v in {...} do
         res = res & v
@@ -10,7 +9,6 @@ function bit.band(...: number): number
 end
 
 function bit.bor(...: number): number
-    if bit.bor ~= nil then return bit.bor(...) end
     local res = 0
     for _, v in {...} do
         res = res | v
@@ -19,7 +17,6 @@ function bit.bor(...: number): number
 end
 
 function bit.bxor(...: number): number
-    if bit.bxor ~= nil then return bit.bxor(...) end
     local res = 0
     for _, v in {...} do
         res = res ~ v
@@ -28,17 +25,14 @@ function bit.bxor(...: number): number
 end
 
 function bit.bnot(a: number): number
-    if bit.bnot ~= nil then return bit.bnot(a) end
     return ~a
 end
 
 function bit.lshift(a: number, b: number): number
-    if bit.lshift ~= nil then return bit.lshift(a, b) end
     return a << b
 end
 
 function bit.rshift(a: number, b: number): number
-    if bit.rshift ~= nil then return bit.rshift(a, b) end
     return a >> b
 end
 

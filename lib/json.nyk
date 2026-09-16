@@ -1,3 +1,3 @@
 -- Neyuki bundled library: @neyuki/json
-local json = require("json")
+local json = require("@neyuki/json")
 return json

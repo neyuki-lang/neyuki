@@ -1,3 +1,3 @@
 -- Neyuki bundled library: @neyuki/coroutine
-local coroutine = require("coroutine")
+local coroutine = require("@neyuki/coroutine")
 return coroutine

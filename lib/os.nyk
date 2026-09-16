@@ -1,12 +1,12 @@
-local os = os or {}
+local os = {}
 
 function os.clock(): number
-    if os.clock ~= nil then return os.clock() end
+    if __os_clock ~= nil then return __os_clock() end
     return 0
 end
 
 function os.time(table: any?): number
-    if os.time ~= nil then return os.time(table) end
+    if __os_time ~= nil then return __os_time(table) end
     return 0
 end
 
@@ -15,7 +15,7 @@ function os.difftime(t2: number, t1: number): number
 end
 
 function os.getenv(varname: string): string?
-    if os.getenv ~= nil then return os.getenv(varname) end
+    if __os_getenv ~= nil then return __os_getenv(varname) end
     return nil
 end
 
