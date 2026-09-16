@@ -1,0 +1,18 @@
+local buffer = buffer or {}
+
+function buffer.create(size: number): any
+    if buffer.create ~= nil then return buffer.create(size) end
+    error("buffer not supported in this runtime")
+end
+
+function buffer.fromstring(str: string): any
+    if buffer.fromstring ~= nil then return buffer.fromstring(str) end
+    error("buffer not supported in this runtime")
+end
+
+function buffer.tostring(b: any): string
+    if buffer.tostring ~= nil then return buffer.tostring(b) end
+    error("buffer not supported in this runtime")
+end
+
+return buffer
