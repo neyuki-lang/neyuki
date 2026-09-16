@@ -33,7 +33,10 @@ pub fn sha256(msg: &[u8]) -> String {
     let mut h = H0;
     let mut w = [0u32; 64];
 
-    for chunk in bytes.chunks_exact(64) {
+    let (chunks, remainder) = bytes.as_chunks::<64>();
+    debug_assert!(remainder.is_empty());
+
+    for chunk in chunks {
         for (t, slot) in w.iter_mut().take(16).enumerate() {
             let i = t * 4;
             *slot = u32::from_be_bytes([chunk[i], chunk[i + 1], chunk[i + 2], chunk[i + 3]]);
