@@ -1,0 +1,131 @@
+#![allow(dead_code)]
+
+// Memory safety fuzz tests for buffers, heap limits, and cyclic GC.
+
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use crate::vm::buffer::VmBuffer;
+use crate::vm::gc::GcTracker;
+use crate::vm::machine::VM;
+use crate::vm::value::{Value, VmTable};
+
+pub fn fuzz_buffer_integer_overflow() {
+    let mut buf = VmBuffer::new(64);
+
+    let overflow_offsets = [
+        usize::MAX,
+        usize::MAX - 1,
+        usize::MAX - 2,
+        usize::MAX - 4,
+        usize::MAX - 8,
+        usize::MAX / 2,
+        (isize::MAX as usize) + 1,
+    ];
+
+    for &off in &overflow_offsets {
+        assert!(buf.read_u8(off).is_err());
+        assert!(buf.write_u8(off, 0xFF).is_err());
+        assert!(buf.read_u16(off).is_err());
+        assert!(buf.write_u16(off, 0x1234).is_err());
+        assert!(buf.read_u32(off).is_err());
+        assert!(buf.write_u32(off, 0x12345678).is_err());
+        assert!(buf.read_f32(off).is_err());
+        assert!(buf.write_f32(off, 1.5).is_err());
+        assert!(buf.read_f64(off).is_err());
+        assert!(buf.write_f64(off, 2.5).is_err());
+        assert!(buf.read_string(off, 10).is_err());
+        assert!(buf.write_string(off, "test").is_err());
+        assert!(buf.fill(off, 0, 10).is_err());
+    }
+}
+
+pub fn fuzz_buffer_copy_boundaries() {
+    let mut buf1 = VmBuffer::new(16);
+    let buf2 = VmBuffer::new(16);
+
+    // Target offset out of bounds
+    assert!(buf1.copy(usize::MAX, &buf2, 0, 4).is_err());
+    // Source offset out of bounds
+    assert!(buf1.copy(0, &buf2, usize::MAX, 4).is_err());
+    // Count overflow
+    assert!(buf1.copy(0, &buf2, 0, usize::MAX).is_err());
+    // Count exceeds length
+    assert!(buf1.copy(10, &buf2, 0, 10).is_err());
+}
+
+pub fn fuzz_gc_cyclic_stress() {
+    // Stress test: allocate 100 clusters of 5-node mutually cyclic tables
+    let mut gc = GcTracker::new();
+    let mut root_refs = Vec::new();
+
+    for cluster in 0..100 {
+        let t1 = Rc::new(RefCell::new(VmTable::new()));
+        let t2 = Rc::new(RefCell::new(VmTable::new()));
+        let t3 = Rc::new(RefCell::new(VmTable::new()));
+        let t4 = Rc::new(RefCell::new(VmTable::new()));
+        let t5 = Rc::new(RefCell::new(VmTable::new()));
+
+        gc.register_table(&t1);
+        gc.register_table(&t2);
+        gc.register_table(&t3);
+        gc.register_table(&t4);
+        gc.register_table(&t5);
+
+        // Cyclic ring: t1 -> t2 -> t3 -> t4 -> t5 -> t1
+        t1.borrow_mut().set_str("next", Value::Table(t2.clone()));
+        t2.borrow_mut().set_str("next", Value::Table(t3.clone()));
+        t3.borrow_mut().set_str("next", Value::Table(t4.clone()));
+        t4.borrow_mut().set_str("next", Value::Table(t5.clone()));
+        t5.borrow_mut().set_str("next", Value::Table(t1.clone()));
+
+        if cluster % 10 == 0 {
+            // Keep 1 out of 10 clusters alive in roots
+            root_refs.push(Value::Table(t1));
+        }
+    }
+
+    let empty_globals = std::collections::HashMap::new();
+    let freed = gc.collect_garbage(&root_refs, &empty_globals);
+    assert!(freed > 0, "GC sweep must break unreachable cyclic table clusters");
+}
+
+pub fn fuzz_vm_recursion_protection() {
+    // Tests that mutual infinite recursion is safely caught by call depth guards
+    let code = "
+        local function a() return b() end
+        local function b() return a() end
+        return a()
+    ";
+    let stmts = crate::compiler::compile_source(code).expect("syntax error");
+    let proto = crate::compiler::compile_to_proto(&stmts);
+    let mut vm = VM::new();
+    let res = vm.execute(proto);
+    assert!(res.is_err(), "mutual infinite recursion must fail safely without stack overflow");
+    assert!(res.unwrap_err().contains("call stack overflow"));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_memory_buffer_integer_overflow() {
+        fuzz_buffer_integer_overflow();
+    }
+
+    #[test]
+    fn test_memory_buffer_copy_boundaries() {
+        fuzz_buffer_copy_boundaries();
+    }
+
+    #[test]
+    fn test_memory_gc_cyclic_stress() {
+        fuzz_gc_cyclic_stress();
+    }
+
+    #[test]
+    fn test_memory_vm_recursion_protection() {
+        fuzz_vm_recursion_protection();
+    }
+}
