@@ -34,6 +34,7 @@ pub fn compile_source(source: &str) -> Result<Vec<Stmt>, String> {
 }
 
 // Read and parse source file into AST statements
+#[allow(dead_code)]
 pub fn compile_file(path: &str) -> Result<Vec<Stmt>, String> {
     let source =
         fs::read_to_string(path).map_err(|err| format!("failed to read {}: {}", path, err))?;
@@ -43,6 +44,13 @@ pub fn compile_file(path: &str) -> Result<Vec<Stmt>, String> {
 // Compile AST statements into a register-based Proto with constant folding optimization,
 // returning detailed errors on compilation failure.
 pub fn try_compile_to_proto(statements: &[Stmt]) -> Result<Proto, String> {
+    let diags = crate::sema::analyze(statements, "");
+    if let Some(err) = diags
+        .iter()
+        .find(|d| d.severity == crate::diagnostics::severity::Severity::Error)
+    {
+        return Err(format!("semantic error: {}", err.message));
+    }
     let optimized_stmts = fold_program(statements.to_vec());
     let mut compiler = Compiler::new(Some("main".to_string()), 0, false);
     compiler.compile_program(&optimized_stmts);
@@ -100,6 +108,13 @@ pub fn compile_to_proto(statements: &[Stmt]) -> Proto {
 // Compile source directly into binary bytecode with magic bytes 'neyuki!'
 pub fn compile_source_to_bytecode(source: &str) -> Result<Vec<u8>, String> {
     let stmts = compile_source(source)?;
+    let diags = crate::sema::analyze(&stmts, source);
+    if let Some(err) = diags
+        .iter()
+        .find(|d| d.severity == crate::diagnostics::severity::Severity::Error)
+    {
+        return Err(format!("semantic error: {}", err.message));
+    }
     let proto = try_compile_to_proto(&stmts)?;
     Ok(serialize(&proto))
 }

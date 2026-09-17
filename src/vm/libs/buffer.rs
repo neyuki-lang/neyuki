@@ -39,6 +39,9 @@ fn to_usize(val: &Value, name: &str) -> Result<usize, String> {
 }
 
 fn buf_create(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    if vm.gc.should_collect() {
+        vm.gc.collect_garbage(&vm.stack, &vm.globals);
+    }
     let size = to_usize(args.first().ok_or_else(|| "buffer.create expects size".to_string())?, "size")?;
     const MAX_BUFFER_SIZE: usize = 100 * 1024 * 1024;
     if size > MAX_BUFFER_SIZE {
@@ -51,6 +54,9 @@ fn buf_create(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 }
 
 fn buf_fromstring(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    if vm.gc.should_collect() {
+        vm.gc.collect_garbage(&vm.stack, &vm.globals);
+    }
     let s = match args.first().ok_or_else(|| "buffer.fromstring expects string".to_string())? {
         Value::String(s) => s.as_bytes().to_vec(),
         _ => return Err("buffer.fromstring expects string".to_string()),

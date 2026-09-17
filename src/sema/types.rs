@@ -20,7 +20,15 @@ pub enum NeyukiType {
 
 impl NeyukiType {
     pub fn parse(s: &str) -> Self {
-        let trimmed = s.trim();
+        let mut trimmed = s.trim();
+        if let Some(stripped) = trimmed.strip_suffix('?') {
+            trimmed = stripped.trim();
+        }
+        if (trimmed.starts_with('{') && trimmed.ends_with('}'))
+            || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+        {
+            return NeyukiType::Table;
+        }
         match trimmed.to_lowercase().as_str() {
             "any" => NeyukiType::Any,
             "nil" | "void" => NeyukiType::Nil,

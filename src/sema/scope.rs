@@ -59,7 +59,9 @@ impl ScopeManager {
 
     pub fn define(&mut self, symbol: Symbol) -> Result<(), Span> {
         let current = self.scopes.last_mut().expect("scope stack cannot be empty");
-        if let Some(existing) = current.symbols.get(&symbol.name) {
+        if let Some(existing) = current.symbols.get(&symbol.name)
+            && existing.is_const
+        {
             return Err(existing.span);
         }
         current.symbols.insert(symbol.name.clone(), symbol);

@@ -24,11 +24,12 @@ impl<'a> SemanticAnalyzer<'a> {
     pub fn new(source: &'a str) -> Self {
         let mut known_globals = HashSet::new();
         let globals = [
-            "print", "assert", "require", "type", "tostring", "tonumber", "pcall", "xpcall",
-            "try", "error", "pairs", "ipairs", "next", "select", "rawget", "rawset",
-            "setmetatable", "getmetatable", "collectgarbage", "math", "string", "table",
-            "bit", "bit32", "buffer", "os", "coroutine", "utf8", "debug", "json",
-            "true", "false", "nil", "_G", "_VERSION", "warn",
+            "print", "assert", "require", "type", "typeof", "tostring", "tonumber", "int", "float",
+            "pcall", "xpcall", "try", "error", "pairs", "ipairs", "next", "select",
+            "rawget", "rawset", "rawequal", "rawlen", "setmetatable", "getmetatable",
+            "collectgarbage", "math", "string", "table", "bit", "bit32", "buffer",
+            "os", "coroutine", "utf8", "debug", "json", "true", "false", "nil",
+            "_G", "_VERSION", "warn",
         ];
         for g in globals {
             known_globals.insert(g.to_string());
@@ -42,6 +43,10 @@ impl<'a> SemanticAnalyzer<'a> {
             current_return_type: None,
             current_line: 1,
         }
+    }
+
+    fn is_known_global(&self, name: &str) -> bool {
+        self.known_globals.contains(name) || name.starts_with("__")
     }
 
     pub fn analyze_program(&mut self, statements: &[Stmt]) {
@@ -60,6 +65,46 @@ impl<'a> SemanticAnalyzer<'a> {
     }
 
     fn analyze_block(&mut self, statements: &[Stmt]) {
+        // Pre-pass: hoist function declarations in current scope for mutual recursion & forward references
+        for stmt in statements {
+            if let Stmt::Function {
+                name: Some(fn_name),
+                is_const,
+                params,
+                return_type,
+                ..
+            } = stmt
+            {
+                let span = self.find_ident_span(fn_name);
+                let param_types: Vec<NeyukiType> = params
+                    .iter()
+                    .map(|p| {
+                        p.type_name
+                            .as_deref()
+                            .map(NeyukiType::parse)
+                            .unwrap_or(NeyukiType::Any)
+                    })
+                    .collect();
+                let is_vararg = params.iter().any(|p| p.variadic);
+                let ret_ty = return_type.as_deref().map(NeyukiType::parse);
+                let fn_type = NeyukiType::Function {
+                    params: param_types,
+                    return_type: Box::new(ret_ty.unwrap_or(NeyukiType::Any)),
+                    is_vararg,
+                };
+                let mut sym = Symbol::new(
+                    fn_name.clone(),
+                    SymbolKind::Function,
+                    *is_const,
+                    Some(fn_type),
+                    span,
+                );
+                sym.num_params = Some(params.iter().filter(|p| !p.variadic).count());
+                sym.is_vararg = is_vararg;
+                let _ = self.scope_mgr.define(sym);
+            }
+        }
+
         let mut unreachable = false;
         for stmt in statements {
             if unreachable {
@@ -92,6 +137,24 @@ impl<'a> SemanticAnalyzer<'a> {
 
                 let declared_type = type_name.as_deref().map(NeyukiType::parse);
 
+                let mut sym = Symbol::new(
+                    name.clone(),
+                    SymbolKind::Variable,
+                    *is_const,
+                    declared_type.clone(),
+                    span,
+                );
+                if let Some(init) = initializer {
+                    sym.inferred_type = self.infer_expr_type(init);
+                }
+                if let Err(orig_span) = self.scope_mgr.define(sym) {
+                    let diag = Diagnostic::error(format!("duplicate local variable '{}' in the same scope", name))
+                        .with_code(ErrorCode::E0005)
+                        .with_label(span, "redefined here")
+                        .with_secondary_label(orig_span, "previous definition was here");
+                    self.diagnostics.push(diag);
+                }
+
                 if let Some(init) = initializer {
                     self.analyze_expr(init);
                     let init_type = self.infer_expr_type(init);
@@ -109,33 +172,12 @@ impl<'a> SemanticAnalyzer<'a> {
                             self.diagnostics.push(diag);
                     }
                 }
-
-                let mut sym = Symbol::new(
-                    name.clone(),
-                    SymbolKind::Variable,
-                    *is_const,
-                    declared_type,
-                    span,
-                );
-                if let Some(init) = initializer {
-                    sym.inferred_type = self.infer_expr_type(init);
-                }
-                if let Err(orig_span) = self.scope_mgr.define(sym) {
-                    let diag = Diagnostic::error(format!("duplicate local variable '{}' in the same scope", name))
-                        .with_code(ErrorCode::E0005)
-                        .with_label(span, "redefined here")
-                        .with_secondary_label(orig_span, "previous definition was here");
-                    self.diagnostics.push(diag);
-                }
             }
             Stmt::LocalMany {
                 names,
                 is_const,
                 initializers,
             } => {
-                for init in initializers {
-                    self.analyze_expr(init);
-                }
                 for (i, name) in names.iter().enumerate() {
                     let span = self.find_ident_span(name);
                     self.check_shadowing(name, span);
@@ -157,6 +199,9 @@ impl<'a> SemanticAnalyzer<'a> {
                             .with_secondary_label(orig_span, "previous definition was here");
                         self.diagnostics.push(diag);
                     }
+                }
+                for init in initializers {
+                    self.analyze_expr(init);
                 }
             }
             Stmt::Assign {
@@ -191,7 +236,7 @@ impl<'a> SemanticAnalyzer<'a> {
                                 .with_secondary_label(sym.span, "defined as const here");
                             self.diagnostics.push(diag);
                         }
-                    } else if !self.known_globals.contains(name) {
+                    } else if !self.is_known_global(name) {
                         let diag = Diagnostic::error(format!("variable '{}' is not declared", name))
                             .with_code(ErrorCode::E0001)
                             .with_label(span, "cannot increment undeclared variable");
@@ -402,7 +447,7 @@ impl<'a> SemanticAnalyzer<'a> {
                         .with_label(span, format!("expected '{}', found '{}'", decl_type.display_name(), val_type.display_name()));
                         self.diagnostics.push(diag);
                 }
-            } else if !self.known_globals.contains(name) {
+            } else if !self.is_known_global(name) {
                 let diag = Diagnostic::error(format!("variable '{}' is used before declaration", name))
                     .with_code(ErrorCode::E0001)
                     .with_label(span, "not found in this scope")
@@ -418,7 +463,7 @@ impl<'a> SemanticAnalyzer<'a> {
         match expr {
             Expr::Variable(name) => {
                 let span = self.find_ident_span(name);
-                if !self.scope_mgr.mark_used(name) && !self.known_globals.contains(name) {
+                if !self.scope_mgr.mark_used(name) && !self.is_known_global(name) {
                     let diag = Diagnostic::error(format!("cannot find variable '{}' in this scope", name))
                         .with_code(ErrorCode::E0001)
                         .with_label(span, "not found in this scope")
@@ -438,7 +483,7 @@ impl<'a> SemanticAnalyzer<'a> {
                     && !sym.is_vararg
                     && args.len() != expected {
                         let span = self.find_ident_span(fn_name);
-                        let diag = Diagnostic::error(format!(
+                        let diag = Diagnostic::warning(format!(
                             "function '{}' takes {} argument(s) but {} were supplied",
                             fn_name,
                             expected,
@@ -535,9 +580,26 @@ impl<'a> SemanticAnalyzer<'a> {
                     NeyukiType::Number
                 }
             }
-            Expr::Binary { left: _, op, right: _ } => match op.as_str() {
+            Expr::Binary { left, op, right } => match op.as_str() {
                 "==" | "!=" | "<" | "<=" | ">" | ">=" => NeyukiType::Boolean,
                 ".." => NeyukiType::String,
+                "??" => {
+                    let r_ty = self.infer_expr_type(right);
+                    if r_ty != NeyukiType::Any && r_ty != NeyukiType::Nil {
+                        r_ty
+                    } else {
+                        self.infer_expr_type(left)
+                    }
+                }
+                "and" | "or" => {
+                    let r_ty = self.infer_expr_type(right);
+                    let l_ty = self.infer_expr_type(left);
+                    if l_ty == r_ty {
+                        l_ty
+                    } else {
+                        NeyukiType::Any
+                    }
+                }
                 _ => NeyukiType::Number,
             },
             _ => NeyukiType::Any,

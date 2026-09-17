@@ -392,7 +392,15 @@ impl Value {
 }
 
 pub fn run_file(path: &str) -> Result<(), String> {
-    let program = crate::compiler::compile_file(path)?;
+    let source = std::fs::read_to_string(path).map_err(|err| format!("failed to read {}: {}", path, err))?;
+    let program = crate::compiler::compile_source(&source)?;
+    let diags = crate::sema::analyze(&program, &source);
+    if let Some(err) = diags
+        .iter()
+        .find(|d| d.severity == crate::diagnostics::severity::Severity::Error)
+    {
+        return Err(format!("semantic error: {}", err.message));
+    }
     let mut runtime = Runtime::new();
     runtime.execute(&program).map(|_| ())
 }
@@ -400,6 +408,13 @@ pub fn run_file(path: &str) -> Result<(), String> {
 #[allow(dead_code)]
 pub fn run_source(source: &str) -> Result<(), String> {
     let program = crate::compiler::compile_source(source)?;
+    let diags = crate::sema::analyze(&program, source);
+    if let Some(err) = diags
+        .iter()
+        .find(|d| d.severity == crate::diagnostics::severity::Severity::Error)
+    {
+        return Err(format!("semantic error: {}", err.message));
+    }
     let mut runtime = Runtime::new();
     runtime.execute(&program).map(|_| ())
 }
@@ -1340,7 +1355,11 @@ impl Runtime {
                     }
                 }
 
-                Ok(Value::Nil)
+                match index {
+                    Value::String(_) => Ok(Value::Nil),
+                    Value::Integer(i) if i.is_positive() => Ok(Value::Nil),
+                    _ => Err("invalid table index".to_string()),
+                }
             }
             Value::String(_) => {
                 Err("string members require a user-provided string package".to_string())
@@ -1615,7 +1634,18 @@ fn bitwise(left: Value, op: &str, right: Value) -> Result<Value, String> {
         "<<" => {
             if let Some(shift) = b.to_i64() {
                 if shift < 0 {
-                    a.shr((-shift) as usize)
+                    let u = shift.unsigned_abs();
+                    if u > 65536 {
+                        if a.is_negative() {
+                            Int::from_bigint(BigInt::from(-1))
+                        } else {
+                            Int::from_bigint(BigInt::from(0))
+                        }
+                    } else {
+                        a.shr(u as usize)
+                    }
+                } else if shift > 65536 {
+                    return Err("shift is too large".to_string());
                 } else {
                     a.shl(shift as usize)
                 }
@@ -1626,7 +1656,18 @@ fn bitwise(left: Value, op: &str, right: Value) -> Result<Value, String> {
         ">>" => {
             if let Some(shift) = b.to_i64() {
                 if shift < 0 {
-                    a.shl((-shift) as usize)
+                    let u = shift.unsigned_abs();
+                    if u > 65536 {
+                        return Err("shift is too large".to_string());
+                    } else {
+                        a.shl(u as usize)
+                    }
+                } else if shift > 65536 {
+                    if a.is_negative() {
+                        Int::from_bigint(BigInt::from(-1))
+                    } else {
+                        Int::from_bigint(BigInt::from(0))
+                    }
                 } else {
                     a.shr(shift as usize)
                 }

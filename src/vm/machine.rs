@@ -921,7 +921,11 @@ impl VM {
                         _ => {}
                     }
                 }
-                Ok(Value::Nil)
+                match key {
+                    Value::String(_) => Ok(Value::Nil),
+                    Value::Int(idx) if *idx > BigInt::zero() => Ok(Value::Nil),
+                    _ => Err("invalid table key".to_string()),
+                }
             }
             Value::Buffer(b) => {
                 let buf = b.borrow();
