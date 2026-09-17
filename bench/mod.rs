@@ -1,4 +1,4 @@
-// Comprehensive Benchmark Suite for Neyuki Programming Language.
+// Comprehensive Benchmark Suite
 // Benchmarks all core subsystems: Lexer, Parser, Compiler, VM Arithmetic,
 // Tables, Strings, Coroutines, Garbage Collector, Crypto, Buffer, and JSON.
 
