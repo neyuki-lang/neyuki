@@ -259,8 +259,11 @@ fn verify_proto_depth(proto: &Proto, depth: usize) -> Result<(), BytecodeVerifyE
                     check_reg_range(*base, *count as usize, pc)?;
                 }
             }
-            Instruction::Vararg { dst, count: _ } => {
+            Instruction::Vararg { dst, count } => {
                 check_reg(*dst, pc)?;
+                if *count > 0 {
+                    check_reg_range(*dst, *count as usize, pc)?;
+                }
             }
             Instruction::Jump { offset } => {
                 check_jump(*offset, pc)?;

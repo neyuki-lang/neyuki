@@ -142,6 +142,9 @@ fn bit_tohex(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let val = args.first().ok_or_else(|| "bit.tohex expects at least 1 argument".to_string())?;
     let u = to_u32(val)?;
     let n = if let Some(nv) = args.get(1) { to_i32(nv)? } else { 8 };
+    if n.unsigned_abs() > 64 {
+        return Err("bit.tohex: width out of range (-64..64)".to_string());
+    }
     let hex_full = format!("{:08x}", u);
     let len = n.unsigned_abs() as usize;
     let res = if len <= 8 {

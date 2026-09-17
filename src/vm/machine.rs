@@ -291,6 +291,9 @@ impl VM {
                     *frame.closure.upvalues[upval_idx as usize].borrow_mut() = val;
                 }
                 Instruction::NewTable { dst } => {
+                    if self.gc.should_collect() {
+                        self.gc.collect_garbage(&self.stack, &self.globals);
+                    }
                     let rc = Rc::new(RefCell::new(VmTable::new()));
                     self.gc.register_table(&rc);
                     let t = Value::Table(rc);
@@ -1427,6 +1430,15 @@ end\n\
 return sum";
         let res = run_code(code);
         assert_eq!(res.to_string(), "60");
+    }
+
+    #[test]
+    fn test_vm_require_path_traversal_blocked() {
+        let code = "return require(\"../secret.nyk\")";
+        let res = std::panic::catch_unwind(|| {
+            run_code(code);
+        });
+        assert!(res.is_err());
     }
 }
 

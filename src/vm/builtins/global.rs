@@ -229,14 +229,44 @@ pub fn builtin_require(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String
             } else {
                 format!("{}.nyk", other)
             };
+            let path_obj = std::path::Path::new(&path);
+            if other.contains('\0')
+                || other.contains("..")
+                || other.starts_with('/')
+                || other.starts_with('\\')
+                || path_obj.is_absolute()
+                || path_obj.components().any(|c| {
+                    matches!(
+                        c,
+                        std::path::Component::ParentDir
+                            | std::path::Component::RootDir
+                            | std::path::Component::Prefix(_)
+                    )
+                })
+            {
+                return Err(format!("security error: path traversal forbidden in require: '{}'", pkg));
+            }
             if let Ok(bytes) = std::fs::read(&path) {
                 let proto = if bytes.starts_with(crate::bytecode::MAGIC) || path.ends_with(".nykb") {
-                    crate::bytecode::deserialize(&bytes)?
+                    let p = crate::bytecode::deserialize(&bytes)?;
+                    crate::bytecode::verify_proto(&p)
+                        .map_err(|e| format!("bytecode verification failed: {}", e))?;
+                    p
                 } else {
                     let src = std::str::from_utf8(&bytes)
                         .map_err(|_| format!("cannot read module '{}': invalid UTF-8", pkg))?;
                     let stmts = crate::compiler::compile_source(src)?;
-                    crate::compiler::try_compile_to_proto(&stmts)?
+                    let diags = crate::sema::analyze(&stmts, src);
+                    if let Some(err) = diags
+                        .iter()
+                        .find(|d| d.severity == crate::diagnostics::severity::Severity::Error)
+                    {
+                        return Err(format!("semantic error in module '{}': {}", pkg, err.message));
+                    }
+                    let p = crate::compiler::try_compile_to_proto(&stmts)?;
+                    crate::bytecode::verify_proto(&p)
+                        .map_err(|e| format!("bytecode verification failed: {}", e))?;
+                    p
                 };
                 let val = vm.execute(proto)?;
                 return Ok(vec![val]);

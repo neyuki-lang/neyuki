@@ -496,7 +496,7 @@ impl Runtime {
         }
         Self {
             global: env,
-            call_depth: std::cell::Cell::new(0),
+            call_depth: std::cell::Cell::new(RUNTIME_CALL_STACK.with(|stack| stack.borrow().len())),
         }
     }
 
@@ -940,7 +940,14 @@ impl Runtime {
     }
 
     fn call(&self, function: Value, args: Vec<Value>) -> Result<Vec<Value>, String> {
-        const MAX_CALL_DEPTH: usize = 512;
+        const MAX_CALL_DEPTH: usize = 128;
+        let stack_depth = RUNTIME_CALL_STACK.with(|stack| stack.borrow().len());
+        if stack_depth >= MAX_CALL_DEPTH {
+            return Err(format!(
+                "call stack overflow: exceeded maximum call depth of {}",
+                MAX_CALL_DEPTH
+            ));
+        }
         let depth = self.call_depth.get();
         if depth >= MAX_CALL_DEPTH {
             return Err(format!(
@@ -2276,6 +2283,17 @@ fn builtin_try(args: Vec<Value>) -> Result<Vec<Value>, String> {
     let Some(Value::Function(function)) = args.first() else {
         return Err("try expects a function".to_string());
     };
+    const MAX_CALL_DEPTH: usize = 128;
+    let stack_depth = RUNTIME_CALL_STACK.with(|stack| stack.borrow().len());
+    if stack_depth >= MAX_CALL_DEPTH {
+        return Ok(vec![
+            Value::Bool(false),
+            Value::String(format!(
+                "call stack overflow: exceeded maximum call depth of {}",
+                MAX_CALL_DEPTH
+            )),
+        ]);
+    }
     match &**function {
         Function::Native { call, .. } => match call(args[1..].to_vec()) {
             Ok(mut values) => {
@@ -2303,6 +2321,17 @@ fn builtin_xpcall(args: Vec<Value>) -> Result<Vec<Value>, String> {
     let Some(Value::Function(function)) = args.first() else {
         return Err("xpcall expects a function as 1st argument".to_string());
     };
+    const MAX_CALL_DEPTH: usize = 128;
+    let stack_depth = RUNTIME_CALL_STACK.with(|stack| stack.borrow().len());
+    if stack_depth >= MAX_CALL_DEPTH {
+        return Ok(vec![
+            Value::Bool(false),
+            Value::String(format!(
+                "call stack overflow: exceeded maximum call depth of {}",
+                MAX_CALL_DEPTH
+            )),
+        ]);
+    }
     let err_handler = args.get(1).cloned().unwrap_or(Value::Nil);
     let call_args = if args.len() > 2 { args[2..].to_vec() } else { Vec::new() };
 
@@ -3010,6 +3039,21 @@ assert(res == 42)\n\
 local ok2, err2 = xpcall(function() error(\"err\") end, function(e) return \"caught: \" .. e end)\n\
 assert(ok2 == false)\n\
 assert(err2 == \"caught: err\")";
+        let res = run_source(code);
+        assert!(res.is_ok(), "failed with error: {:?}", res.err());
+    }
+
+    #[test]
+    fn test_runtime_pcall_recursion_overflow() {
+        let code = "local captured_err = nil\n\
+local function f()\n\
+  local ok, err = pcall(f)\n\
+  if not ok and captured_err == nil then\n\
+    captured_err = err\n\
+  end\n\
+end\n\
+f()\n\
+assert(captured_err ~= nil)";
         let res = run_source(code);
         assert!(res.is_ok(), "failed with error: {:?}", res.err());
     }

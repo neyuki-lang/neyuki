@@ -16,7 +16,7 @@ pub fn deserialize(bytes: &[u8]) -> Result<Proto, String> {
             header.checksum, actual_checksum
         ));
     }
-    let proto = read_proto(bytes, &mut cursor)?;
+    let proto = read_proto(bytes, &mut cursor, 0)?;
     // Verify bytecode integrity before allowing execution
     verify_proto(&proto).map_err(|e| e.to_string())?;
     Ok(proto)
@@ -374,7 +374,12 @@ fn read_instruction(bytes: &[u8], cursor: &mut usize) -> Result<Instruction, Str
     }
 }
 
-fn read_proto(bytes: &[u8], cursor: &mut usize) -> Result<Proto, String> {
+fn read_proto(bytes: &[u8], cursor: &mut usize, depth: usize) -> Result<Proto, String> {
+    const MAX_PROTO_DEPTH: usize = 64;
+    if depth > MAX_PROTO_DEPTH {
+        return Err(format!("bytecode nested prototype depth limit ({}) exceeded", MAX_PROTO_DEPTH));
+    }
+
     let has_name = read_u8(bytes, cursor)? != 0;
     let name = if has_name {
         Some(read_string(bytes, cursor)?)
@@ -409,7 +414,7 @@ fn read_proto(bytes: &[u8], cursor: &mut usize) -> Result<Proto, String> {
     }
     let mut protos = Vec::with_capacity(num_protos);
     for _ in 0..num_protos {
-        protos.push(read_proto(bytes, cursor)?);
+        protos.push(read_proto(bytes, cursor, depth + 1)?);
     }
 
     let num_upvalues = read_u32(bytes, cursor)? as usize;
