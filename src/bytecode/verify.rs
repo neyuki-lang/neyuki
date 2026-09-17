@@ -214,6 +214,30 @@ fn verify_proto_depth(proto: &Proto, depth: usize) -> Result<(), BytecodeVerifyE
                         pc: Some(pc),
                     });
                 }
+                let child = &proto.protos[*proto_idx as usize];
+                for (up_i, updesc) in child.upvalues.iter().enumerate() {
+                    if updesc.in_stack {
+                        if updesc.index >= proto.max_registers {
+                            return Err(BytecodeVerifyError {
+                                message: format!(
+                                    "closure proto {} upvalue {} in_stack index R{} exceeds parent max_registers ({})",
+                                    proto_idx, up_i, updesc.index, proto.max_registers
+                                ),
+                                proto_name: name.clone(),
+                                pc: Some(pc),
+                            });
+                        }
+                    } else if updesc.index as usize >= num_upvalues {
+                        return Err(BytecodeVerifyError {
+                            message: format!(
+                                "closure proto {} upvalue {} parent upvalue index {} exceeds parent upvalues count ({})",
+                                proto_idx, up_i, updesc.index, num_upvalues
+                            ),
+                            proto_name: name.clone(),
+                            pc: Some(pc),
+                        });
+                    }
+                }
             }
             Instruction::Call { callee, argc, retc } => {
                 check_reg(*callee, pc)?;
@@ -256,13 +280,13 @@ fn verify_proto_depth(proto: &Proto, depth: usize) -> Result<(), BytecodeVerifyE
                 check_jump(*jump_if_false, pc)?;
             }
             Instruction::ForPrep { base, jump } => {
-                // ForPrep uses R(base), R(base+1), R(base+2) for limit/step/index
-                check_reg_range(*base, 3, pc)?;
+                // ForPrep/ForLoop reserve 4 consecutive registers: init, limit, step, loop_var
+                check_reg_range(*base, 4, pc)?;
                 check_jump(*jump, pc)?;
             }
             Instruction::ForLoop { base, jump } => {
-                // ForLoop uses the same range as ForPrep
-                check_reg_range(*base, 3, pc)?;
+                // ForLoop uses R(base)..R(base+3)
+                check_reg_range(*base, 4, pc)?;
                 check_jump(*jump, pc)?;
             }
             Instruction::TForCall { base, retc } => {

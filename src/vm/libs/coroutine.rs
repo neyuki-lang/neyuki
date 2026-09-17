@@ -44,6 +44,7 @@ pub(crate) fn coroutine_create(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>
         yield_callee: 0,
         yield_retc: 0,
         yield_values: Vec::new(),
+        open_upvalues: std::collections::HashMap::new(),
     };
     vm.coroutines.insert(id, Rc::new(RefCell::new(state)));
 
@@ -116,6 +117,7 @@ pub(crate) fn coroutine_resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>
 
     let caller_stack = std::mem::take(&mut vm.stack);
     let caller_frames = std::mem::take(&mut vm.frames);
+    let caller_open_upvalues = std::mem::take(&mut vm.open_upvalues);
     let caller_co = vm.current_co;
 
     let is_initial = co_rc.borrow().frames.is_empty();
@@ -123,6 +125,7 @@ pub(crate) fn coroutine_resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>
         let mut co_state = co_rc.borrow_mut();
         vm.stack = std::mem::take(&mut co_state.stack);
         vm.frames = std::mem::take(&mut co_state.frames);
+        vm.open_upvalues = std::mem::take(&mut co_state.open_upvalues);
         vm.current_co = Some(co_id);
         co_state.status = "running".to_string();
         co_val
@@ -159,6 +162,7 @@ pub(crate) fn coroutine_resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>
                 vm.coroutines.remove(&co_id);
                 vm.stack = caller_stack;
                 vm.frames = caller_frames;
+                vm.open_upvalues = caller_open_upvalues;
                 vm.current_co = caller_co;
                 return match res {
                     Ok(vals) => {
@@ -172,6 +176,7 @@ pub(crate) fn coroutine_resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>
             _ => {
                 vm.stack = caller_stack;
                 vm.frames = caller_frames;
+                vm.open_upvalues = caller_open_upvalues;
                 vm.current_co = caller_co;
                 return Err("coroutine function is not callable".to_string());
             }
@@ -201,6 +206,7 @@ pub(crate) fn coroutine_resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>
             let mut cs = co_rc.borrow_mut();
             cs.stack = std::mem::take(&mut vm.stack);
             cs.frames = std::mem::take(&mut vm.frames);
+            cs.open_upvalues = std::mem::take(&mut vm.open_upvalues);
             cs.status = "suspended".to_string();
             co_val
                 .borrow_mut()
@@ -210,6 +216,7 @@ pub(crate) fn coroutine_resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>
 
             vm.stack = caller_stack;
             vm.frames = caller_frames;
+            vm.open_upvalues = caller_open_upvalues;
             vm.current_co = caller_co;
 
             let mut out = vec![Value::Bool(true)];
@@ -227,6 +234,7 @@ pub(crate) fn coroutine_resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>
 
             vm.stack = caller_stack;
             vm.frames = caller_frames;
+            vm.open_upvalues = caller_open_upvalues;
             vm.current_co = caller_co;
 
             Ok(vec![Value::Bool(true), ret_val])
@@ -242,6 +250,7 @@ pub(crate) fn coroutine_resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>
 
             vm.stack = caller_stack;
             vm.frames = caller_frames;
+            vm.open_upvalues = caller_open_upvalues;
             vm.current_co = caller_co;
 
             Ok(vec![Value::Bool(false), Value::String(err)])

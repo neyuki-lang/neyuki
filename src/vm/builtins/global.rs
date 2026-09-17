@@ -229,9 +229,15 @@ pub fn builtin_require(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String
             } else {
                 format!("{}.nyk", other)
             };
-            if let Ok(src) = std::fs::read_to_string(&path) {
-                let stmts = crate::compiler::compile_source(&src)?;
-                let proto = crate::compiler::try_compile_to_proto(&stmts)?;
+            if let Ok(bytes) = std::fs::read(&path) {
+                let proto = if bytes.starts_with(crate::bytecode::MAGIC) || path.ends_with(".nykb") {
+                    crate::bytecode::deserialize(&bytes)?
+                } else {
+                    let src = std::str::from_utf8(&bytes)
+                        .map_err(|_| format!("cannot read module '{}': invalid UTF-8", pkg))?;
+                    let stmts = crate::compiler::compile_source(src)?;
+                    crate::compiler::try_compile_to_proto(&stmts)?
+                };
                 let val = vm.execute(proto)?;
                 return Ok(vec![val]);
             }

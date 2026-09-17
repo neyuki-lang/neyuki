@@ -140,6 +140,35 @@ impl IrBuilder {
                     self.emit(IrInst::GetGlobal { dst, name: name.clone() });
                 }
             }
+            Expr::Binary { left, op, right } if op == "and" => {
+                let l_var = self.compile_expr(left, Some(dst));
+                if l_var != dst {
+                    self.emit(IrInst::Move { dst, src: l_var });
+                }
+                let end_label = self.alloc_label();
+                self.emit(IrInst::JumpIfFalse { cond: dst, target: end_label });
+                let r_var = self.compile_expr(right, Some(dst));
+                if r_var != dst {
+                    self.emit(IrInst::Move { dst, src: r_var });
+                }
+                self.emit(IrInst::Label(end_label));
+            }
+            Expr::Binary { left, op, right } if op == "or" => {
+                let l_var = self.compile_expr(left, Some(dst));
+                if l_var != dst {
+                    self.emit(IrInst::Move { dst, src: l_var });
+                }
+                let else_label = self.alloc_label();
+                let end_label = self.alloc_label();
+                self.emit(IrInst::JumpIfFalse { cond: dst, target: else_label });
+                self.emit(IrInst::Jump(end_label));
+                self.emit(IrInst::Label(else_label));
+                let r_var = self.compile_expr(right, Some(dst));
+                if r_var != dst {
+                    self.emit(IrInst::Move { dst, src: r_var });
+                }
+                self.emit(IrInst::Label(end_label));
+            }
             Expr::Binary { left, op, right } => {
                 let lhs = self.compile_expr(left, None);
                 let rhs = self.compile_expr(right, None);
@@ -330,15 +359,28 @@ impl IrBuilder {
                 self.compile_assign(target, result);
             }
             Stmt::Function { name, params, body, .. } => {
+                let local_var = if let Some(func_name) = name {
+                    if !func_name.contains('.') {
+                        if let Some(lv) = self.resolve_local(func_name) {
+                            Some(lv)
+                        } else {
+                            let lv = self.alloc_var();
+                            self.add_local(func_name.clone(), lv);
+                            Some(lv)
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
                 let proto_idx = self.compile_sub_function(name.clone(), params, body);
                 let closure_var = self.alloc_var();
                 self.emit(IrInst::Closure { dst: closure_var, proto_idx });
-                if let Some(func_name) = name {
-                    if let Some(local_var) = self.resolve_local(func_name) {
-                        self.emit(IrInst::Move { dst: local_var, src: closure_var });
-                    } else {
-                        self.emit(IrInst::SetGlobal { name: func_name.clone(), src: closure_var });
-                    }
+                if let Some(lv) = local_var {
+                    self.emit(IrInst::Move { dst: lv, src: closure_var });
+                } else if let Some(func_name) = name {
+                    self.emit(IrInst::SetGlobal { name: func_name.clone(), src: closure_var });
                 }
             }
             Stmt::If { condition, then_branch, else_if_branches, else_branch } => {
@@ -432,19 +474,20 @@ impl IrBuilder {
                 self.enter_scope();
                 let base = self.alloc_var();
                 self.compile_expr(start, Some(base));
-                let _limit = self.compile_expr(end, None);
-                let _step_var = if let Some(s) = step {
-                    self.compile_expr(s, None)
+                let limit = self.alloc_var();
+                self.compile_expr(end, Some(limit));
+                let step_var = self.alloc_var();
+                if let Some(s) = step {
+                    self.compile_expr(s, Some(step_var));
                 } else {
-                    let sv = self.alloc_var();
-                    self.emit(IrInst::LoadConst { dst: sv, val: IrConstant::Int(BigInt::from(1)) });
-                    sv
+                    self.emit(IrInst::LoadConst { dst: step_var, val: IrConstant::Int(BigInt::from(1)) });
                 };
 
                 let loop_var = self.alloc_var();
                 self.add_local(var.clone(), loop_var);
 
                 let body_label = self.alloc_label();
+                let test_label = self.alloc_label();
                 let exit_label = self.alloc_label();
 
                 self.loops.push(IrLoopContext {
@@ -452,7 +495,13 @@ impl IrBuilder {
                     continue_label: body_label,
                 });
 
-                self.emit(IrInst::ForPrep { base, jump: exit_label });
+                self.emit(IrInst::ForPrep {
+                    base,
+                    limit,
+                    step: step_var,
+                    loop_var,
+                    jump: test_label,
+                });
 
                 self.emit(IrInst::Label(body_label));
                 self.enter_scope();
@@ -461,6 +510,7 @@ impl IrBuilder {
                 }
                 self.exit_scope();
 
+                self.emit(IrInst::Label(test_label));
                 self.emit(IrInst::ForLoop { base, jump: body_label });
                 self.emit(IrInst::Label(exit_label));
 
@@ -510,7 +560,12 @@ impl IrBuilder {
                 });
 
                 self.emit(IrInst::Label(call_label));
-                self.emit(IrInst::TForCall { base, retc: vars.len() as u8 });
+                self.emit(IrInst::TForCall {
+                    base,
+                    state: state_var,
+                    ctrl: ctrl_var,
+                    vars: iter_vars,
+                });
                 self.emit(IrInst::TForLoop { base, jump: exit_label });
 
                 self.enter_scope();

@@ -2721,6 +2721,7 @@ fn runtime_coroutine_create(args: Vec<Value>) -> Result<Vec<Value>, String> {
         yield_callee: 0,
         yield_retc: 0,
         yield_values: Vec::new(),
+        open_upvalues: std::collections::HashMap::new(),
     };
     vm.coroutines.insert(co_id, Rc::new(RefCell::new(co_state)));
 

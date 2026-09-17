@@ -8,13 +8,28 @@ use std::str::FromStr;
 
 use crate::parser::{Expr, InterpPart, Stmt, TableEntry};
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 enum FoldVal {
     Nil,
     Bool(bool),
     Int(BigInt),
     Float(f64),
     Str(String),
+}
+
+impl PartialEq for FoldVal {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (FoldVal::Nil, FoldVal::Nil) => true,
+            (FoldVal::Bool(a), FoldVal::Bool(b)) => a == b,
+            (FoldVal::Int(a), FoldVal::Int(b)) => a == b,
+            (FoldVal::Float(a), FoldVal::Float(b)) => a == b,
+            (FoldVal::Int(a), FoldVal::Float(b)) => a.to_f64().is_some_and(|v| v == *b),
+            (FoldVal::Float(a), FoldVal::Int(b)) => b.to_f64().is_some_and(|v| *a == v),
+            (FoldVal::Str(a), FoldVal::Str(b)) => a == b,
+            _ => false,
+        }
+    }
 }
 
 impl FoldVal {
@@ -173,7 +188,7 @@ fn fold_binary_op(op: &str, left: FoldVal, right: FoldVal) -> Option<FoldVal> {
                 if fb == 0.0 {
                     return None;
                 }
-                Some(FoldVal::Float(fa.rem_euclid(fb)))
+                Some(FoldVal::Float(fa - (fa / fb).floor() * fb))
             }
         },
         "^" => {
@@ -872,6 +887,26 @@ mod tests {
         match &optimized[1] {
             Stmt::Local { initializer: Some(Expr::Call { .. }), .. } => {}
             _ => panic!("shadowed math was incorrectly folded into a constant!"),
+        }
+    }
+
+    #[test]
+    fn test_fold_equality_int_float_and_float_modulo() {
+        let mut parser = Parser::new("local eq = 1 == 1.0\nlocal mod_val = -5.5 % 2.0");
+        let stmts = parser.parse_program().expect("syntax error");
+        let optimized = fold_program(stmts);
+        match &optimized[0] {
+            Stmt::Local { initializer: Some(Expr::Literal(val)), .. } => {
+                assert_eq!(val, "true");
+            }
+            _ => panic!("failed to fold 1 == 1.0"),
+        }
+        match &optimized[1] {
+            Stmt::Local { initializer: Some(Expr::Literal(val)), .. } => {
+                let parsed: f64 = val.parse().expect("valid float");
+                assert!((parsed - 0.5).abs() < 1e-6);
+            }
+            _ => panic!("failed to fold -5.5 % 2.0"),
         }
     }
 }

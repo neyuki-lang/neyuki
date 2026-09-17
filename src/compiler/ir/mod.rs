@@ -130,4 +130,28 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("depth limit (64) exceeded"));
     }
+
+    #[test]
+    fn test_ir_and_or_short_circuit() {
+        let code = "local a = false and 10 or 20\nreturn a";
+        let stmts = compile_source(code).expect("syntax error");
+        let ir_module = ast_to_ir(&stmts);
+        let proto = ir_to_bytecode(&ir_module).expect("ir lowering failed");
+
+        let mut vm = VM::new();
+        let val = vm.execute(proto).expect("exec failed");
+        assert_eq!(val.to_string(), "20");
+    }
+
+    #[test]
+    fn test_ir_numeric_for() {
+        let code = "local sum = 0\nfor i = 1, 5 do\n  sum = sum + i\nend\nreturn sum";
+        let stmts = compile_source(code).expect("syntax error");
+        let ir_module = ast_to_ir(&stmts);
+        let proto = ir_to_bytecode(&ir_module).expect("ir lowering failed");
+
+        let mut vm = VM::new();
+        let val = vm.execute(proto).expect("exec failed");
+        assert_eq!(val.to_string(), "15");
+    }
 }

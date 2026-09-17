@@ -85,7 +85,7 @@ pub fn eval_mod(a: Value, b: Value) -> Result<Value, String> {
     if fb == 0.0 {
         return Err("modulo by zero".to_string());
     }
-    Ok(Value::Float(fa % fb))
+    Ok(Value::Float(fa - (fa / fb).floor() * fb))
 }
 
 pub fn eval_pow(a: Value, b: Value) -> Result<Value, String> {

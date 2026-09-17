@@ -49,6 +49,13 @@ impl Compiler {
                     for r in arg_regs.into_iter().rev() {
                         self.current_mut().free_reg(r);
                     }
+                    let min_top = func_reg + names.len() as u8;
+                    if self.current().reg_top < min_top {
+                        self.current_mut().reg_top = min_top;
+                        if self.current().reg_top > self.current().proto.max_registers {
+                            self.current_mut().proto.max_registers = self.current().reg_top;
+                        }
+                    }
                     for (i, name) in names.iter().enumerate() {
                         self.current_mut().add_local(name.clone(), func_reg + i as u8);
                     }
@@ -389,43 +396,49 @@ impl Compiler {
             }
             Stmt::For { vars, source, body } => {
                 self.current_mut().enter_scope();
-                // Allocate 3 internal registers: iter_fn, state, ctrl
-                // These must be consecutive starting at base
-                let base = self.alloc_reg();
-                let state_reg = self.alloc_reg();
-                let ctrl_reg = self.alloc_reg();
-
-                // Compile the source expression.
-                // If it's a call (like pairs(t) or ipairs(t)), we need 3 return values.
-                // We compile the call with retc=3 into base, state_reg, ctrl_reg.
-                match source {
+                let (base, state_reg, ctrl_reg) = match source {
                     Expr::Call { callee, args } => {
-                        let func_reg = base;
+                        let func_reg = self.alloc_reg();
                         self.compile_expr(callee, Some(func_reg));
-                        // Push extra regs for state+ctrl before call
                         let mut arg_regs = Vec::new();
                         for arg in args {
                             let r = self.alloc_reg();
                             self.compile_expr(arg, Some(r));
                             arg_regs.push(r);
                         }
+                        // Ensure we have at least 3 return slots: func_reg, func_reg+1, func_reg+2
+                        let current_slots = 1 + args.len();
+                        for _ in current_slots..3 {
+                            self.alloc_reg();
+                        }
                         self.current_mut().emit(Instruction::Call {
                             callee: func_reg,
                             argc: args.len() as u8,
                             retc: 3,
                         });
-                        // After Call with retc=3: R(func_reg)=iter, R(func_reg+1)=state, R(func_reg+2)=ctrl
                         for r in arg_regs.into_iter().rev() {
                             self.current_mut().free_reg(r);
                         }
+                        let min_top = func_reg + 3;
+                        if self.current().reg_top < min_top {
+                            self.current_mut().reg_top = min_top;
+                            if self.current().reg_top > self.current().proto.max_registers {
+                                self.current_mut().proto.max_registers = self.current().reg_top;
+                            }
+                        }
+                        (func_reg, func_reg + 1, func_reg + 2)
                     }
                     _ => {
-                        // Single expr: iter=source, state=nil, ctrl=nil
+                        let base = self.alloc_reg();
+                        let state_reg = self.alloc_reg();
+                        let ctrl_reg = self.alloc_reg();
                         self.compile_expr(source, Some(base));
                         self.current_mut().emit(Instruction::LoadNil { dst: state_reg });
                         self.current_mut().emit(Instruction::LoadNil { dst: ctrl_reg });
+                        (base, state_reg, ctrl_reg)
                     }
-                }
+                };
+                let _ = (state_reg, ctrl_reg);
 
                 // Variable registers: R(base+3), R(base+3+1), ...
                 let retc = vars.len() as u8;

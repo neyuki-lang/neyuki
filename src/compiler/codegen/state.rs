@@ -40,7 +40,7 @@ impl FuncState {
 
     pub(crate) fn alloc_reg(&mut self) -> u8 {
         let r = self.reg_top;
-        self.reg_top += 1;
+        self.reg_top = self.reg_top.saturating_add(1);
         if self.reg_top > self.proto.max_registers {
             self.proto.max_registers = self.reg_top;
         }

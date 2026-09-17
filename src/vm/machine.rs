@@ -23,6 +23,7 @@ pub struct CoroutineState {
     pub yield_callee: u8,
     pub yield_retc: u8,
     pub yield_values: Vec<Value>,
+    pub open_upvalues: HashMap<usize, Rc<RefCell<Value>>>,
 }
 
 pub struct VM {
@@ -34,6 +35,7 @@ pub struct VM {
     pub next_co_id: usize,
     pub current_co: Option<usize>,
     pub is_yielding: bool,
+    pub open_upvalues: HashMap<usize, Rc<RefCell<Value>>>,
 }
 
 impl VM {
@@ -47,6 +49,7 @@ impl VM {
             next_co_id: 1,
             current_co: None,
             is_yielding: false,
+            open_upvalues: HashMap::new(),
         };
         vm.register_builtins();
         vm
@@ -80,6 +83,7 @@ impl VM {
         });
         self.stack.clear();
         self.frames.clear();
+        self.open_upvalues.clear();
 
         // Ensure stack has enough capacity for main frame
         let max_reg = closure.proto.max_registers as usize;
@@ -106,12 +110,19 @@ impl VM {
 
     fn get_reg(&self, reg: u8) -> Value {
         let base = self.frames.last().unwrap().base;
-        self.stack.get(base + reg as usize).cloned().unwrap_or(Value::Nil)
+        let idx = base + reg as usize;
+        if let Some(cell) = self.open_upvalues.get(&idx) {
+            return cell.borrow().clone();
+        }
+        self.stack.get(idx).cloned().unwrap_or(Value::Nil)
     }
 
     fn set_reg(&mut self, reg: u8, val: Value) {
         let base = self.frames.last().unwrap().base;
         let idx = base + reg as usize;
+        if let Some(cell) = self.open_upvalues.get(&idx) {
+            *cell.borrow_mut() = val.clone();
+        }
         if idx >= self.stack.len() {
             self.stack.resize(idx + 1, Value::Nil);
         }
@@ -141,7 +152,8 @@ impl VM {
             Value::Native(_, f) => f(self, args),
             Value::Closure(c) => {
                 let depth = self.frames.len();
-                let base = self.stack.len() + 1;
+                let prev_stack_len = self.stack.len();
+                let base = prev_stack_len + 1;
                 let needed = base + c.proto.max_registers as usize + args.len() + 1;
                 if needed >= self.stack.len() {
                     self.stack.resize(needed + 1, Value::Nil);
@@ -150,6 +162,9 @@ impl VM {
                     self.stack[base + i] = arg.clone();
                 }
                 let num_params = c.proto.num_params as usize;
+                for i in args.len()..num_params {
+                    self.stack[base + i] = Value::Nil;
+                }
                 let varargs = if args.len() > num_params {
                     args[num_params..].to_vec()
                 } else {
@@ -157,10 +172,18 @@ impl VM {
                 };
                 self.frames.push(CallFrame::with_varargs(c.clone(), base, varargs));
                 match self.run_to_depth(depth) {
-                    Ok(res) => Ok(vec![res]),
+                    Ok(res) => {
+                        if !self.is_yielding {
+                            self.stack.truncate(prev_stack_len);
+                            self.open_upvalues.retain(|&idx, _| idx < prev_stack_len);
+                        }
+                        Ok(vec![res])
+                    }
                     Err(err) => {
                         if !self.is_yielding {
                             self.frames.truncate(depth);
+                            self.stack.truncate(prev_stack_len);
+                            self.open_upvalues.retain(|&idx, _| idx < prev_stack_len);
                         }
                         Err(err)
                     }
@@ -322,7 +345,63 @@ impl VM {
                     let iter_fn = self.get_reg(base);
                     let state = self.get_reg(base + 1);
                     let ctrl = self.get_reg(base + 2);
-                    let results = self.call_function(iter_fn, &[state, ctrl])?;
+                    let results = match &iter_fn {
+                        Value::Table(t) => {
+                            let has_call = t.borrow().metatable.as_ref().and_then(|mt| mt.borrow().fields.get("__call").cloned());
+                            if let Some(h) = has_call && !matches!(h, Value::Nil) {
+                                self.call_function(iter_fn, &[state, ctrl])?
+                            } else {
+                                let tbl = t.borrow();
+                                if retc > 1 && !tbl.array.is_empty() {
+                                    let next_idx = match ctrl {
+                                        Value::Nil => 0,
+                                        Value::Int(ref i) => i.to_usize().unwrap_or(tbl.array.len()),
+                                        _ => tbl.array.len(),
+                                    };
+                                    if next_idx < tbl.array.len() {
+                                        vec![Value::Int(BigInt::from(next_idx + 1)), tbl.array[next_idx].clone()]
+                                    } else {
+                                        vec![Value::Nil, Value::Nil]
+                                    }
+                                } else if retc > 1 {
+                                    let mut keys: Vec<String> = tbl.fields.keys().cloned().collect();
+                                    keys.sort();
+                                    let next_key = match &ctrl {
+                                        Value::Nil => keys.first().cloned(),
+                                        Value::String(prev_k) => {
+                                            if let Some(pos) = keys.iter().position(|k| k == prev_k) {
+                                                keys.get(pos + 1).cloned()
+                                            } else {
+                                                None
+                                            }
+                                        }
+                                        _ => None,
+                                    };
+                                    if let Some(k) = next_key {
+                                        let v = tbl.fields.get(&k).cloned().unwrap_or(Value::Nil);
+                                        vec![Value::String(k), v]
+                                    } else {
+                                        vec![Value::Nil, Value::Nil]
+                                    }
+                                } else {
+                                    let next_idx = match state {
+                                        Value::Nil => 0,
+                                        Value::Int(ref i) => i.to_usize().unwrap_or(tbl.array.len()),
+                                        _ => tbl.array.len(),
+                                    };
+                                    if next_idx < tbl.array.len() {
+                                        let val = tbl.array[next_idx].clone();
+                                        drop(tbl);
+                                        self.set_reg(base + 1, Value::Int(BigInt::from(next_idx + 1)));
+                                        vec![val]
+                                    } else {
+                                        vec![Value::Nil]
+                                    }
+                                }
+                            }
+                        }
+                        _ => self.call_function(iter_fn, &[state, ctrl])?,
+                    };
                     let var_base = base + 3;
                     for i in 0..(retc as usize) {
                         let val = results.get(i).cloned().unwrap_or(Value::Nil);
@@ -617,17 +696,27 @@ impl VM {
                     frame.ip = (frame.ip as isize + offset as isize) as usize;
                 }
                 Instruction::ForPrep { base, jump } => {
-                    let init = self.get_reg(base);
                     let step = self.get_reg(base + 2);
+                    match &step {
+                        Value::Int(i) if i.is_zero() => return Err("numeric for step cannot be zero".to_string()),
+                        Value::Float(f) if *f == 0.0 => return Err("numeric for step cannot be zero".to_string()),
+                        _ => {}
+                    }
+                    let init = self.get_reg(base);
                     let init_minus_step = crate::vm::ops::eval_sub(init, step)?;
                     self.set_reg(base, init_minus_step);
                     let frame = self.frames.last_mut().unwrap();
                     frame.ip = (frame.ip as isize + jump as isize) as usize;
                 }
                 Instruction::ForLoop { base, jump } => {
+                    let step = self.get_reg(base + 2);
+                    match &step {
+                        Value::Int(i) if i.is_zero() => return Err("numeric for step cannot be zero".to_string()),
+                        Value::Float(f) if *f == 0.0 => return Err("numeric for step cannot be zero".to_string()),
+                        _ => {}
+                    }
                     let idx = self.get_reg(base);
                     let limit = self.get_reg(base + 1);
-                    let step = self.get_reg(base + 2);
                     let next_idx = crate::vm::ops::eval_add(idx, step.clone())?;
                     self.set_reg(base, next_idx.clone());
                     let is_positive = match &step {
@@ -655,11 +744,20 @@ impl VM {
                     for updesc in &child_proto.upvalues {
                         if updesc.in_stack {
                             let base = self.frames.last().unwrap().base;
-                            let reg_val = self.stack[base + updesc.index as usize].clone();
-                            upvalues.push(Rc::new(RefCell::new(reg_val)));
+                            let idx = base + updesc.index as usize;
+                            if idx >= self.stack.len() {
+                                self.stack.resize(idx + 1, Value::Nil);
+                            }
+                            let cell = self.open_upvalues
+                                .entry(idx)
+                                .or_insert_with(|| Rc::new(RefCell::new(self.stack[idx].clone())))
+                                .clone();
+                            upvalues.push(cell);
                         } else {
                             let frame = self.frames.last().unwrap();
-                            let up = frame.closure.upvalues[updesc.index as usize].clone();
+                            let up = frame.closure.upvalues.get(updesc.index as usize)
+                                .cloned()
+                                .unwrap_or_else(|| Rc::new(RefCell::new(Value::Nil)));
                             upvalues.push(up);
                         }
                     }
@@ -690,6 +788,9 @@ impl VM {
                                 self.stack.resize(needed + 1, Value::Nil);
                             }
                             let num_params = closure.proto.num_params as usize;
+                            for i in (argc as usize)..num_params {
+                                self.stack[new_base + i] = Value::Nil;
+                            }
                             let varargs = if argc as usize > num_params {
                                 self.stack[args_start + num_params..args_end].to_vec()
                             } else {
@@ -741,6 +842,7 @@ impl VM {
                 }
                 Instruction::Return { base, count } => {
                     let frame = self.frames.pop().unwrap();
+                    self.open_upvalues.retain(|&idx, _| idx < frame.base);
                     let return_count = count as usize;
                     let mut ret_vals = Vec::with_capacity(return_count);
                     for i in 0..return_count {
@@ -1284,6 +1386,47 @@ assert(coroutine.status(co) == \"dead\")\n\
 return coroutine.status(co)";
         let res = run_code(code);
         assert_eq!(res.to_string(), "dead");
+    }
+
+    #[test]
+    fn test_vm_open_upvalue_mutation() {
+        let code = "local x = 1\n\
+local f = function() return x end\n\
+x = 2\n\
+return f()";
+        let res = run_code(code);
+        assert_eq!(res.to_string(), "2");
+    }
+
+    #[test]
+    fn test_vm_numeric_for_zero_step_rejected() {
+        let code = "for i = 1, 10, 0 do end";
+        let res = std::panic::catch_unwind(|| {
+            run_code(code);
+        });
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_vm_missing_param_nil_initialization() {
+        let code = "local function f(a, b, c)\n\
+  return c == nil\n\
+end\n\
+return f(1)";
+        let res = run_code(code);
+        assert_eq!(res.to_string(), "true");
+    }
+
+    #[test]
+    fn test_vm_direct_table_generic_for() {
+        let code = "local t = { 10, 20, 30 }\n\
+local sum = 0\n\
+for i, v in t do\n\
+  sum = sum + v\n\
+end\n\
+return sum";
+        let res = run_code(code);
+        assert_eq!(res.to_string(), "60");
     }
 }
 
