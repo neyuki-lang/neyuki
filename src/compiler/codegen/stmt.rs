@@ -1,18 +1,16 @@
 // Statement and assignment bytecode code generator.
 
+use super::Compiler;
+use super::state::LoopContext;
 use crate::bytecode::instruction::Instruction;
 use crate::bytecode::proto::Constant;
 use crate::parser::{Expr, Stmt};
-use super::Compiler;
-use super::state::LoopContext;
 
 impl Compiler {
     pub fn compile_stmt(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::Local {
-                name,
-                initializer,
-                ..
+                name, initializer, ..
             } => {
                 let reg = self.current_mut().alloc_reg();
                 if let Some(init) = initializer {
@@ -28,7 +26,9 @@ impl Compiler {
                 ..
             } => {
                 if initializers.len() == 1 && matches!(initializers[0], Expr::Call { .. }) {
-                    let Expr::Call { callee, args } = &initializers[0] else { unreachable!() };
+                    let Expr::Call { callee, args } = &initializers[0] else {
+                        unreachable!()
+                    };
                     let func_reg = self.current_mut().alloc_reg();
                     self.compile_expr(callee, Some(func_reg));
                     let mut arg_regs = Vec::new();
@@ -57,7 +57,8 @@ impl Compiler {
                         }
                     }
                     for (i, name) in names.iter().enumerate() {
-                        self.current_mut().add_local(name.clone(), func_reg + i as u8);
+                        self.current_mut()
+                            .add_local(name.clone(), func_reg + i as u8);
                     }
                 } else {
                     for (i, name) in names.iter().enumerate() {
@@ -78,7 +79,9 @@ impl Compiler {
             }
             Stmt::AssignMany { targets, values } => {
                 if values.len() == 1 && matches!(values[0], Expr::Call { .. }) {
-                    let Expr::Call { callee, args } = &values[0] else { unreachable!() };
+                    let Expr::Call { callee, args } = &values[0] else {
+                        unreachable!()
+                    };
                     let func_reg = self.current_mut().alloc_reg();
                     self.compile_expr(callee, Some(func_reg));
                     let mut arg_regs = Vec::new();
@@ -104,7 +107,14 @@ impl Compiler {
                     }
                     self.current_mut().reg_top = func_reg;
                 } else if values.len() == 1 && matches!(values[0], Expr::MethodCall { .. }) {
-                    let Expr::MethodCall { object, method, args } = &values[0] else { unreachable!() };
+                    let Expr::MethodCall {
+                        object,
+                        method,
+                        args,
+                    } = &values[0]
+                    else {
+                        unreachable!()
+                    };
                     let func_reg = self.current_mut().alloc_reg();
                     let arg0 = self.current_mut().alloc_reg();
                     self.compile_expr(object, Some(arg0));
@@ -175,10 +185,7 @@ impl Compiler {
                 self.current_mut().free_reg(current);
             }
             Stmt::Function {
-                name,
-                params,
-                body,
-                ..
+                name, params, body, ..
             } => {
                 let closure_reg = self.current_mut().alloc_reg();
                 let proto_idx = self.compile_function(name.clone(), params, body);
@@ -292,8 +299,12 @@ impl Compiler {
                 self.compile_program(body);
                 self.current_mut().exit_scope();
 
-                let back_offset = (loop_start as isize - (self.current().proto.instructions.len() as isize + 1)) as i16;
-                self.current_mut().emit(Instruction::Jump { offset: back_offset });
+                let back_offset = (loop_start as isize
+                    - (self.current().proto.instructions.len() as isize + 1))
+                    as i16;
+                self.current_mut().emit(Instruction::Jump {
+                    offset: back_offset,
+                });
 
                 self.patch_jump(exit_jump);
 
@@ -303,7 +314,9 @@ impl Compiler {
                 }
                 for c in loop_ctx.continue_ips {
                     let off = (loop_start as isize - (c as isize + 1)) as i16;
-                    if let Instruction::Jump { offset } = &mut self.current_mut().proto.instructions[c] {
+                    if let Instruction::Jump { offset } =
+                        &mut self.current_mut().proto.instructions[c]
+                    {
                         *offset = off;
                     }
                 }
@@ -327,8 +340,12 @@ impl Compiler {
                 });
                 self.current_mut().free_reg(cond_reg);
 
-                let back_offset = (loop_start as isize - (self.current().proto.instructions.len() as isize + 1)) as i16;
-                let repeat_jump = self.current_mut().emit(Instruction::Jump { offset: back_offset });
+                let back_offset = (loop_start as isize
+                    - (self.current().proto.instructions.len() as isize + 1))
+                    as i16;
+                let repeat_jump = self.current_mut().emit(Instruction::Jump {
+                    offset: back_offset,
+                });
                 let _ = repeat_jump;
 
                 self.patch_jump(exit_jump);
@@ -354,12 +371,17 @@ impl Compiler {
                 if let Some(step_expr) = step {
                     self.compile_expr(step_expr, Some(step_reg));
                 } else {
-                    self.current_mut().emit(Instruction::LoadInt { dst: step_reg, val: 1 });
+                    self.current_mut().emit(Instruction::LoadInt {
+                        dst: step_reg,
+                        val: 1,
+                    });
                 }
                 let var_reg = self.current_mut().alloc_reg();
                 self.current_mut().add_local(var.clone(), var_reg);
 
-                let prep_ip = self.current_mut().emit(Instruction::ForPrep { base, jump: 0 });
+                let prep_ip = self
+                    .current_mut()
+                    .emit(Instruction::ForPrep { base, jump: 0 });
 
                 let body_start = self.current().proto.instructions.len();
                 self.current_mut().loops.push(LoopContext {
@@ -374,10 +396,15 @@ impl Compiler {
 
                 let loop_ip = self.current().proto.instructions.len();
                 let back_offset = (body_start as isize - (loop_ip as isize + 1)) as i16;
-                self.current_mut().emit(Instruction::ForLoop { base, jump: back_offset });
+                self.current_mut().emit(Instruction::ForLoop {
+                    base,
+                    jump: back_offset,
+                });
 
                 let prep_offset = (loop_ip as isize - (prep_ip as isize + 1)) as i16;
-                if let Instruction::ForPrep { jump, .. } = &mut self.current_mut().proto.instructions[prep_ip] {
+                if let Instruction::ForPrep { jump, .. } =
+                    &mut self.current_mut().proto.instructions[prep_ip]
+                {
                     *jump = prep_offset;
                 }
 
@@ -387,7 +414,9 @@ impl Compiler {
                 }
                 for c_ip in loop_ctx.continue_ips {
                     let offset = (loop_ip as isize - (c_ip as isize + 1)) as i16;
-                    if let Instruction::Jump { offset: o } = &mut self.current_mut().proto.instructions[c_ip] {
+                    if let Instruction::Jump { offset: o } =
+                        &mut self.current_mut().proto.instructions[c_ip]
+                    {
                         *o = offset;
                     }
                 }
@@ -433,8 +462,10 @@ impl Compiler {
                         let state_reg = self.alloc_reg();
                         let ctrl_reg = self.alloc_reg();
                         self.compile_expr(source, Some(base));
-                        self.current_mut().emit(Instruction::LoadNil { dst: state_reg });
-                        self.current_mut().emit(Instruction::LoadNil { dst: ctrl_reg });
+                        self.current_mut()
+                            .emit(Instruction::LoadNil { dst: state_reg });
+                        self.current_mut()
+                            .emit(Instruction::LoadNil { dst: ctrl_reg });
                         (base, state_reg, ctrl_reg)
                     }
                 };
@@ -457,28 +488,38 @@ impl Compiler {
                 });
 
                 // TForCall: call R(base)(R(base+1), R(base+2)) -> R(base+3)..
-                self.current_mut().emit(Instruction::TForCall { base, retc });
+                self.current_mut()
+                    .emit(Instruction::TForCall { base, retc });
 
                 // TForLoop: if R(base+3) == nil, jump forward past body; else R(base+2) = R(base+3)
-                let tfor_loop_ip = self.current_mut().emit(Instruction::TForLoop { base, jump: 0 });
+                let tfor_loop_ip = self
+                    .current_mut()
+                    .emit(Instruction::TForLoop { base, jump: 0 });
 
                 // Bind vars to the result registers
                 self.current_mut().enter_scope();
                 for (i, var_name) in vars.iter().enumerate() {
-                    self.current_mut().add_local(var_name.clone(), var_base + i as u8);
+                    self.current_mut()
+                        .add_local(var_name.clone(), var_base + i as u8);
                 }
 
                 self.compile_program(body);
                 self.current_mut().exit_scope();
 
                 // Back jump to TForCall
-                let back_offset = (tfor_call_ip as isize - (self.current().proto.instructions.len() as isize + 1)) as i16;
-                self.current_mut().emit(Instruction::Jump { offset: back_offset });
+                let back_offset = (tfor_call_ip as isize
+                    - (self.current().proto.instructions.len() as isize + 1))
+                    as i16;
+                self.current_mut().emit(Instruction::Jump {
+                    offset: back_offset,
+                });
 
                 // Patch TForLoop jump to point past the back-jump (i.e., current ip = loop exit)
                 let exit_ip = self.current().proto.instructions.len();
                 let tfor_loop_fwd = (exit_ip as isize - (tfor_loop_ip as isize + 1)) as i16;
-                if let Instruction::TForLoop { jump, .. } = &mut self.current_mut().proto.instructions[tfor_loop_ip] {
+                if let Instruction::TForLoop { jump, .. } =
+                    &mut self.current_mut().proto.instructions[tfor_loop_ip]
+                {
                     *jump = tfor_loop_fwd;
                 }
 
@@ -488,7 +529,9 @@ impl Compiler {
                 }
                 for c_ip in loop_ctx.continue_ips {
                     let offset = (tfor_call_ip as isize - (c_ip as isize + 1)) as i16;
-                    if let Instruction::Jump { offset: o } = &mut self.current_mut().proto.instructions[c_ip] {
+                    if let Instruction::Jump { offset: o } =
+                        &mut self.current_mut().proto.instructions[c_ip]
+                    {
                         *o = offset;
                     }
                 }
@@ -506,14 +549,13 @@ impl Compiler {
                 if exprs.is_empty() {
                     let r = self.current_mut().alloc_reg();
                     self.current_mut().emit(Instruction::LoadNil { dst: r });
-                    self.current_mut().emit(Instruction::Return { base: r, count: 1 });
+                    self.current_mut()
+                        .emit(Instruction::Return { base: r, count: 1 });
                     self.current_mut().free_reg(r);
                 } else if exprs.len() == 1 {
                     let r = self.compile_expr(&exprs[0], None);
-                    self.current_mut().emit(Instruction::Return {
-                        base: r,
-                        count: 1,
-                    });
+                    self.current_mut()
+                        .emit(Instruction::Return { base: r, count: 1 });
                     self.current_mut().free_reg(r);
                 } else {
                     let base = self.current_mut().alloc_reg();

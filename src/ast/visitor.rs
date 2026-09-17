@@ -47,7 +47,12 @@ pub fn walk_stmt<V: AstVisitor + ?Sized>(visitor: &mut V, stmt: &Stmt) {
                 visitor.visit_stmt(s);
             }
         }
-        Stmt::If { condition, then_branch, else_if_branches, else_branch } => {
+        Stmt::If {
+            condition,
+            then_branch,
+            else_if_branches,
+            else_branch,
+        } => {
             visitor.visit_expr(condition);
             for s in then_branch {
                 visitor.visit_stmt(s);
@@ -70,7 +75,13 @@ pub fn walk_stmt<V: AstVisitor + ?Sized>(visitor: &mut V, stmt: &Stmt) {
                 visitor.visit_stmt(s);
             }
         }
-        Stmt::NumericFor { start, end, step, body, .. } => {
+        Stmt::NumericFor {
+            start,
+            end,
+            step,
+            body,
+            ..
+        } => {
             visitor.visit_expr(start);
             visitor.visit_expr(end);
             if let Some(st) = step {

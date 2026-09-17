@@ -9,11 +9,19 @@ pub struct SourceLocation {
 
 impl SourceLocation {
     pub fn new(line: u32, column: u32, byte_offset: usize) -> Self {
-        Self { line, column, byte_offset }
+        Self {
+            line,
+            column,
+            byte_offset,
+        }
     }
 
     pub fn line_col(line: u32, column: u32) -> Self {
-        Self { line, column, byte_offset: 0 }
+        Self {
+            line,
+            column,
+            byte_offset: 0,
+        }
     }
 }
 

@@ -116,7 +116,10 @@ pub(crate) fn decode_from_str(s: &str) -> Result<Value, String> {
     let val = parser.parse_value()?;
     parser.skip_whitespace();
     if parser.cursor < parser.chars.len() {
-        return Err(format!("unexpected trailing data at position {}", parser.cursor));
+        return Err(format!(
+            "unexpected trailing data at position {}",
+            parser.cursor
+        ));
     }
     Ok(val)
 }
@@ -172,7 +175,9 @@ impl JsonParser {
 
     fn parse_value(&mut self) -> Result<Value, String> {
         self.skip_whitespace();
-        let ch = self.peek().ok_or_else(|| "unexpected end of JSON input".to_string())?;
+        let ch = self
+            .peek()
+            .ok_or_else(|| "unexpected end of JSON input".to_string())?;
         match ch {
             'n' => self.parse_null(),
             't' | 'f' => self.parse_bool(),
@@ -180,7 +185,10 @@ impl JsonParser {
             '[' => self.parse_array(),
             '{' => self.parse_object(),
             '-' | '0'..='9' => self.parse_number(),
-            _ => Err(format!("unexpected character '{}' at position {}", ch, self.cursor)),
+            _ => Err(format!(
+                "unexpected character '{}' at position {}",
+                ch, self.cursor
+            )),
         }
     }
 
@@ -212,7 +220,9 @@ impl JsonParser {
             match c {
                 '"' => return Ok(out),
                 '\\' => {
-                    let esc = self.advance().ok_or_else(|| "unexpected end of escape".to_string())?;
+                    let esc = self
+                        .advance()
+                        .ok_or_else(|| "unexpected end of escape".to_string())?;
                     match esc {
                         '"' => out.push('"'),
                         '\\' => out.push('\\'),
@@ -225,10 +235,16 @@ impl JsonParser {
                         'u' => {
                             let mut hex = String::new();
                             for _ in 0..4 {
-                                hex.push(self.advance().ok_or_else(|| "unclosed unicode escape".to_string())?);
+                                hex.push(
+                                    self.advance()
+                                        .ok_or_else(|| "unclosed unicode escape".to_string())?,
+                                );
                             }
-                            let cp = u32::from_str_radix(&hex, 16).map_err(|_| "invalid unicode escape".to_string())?;
-                            let ch = char::from_u32(cp).ok_or_else(|| format!("invalid unicode codepoint \\u{:04x}", cp))?;
+                            let cp = u32::from_str_radix(&hex, 16)
+                                .map_err(|_| "invalid unicode escape".to_string())?;
+                            let ch = char::from_u32(cp).ok_or_else(|| {
+                                format!("invalid unicode codepoint \\u{:04x}", cp)
+                            })?;
                             out.push(ch);
                         }
                         _ => return Err(format!("invalid escape character '\\{}'", esc)),
@@ -257,10 +273,12 @@ impl JsonParser {
         }
 
         if has_dot_or_exp {
-            let f = f64::from_str(&num_str).map_err(|e| format!("invalid float '{}': {}", num_str, e))?;
+            let f = f64::from_str(&num_str)
+                .map_err(|e| format!("invalid float '{}': {}", num_str, e))?;
             Ok(Value::Float(f))
         } else {
-            let i = BigInt::from_str(&num_str).map_err(|e| format!("invalid int '{}': {}", num_str, e))?;
+            let i = BigInt::from_str(&num_str)
+                .map_err(|e| format!("invalid int '{}': {}", num_str, e))?;
             Ok(Value::Int(i))
         }
     }
@@ -329,13 +347,19 @@ impl JsonParser {
         loop {
             self.skip_whitespace();
             if self.peek() != Some('"') {
-                return Err(format!("expected string key in object at position {}", self.cursor));
+                return Err(format!(
+                    "expected string key in object at position {}",
+                    self.cursor
+                ));
             }
             let key = self.parse_string()?;
             self.skip_whitespace();
 
             if self.peek() != Some(':') {
-                return Err(format!("expected ':' after key at position {}", self.cursor));
+                return Err(format!(
+                    "expected ':' after key at position {}",
+                    self.cursor
+                ));
             }
             self.advance(); // consume ':'
 

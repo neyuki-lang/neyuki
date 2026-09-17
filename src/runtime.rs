@@ -392,7 +392,8 @@ impl Value {
 }
 
 pub fn run_file(path: &str) -> Result<(), String> {
-    let source = std::fs::read_to_string(path).map_err(|err| format!("failed to read {}: {}", path, err))?;
+    let source =
+        std::fs::read_to_string(path).map_err(|err| format!("failed to read {}: {}", path, err))?;
     let program = crate::compiler::compile_source(&source)?;
     let diags = crate::sema::analyze(&program, &source);
     if let Some(err) = diags
@@ -493,9 +494,15 @@ impl Runtime {
             ("rawequal", native("rawequal", builtin_rawequal)),
             ("__os_clock", native("__os_clock", builtin_os_clock)),
             ("__os_time", native("__os_time", builtin_os_time)),
-            ("__os_difftime", native("__os_difftime", builtin_os_difftime)),
+            (
+                "__os_difftime",
+                native("__os_difftime", builtin_os_difftime),
+            ),
             ("__os_getenv", native("__os_getenv", builtin_os_getenv)),
-            ("__random_float", native("__random_float", builtin_random_float)),
+            (
+                "__random_float",
+                native("__random_float", builtin_random_float),
+            ),
         ] {
             env.borrow_mut().values.insert(name.to_string(), function);
         }
@@ -534,7 +541,9 @@ impl Runtime {
         match block_res {
             Ok(Ok(Flow::Return(values))) => Ok(values),
             Ok(Ok(Flow::Normal)) => Ok(Vec::new()),
-            Ok(Ok(Flow::Break | Flow::Continue)) => Err("loop control used outside a loop".to_string()),
+            Ok(Ok(Flow::Break | Flow::Continue)) => {
+                Err("loop control used outside a loop".to_string())
+            }
             Ok(Err(err)) => Err(err),
             Err(panic_payload) => {
                 let msg = if let Some(s) = panic_payload.downcast_ref::<String>() {
@@ -1051,7 +1060,9 @@ impl Runtime {
             Value::Table(table) => {
                 let mt_call = {
                     let tbl = table.borrow();
-                    tbl.metatable.as_ref().and_then(|mt| mt.borrow().fields.get("__call").cloned())
+                    tbl.metatable
+                        .as_ref()
+                        .and_then(|mt| mt.borrow().fields.get("__call").cloned())
                 };
                 if let Some(call_fn) = mt_call {
                     let mut full_args = vec![Value::Table(table)];
@@ -1085,8 +1096,14 @@ impl Runtime {
             frozen: true,
             metatable: None,
         };
-        tbl.fields.insert("encode".to_string(), native("json.encode", runtime_json_encode));
-        tbl.fields.insert("decode".to_string(), native("json.decode", runtime_json_decode));
+        tbl.fields.insert(
+            "encode".to_string(),
+            native("json.encode", runtime_json_encode),
+        );
+        tbl.fields.insert(
+            "decode".to_string(),
+            native("json.decode", runtime_json_decode),
+        );
         Value::Table(Rc::new(RefCell::new(tbl)))
     }
 
@@ -1098,11 +1115,22 @@ impl Runtime {
             frozen: true,
             metatable: None,
         };
-        tbl.fields.insert("char".to_string(), native("utf8.char", runtime_utf8_char));
-        tbl.fields.insert("len".to_string(), native("utf8.len", runtime_utf8_len));
-        tbl.fields.insert("codepoint".to_string(), native("utf8.codepoint", runtime_utf8_codepoint));
-        tbl.fields.insert("offset".to_string(), native("utf8.offset", runtime_utf8_offset));
-        tbl.fields.insert("charpattern".to_string(), Value::String("[\\0-\\x7F\\xC2-\\xFD][\\x80-\\xBF]*".to_string()));
+        tbl.fields
+            .insert("char".to_string(), native("utf8.char", runtime_utf8_char));
+        tbl.fields
+            .insert("len".to_string(), native("utf8.len", runtime_utf8_len));
+        tbl.fields.insert(
+            "codepoint".to_string(),
+            native("utf8.codepoint", runtime_utf8_codepoint),
+        );
+        tbl.fields.insert(
+            "offset".to_string(),
+            native("utf8.offset", runtime_utf8_offset),
+        );
+        tbl.fields.insert(
+            "charpattern".to_string(),
+            Value::String("[\\0-\\x7F\\xC2-\\xFD][\\x80-\\xBF]*".to_string()),
+        );
         Value::Table(Rc::new(RefCell::new(tbl)))
     }
 
@@ -1114,8 +1142,14 @@ impl Runtime {
             frozen: true,
             metatable: None,
         };
-        tbl.fields.insert("traceback".to_string(), native("debug.traceback", runtime_debug_traceback));
-        tbl.fields.insert("getinfo".to_string(), native("debug.getinfo", runtime_debug_getinfo));
+        tbl.fields.insert(
+            "traceback".to_string(),
+            native("debug.traceback", runtime_debug_traceback),
+        );
+        tbl.fields.insert(
+            "getinfo".to_string(),
+            native("debug.getinfo", runtime_debug_getinfo),
+        );
         Value::Table(Rc::new(RefCell::new(tbl)))
     }
 
@@ -1127,13 +1161,34 @@ impl Runtime {
             frozen: true,
             metatable: None,
         };
-        tbl.fields.insert("create".to_string(), native("coroutine.create", runtime_coroutine_create));
-        tbl.fields.insert("resume".to_string(), native("coroutine.resume", runtime_coroutine_resume));
-        tbl.fields.insert("yield".to_string(), native("coroutine.yield", runtime_coroutine_yield));
-        tbl.fields.insert("status".to_string(), native("coroutine.status", runtime_coroutine_status));
-        tbl.fields.insert("running".to_string(), native("coroutine.running", runtime_coroutine_running));
-        tbl.fields.insert("wrap".to_string(), native("coroutine.wrap", runtime_coroutine_wrap));
-        tbl.fields.insert("isyieldable".to_string(), native("coroutine.isyieldable", runtime_coroutine_isyieldable));
+        tbl.fields.insert(
+            "create".to_string(),
+            native("coroutine.create", runtime_coroutine_create),
+        );
+        tbl.fields.insert(
+            "resume".to_string(),
+            native("coroutine.resume", runtime_coroutine_resume),
+        );
+        tbl.fields.insert(
+            "yield".to_string(),
+            native("coroutine.yield", runtime_coroutine_yield),
+        );
+        tbl.fields.insert(
+            "status".to_string(),
+            native("coroutine.status", runtime_coroutine_status),
+        );
+        tbl.fields.insert(
+            "running".to_string(),
+            native("coroutine.running", runtime_coroutine_running),
+        );
+        tbl.fields.insert(
+            "wrap".to_string(),
+            native("coroutine.wrap", runtime_coroutine_wrap),
+        );
+        tbl.fields.insert(
+            "isyieldable".to_string(),
+            native("coroutine.isyieldable", runtime_coroutine_isyieldable),
+        );
         Value::Table(Rc::new(RefCell::new(tbl)))
     }
 
@@ -1214,7 +1269,10 @@ impl Runtime {
         if let Some(mm) = metamethod_name {
             let find_meta = |v: &Value| -> Option<Value> {
                 if let Value::Table(tbl) = v {
-                    tbl.borrow().metatable.as_ref().and_then(|mt| mt.borrow().fields.get(mm).cloned())
+                    tbl.borrow()
+                        .metatable
+                        .as_ref()
+                        .and_then(|mt| mt.borrow().fields.get(mm).cloned())
                 } else {
                     None
                 }
@@ -1316,7 +1374,9 @@ impl Runtime {
 
     fn index_depth(&self, object: &Value, index: &Value, depth: usize) -> Result<Value, String> {
         if depth >= 100 {
-            return Err("loop in gettable / __index metamethods (depth limit 100 exceeded)".to_string());
+            return Err(
+                "loop in gettable / __index metamethods (depth limit 100 exceeded)".to_string(),
+            );
         }
         match object {
             Value::Table(table) => {
@@ -1334,8 +1394,9 @@ impl Runtime {
                 };
 
                 if let Some(v) = found
-                    && !matches!(v, Value::Nil) {
-                        return Ok(v);
+                    && !matches!(v, Value::Nil)
+                {
+                    return Ok(v);
                 }
 
                 let mt_opt = borrowed.metatable.clone();
@@ -1387,9 +1448,17 @@ impl Runtime {
         self.assign_index_depth(object, index, value, 0)
     }
 
-    fn assign_index_depth(&self, object: &Value, index: Value, value: Value, depth: usize) -> Result<(), String> {
+    fn assign_index_depth(
+        &self,
+        object: &Value,
+        index: Value,
+        value: Value,
+        depth: usize,
+    ) -> Result<(), String> {
         if depth >= 100 {
-            return Err("loop in settable / __newindex metamethods (depth limit 100 exceeded)".to_string());
+            return Err(
+                "loop in settable / __newindex metamethods (depth limit 100 exceeded)".to_string(),
+            );
         }
         match object {
             Value::Table(table) => {
@@ -1405,7 +1474,9 @@ impl Runtime {
                             Value::String(k) => borrowed.fields.contains_key(k),
                             Value::Integer(i) if i.is_positive() => {
                                 let idx = i.to_usize().unwrap_or(0);
-                                idx > 0 && idx <= borrowed.array.len() && !matches!(borrowed.array[idx - 1], Value::Nil)
+                                idx > 0
+                                    && idx <= borrowed.array.len()
+                                    && !matches!(borrowed.array[idx - 1], Value::Nil)
                             }
                             _ => false,
                         }
@@ -1415,12 +1486,17 @@ impl Runtime {
                 if !has_existing_or_no_mt {
                     let mt_newindex = {
                         let borrowed = table.borrow();
-                        borrowed.metatable.as_ref().and_then(|mt| mt.borrow().fields.get("__newindex").cloned())
+                        borrowed
+                            .metatable
+                            .as_ref()
+                            .and_then(|mt| mt.borrow().fields.get("__newindex").cloned())
                     };
 
                     if let Some(h) = mt_newindex {
                         match &h {
-                            Value::Table(_) => return self.assign_index_depth(&h, index, value, depth + 1),
+                            Value::Table(_) => {
+                                return self.assign_index_depth(&h, index, value, depth + 1);
+                            }
                             Value::Function(_) => {
                                 self.call(h, vec![object.clone(), index, value])?;
                                 return Ok(());
@@ -1902,7 +1978,10 @@ fn builtin_tonumber(args: Vec<Value>) -> Result<Vec<Value>, String> {
             (1, s_trimmed)
         };
         let s_digits = if base == 16 {
-            if let Some(stripped) = s_digits.strip_prefix("0x").or_else(|| s_digits.strip_prefix("0X")) {
+            if let Some(stripped) = s_digits
+                .strip_prefix("0x")
+                .or_else(|| s_digits.strip_prefix("0X"))
+            {
                 stripped
             } else {
                 s_digits
@@ -1937,7 +2016,9 @@ fn builtin_tonumber(args: Vec<Value>) -> Result<Vec<Value>, String> {
             } else {
                 (1, s_trimmed)
             };
-            if let Some(stripped_hex) = s_rest.strip_prefix("0x").or_else(|| s_rest.strip_prefix("0X"))
+            if let Some(stripped_hex) = s_rest
+                .strip_prefix("0x")
+                .or_else(|| s_rest.strip_prefix("0X"))
                 && !stripped_hex.is_empty()
                 && let Some(bi) = BigInt::parse_bytes(stripped_hex.as_bytes(), 16)
             {
@@ -2374,7 +2455,11 @@ fn builtin_xpcall(args: Vec<Value>) -> Result<Vec<Value>, String> {
         ]);
     }
     let err_handler = args.get(1).cloned().unwrap_or(Value::Nil);
-    let call_args = if args.len() > 2 { args[2..].to_vec() } else { Vec::new() };
+    let call_args = if args.len() > 2 {
+        args[2..].to_vec()
+    } else {
+        Vec::new()
+    };
 
     let res = match &**function {
         Function::Native { call, .. } => call(call_args),
@@ -2395,7 +2480,10 @@ fn builtin_xpcall(args: Vec<Value>) -> Result<Vec<Value>, String> {
                     Function::Native { call, .. } => call(vec![Value::String(error.clone())]),
                     Function::User { .. } => {
                         let rt = Runtime::new();
-                        rt.call(Value::Function(handler_fn.clone()), vec![Value::String(error.clone())])
+                        rt.call(
+                            Value::Function(handler_fn.clone()),
+                            vec![Value::String(error.clone())],
+                        )
                     }
                 };
                 match h_res {
@@ -2470,7 +2558,8 @@ fn runtime_to_vm_val(val: &Value, depth: usize) -> Result<crate::vm::value::Valu
                 tbl.array.push(runtime_to_vm_val(item, depth + 1)?);
             }
             for (k, item) in &borrowed.fields {
-                tbl.fields.insert(k.clone(), runtime_to_vm_val(item, depth + 1)?);
+                tbl.fields
+                    .insert(k.clone(), runtime_to_vm_val(item, depth + 1)?);
             }
             Ok(crate::vm::value::Value::Table(Rc::new(RefCell::new(tbl))))
         }
@@ -2533,7 +2622,9 @@ fn runtime_utf8_char(args: Vec<Value>) -> Result<Vec<Value>, String> {
         let cp = match a {
             Value::Integer(i) => match i {
                 Int::Small(v) => v as u32,
-                Int::Big(b) => b.to_u32().ok_or_else(|| "codepoint out of range".to_string())?,
+                Int::Big(b) => b
+                    .to_u32()
+                    .ok_or_else(|| "codepoint out of range".to_string())?,
             },
             Value::Number(f) => f as u32,
             _ => return Err("utf8.char expects integer codepoints".to_string()),
@@ -2557,14 +2648,20 @@ fn runtime_utf8_codepoint(args: Vec<Value>) -> Result<Vec<Value>, String> {
         return Err("utf8.codepoint expects string".to_string());
     };
     let chars: Vec<char> = s.chars().collect();
-    let i = args.get(1).and_then(|v| match v {
-        Value::Integer(Int::Small(idx)) => Some(*idx as usize),
-        _ => None,
-    }).unwrap_or(1);
-    let j = args.get(2).and_then(|v| match v {
-        Value::Integer(Int::Small(idx)) => Some(*idx as usize),
-        _ => None,
-    }).unwrap_or(i);
+    let i = args
+        .get(1)
+        .and_then(|v| match v {
+            Value::Integer(Int::Small(idx)) => Some(*idx as usize),
+            _ => None,
+        })
+        .unwrap_or(1);
+    let j = args
+        .get(2)
+        .and_then(|v| match v {
+            Value::Integer(Int::Small(idx)) => Some(*idx as usize),
+            _ => None,
+        })
+        .unwrap_or(i);
     let mut results = Vec::new();
     if i >= 1 && i <= chars.len() {
         for idx in i..=j.min(chars.len()) {
@@ -2589,7 +2686,9 @@ fn runtime_utf8_offset(args: Vec<Value>) -> Result<Vec<Value>, String> {
     if n > 0 {
         let idx = (n - 1) as usize;
         if idx < char_indices.len() {
-            Ok(vec![Value::Integer(Int::from((char_indices[idx].0 + 1) as i64))])
+            Ok(vec![Value::Integer(Int::from(
+                (char_indices[idx].0 + 1) as i64,
+            ))])
         } else if idx == char_indices.len() {
             Ok(vec![Value::Integer(Int::from((s.len() + 1) as i64))])
         } else {
@@ -2599,7 +2698,9 @@ fn runtime_utf8_offset(args: Vec<Value>) -> Result<Vec<Value>, String> {
         let count = char_indices.len() as i64;
         let target = count + n;
         if target >= 0 && (target as usize) < char_indices.len() {
-            Ok(vec![Value::Integer(Int::from((char_indices[target as usize].0 + 1) as i64))])
+            Ok(vec![Value::Integer(Int::from(
+                (char_indices[target as usize].0 + 1) as i64,
+            ))])
         } else {
             Ok(vec![Value::Nil])
         }
@@ -2609,9 +2710,10 @@ fn runtime_utf8_offset(args: Vec<Value>) -> Result<Vec<Value>, String> {
 fn runtime_debug_traceback(args: Vec<Value>) -> Result<Vec<Value>, String> {
     let mut out = String::new();
     if let Some(msg) = args.first()
-        && !matches!(msg, Value::Nil) {
-            out.push_str(&msg.to_string());
-            out.push('\n');
+        && !matches!(msg, Value::Nil)
+    {
+        out.push_str(&msg.to_string());
+        out.push('\n');
     }
     out.push_str("stack traceback:\n");
     let level_offset = match args.get(1) {
@@ -2632,7 +2734,10 @@ fn runtime_debug_traceback(args: Vec<Value>) -> Result<Vec<Value>, String> {
             if frame.what == "main" {
                 out.push_str(&format!("  [frame {}] in main chunk\n", frame_idx));
             } else if frame.what == "C" {
-                out.push_str(&format!("  [frame {}] [C]: in function '{}'\n", frame_idx, fn_name));
+                out.push_str(&format!(
+                    "  [frame {}] [C]: in function '{}'\n",
+                    frame_idx, fn_name
+                ));
             } else {
                 out.push_str(&format!(
                     "  [frame {}] function '{}' at line {}\n",
@@ -2665,25 +2770,41 @@ fn runtime_debug_getinfo(args: Vec<Value>) -> Result<Vec<Value>, String> {
             };
             match &**func {
                 Function::Native { name, .. } => {
-                    t.fields.insert("name".to_string(), Value::String(name.to_string()));
-                    t.fields.insert("what".to_string(), Value::String("C".to_string()));
-                    t.fields.insert("source".to_string(), Value::String("=[C]".to_string()));
-                    t.fields.insert("currentline".to_string(), Value::Integer(Int::from(-1i64)));
-                    t.fields.insert("numparams".to_string(), Value::Integer(Int::Small(0)));
+                    t.fields
+                        .insert("name".to_string(), Value::String(name.to_string()));
+                    t.fields
+                        .insert("what".to_string(), Value::String("C".to_string()));
+                    t.fields
+                        .insert("source".to_string(), Value::String("=[C]".to_string()));
+                    t.fields
+                        .insert("currentline".to_string(), Value::Integer(Int::from(-1i64)));
+                    t.fields
+                        .insert("numparams".to_string(), Value::Integer(Int::Small(0)));
                     t.fields.insert("isvararg".to_string(), Value::Bool(true));
-                    t.fields.insert("func".to_string(), Value::Function(func.clone()));
+                    t.fields
+                        .insert("func".to_string(), Value::Function(func.clone()));
                 }
                 Function::User { name, params, .. } => {
                     let fn_name = name.clone().unwrap_or_else(|| "<anonymous>".to_string());
                     t.fields.insert("name".to_string(), Value::String(fn_name));
-                    t.fields.insert("what".to_string(), Value::String("Lua".to_string()));
-                    t.fields.insert("source".to_string(), Value::String("=[runtime]".to_string()));
-                    t.fields.insert("currentline".to_string(), Value::Integer(Int::Small(1)));
+                    t.fields
+                        .insert("what".to_string(), Value::String("Lua".to_string()));
+                    t.fields.insert(
+                        "source".to_string(),
+                        Value::String("=[runtime]".to_string()),
+                    );
+                    t.fields
+                        .insert("currentline".to_string(), Value::Integer(Int::Small(1)));
                     let numparams = params.iter().filter(|p| !p.variadic).count();
                     let isvararg = params.iter().any(|p| p.variadic);
-                    t.fields.insert("numparams".to_string(), Value::Integer(Int::from(numparams as i64)));
-                    t.fields.insert("isvararg".to_string(), Value::Bool(isvararg));
-                    t.fields.insert("func".to_string(), Value::Function(func.clone()));
+                    t.fields.insert(
+                        "numparams".to_string(),
+                        Value::Integer(Int::from(numparams as i64)),
+                    );
+                    t.fields
+                        .insert("isvararg".to_string(), Value::Bool(isvararg));
+                    t.fields
+                        .insert("func".to_string(), Value::Function(func.clone()));
                 }
             }
             Some(t)
@@ -2713,13 +2834,25 @@ fn get_runtime_frame_info(level: usize) -> Option<Table> {
             frozen: false,
             metatable: None,
         };
-        let name = frame.name.clone().unwrap_or_else(|| "<anonymous>".to_string());
+        let name = frame
+            .name
+            .clone()
+            .unwrap_or_else(|| "<anonymous>".to_string());
         t.fields.insert("name".to_string(), Value::String(name));
-        t.fields.insert("what".to_string(), Value::String(frame.what.to_string()));
-        t.fields.insert("source".to_string(), Value::String(frame.source.clone()));
-        t.fields.insert("currentline".to_string(), Value::Integer(Int::from(frame.current_line as i64)));
-        t.fields.insert("numparams".to_string(), Value::Integer(Int::from(frame.num_params as i64)));
-        t.fields.insert("isvararg".to_string(), Value::Bool(frame.is_vararg));
+        t.fields
+            .insert("what".to_string(), Value::String(frame.what.to_string()));
+        t.fields
+            .insert("source".to_string(), Value::String(frame.source.clone()));
+        t.fields.insert(
+            "currentline".to_string(),
+            Value::Integer(Int::from(frame.current_line as i64)),
+        );
+        t.fields.insert(
+            "numparams".to_string(),
+            Value::Integer(Int::from(frame.num_params as i64)),
+        );
+        t.fields
+            .insert("isvararg".to_string(), Value::Bool(frame.is_vararg));
         if let Some(func) = &frame.func_val {
             t.fields.insert("func".to_string(), func.clone());
         }
@@ -2750,12 +2883,20 @@ fn runtime_coroutine_create(args: Vec<Value>) -> Result<Vec<Value>, String> {
     });
 
     let (proto, env_opt) = match &*func {
-        Function::User { name, params, body, env } => {
+        Function::User {
+            name,
+            params,
+            body,
+            env,
+        } => {
             let proto = crate::compiler::try_compile_function_to_proto(name.clone(), params, body)?;
             (proto, Some(env.clone()))
         }
         Function::Native { name, .. } => {
-            return Err(format!("coroutine.create cannot wrap native function '{}'", name));
+            return Err(format!(
+                "coroutine.create cannot wrap native function '{}'",
+                name
+            ));
         }
     };
 
@@ -2796,11 +2937,7 @@ fn runtime_coroutine_create(args: Vec<Value>) -> Result<Vec<Value>, String> {
     vm.coroutines.insert(co_id, Rc::new(RefCell::new(co_state)));
 
     let status = Rc::new(RefCell::new("suspended".to_string()));
-    let handle = RuntimeCoroutine {
-        vm,
-        co_id,
-        status,
-    };
+    let handle = RuntimeCoroutine { vm, co_id, status };
 
     COROUTINE_REGISTRY.with(|reg| {
         reg.borrow_mut().insert(id, handle);
@@ -2813,9 +2950,12 @@ fn runtime_coroutine_create(args: Vec<Value>) -> Result<Vec<Value>, String> {
         frozen: false,
         metatable: None,
     };
-    tbl.fields.insert("__type".to_string(), Value::String("thread".to_string()));
-    tbl.fields.insert("_id".to_string(), Value::Integer(Int::from(id as i64)));
-    tbl.fields.insert("status".to_string(), Value::String("suspended".to_string()));
+    tbl.fields
+        .insert("__type".to_string(), Value::String("thread".to_string()));
+    tbl.fields
+        .insert("_id".to_string(), Value::Integer(Int::from(id as i64)));
+    tbl.fields
+        .insert("status".to_string(), Value::String("suspended".to_string()));
 
     Ok(vec![Value::Table(Rc::new(RefCell::new(tbl)))])
 }
@@ -2834,10 +2974,9 @@ fn runtime_coroutine_resume(args: Vec<Value>) -> Result<Vec<Value>, String> {
         return Err("coroutine.resume expects a valid thread".to_string());
     }
 
-    let current_status = COROUTINE_REGISTRY.with(|reg| {
-        reg.borrow().get(&id).map(|h| h.status.borrow().clone())
-    })
-    .unwrap_or_else(|| "dead".to_string());
+    let current_status = COROUTINE_REGISTRY
+        .with(|reg| reg.borrow().get(&id).map(|h| h.status.borrow().clone()))
+        .unwrap_or_else(|| "dead".to_string());
 
     if current_status == "dead" {
         return Ok(vec![
@@ -2854,9 +2993,16 @@ fn runtime_coroutine_resume(args: Vec<Value>) -> Result<Vec<Value>, String> {
 
     let mut vm_args = vec![crate::vm::value::Value::Table(Rc::new(RefCell::new({
         let mut tbl = crate::vm::value::VmTable::new();
-        let co_id = COROUTINE_REGISTRY.with(|reg| reg.borrow().get(&id).map(|h| h.co_id).unwrap_or(0));
-        tbl.set_str("_id", crate::vm::value::Value::Int(num_bigint::BigInt::from(co_id)));
-        tbl.set_str("status", crate::vm::value::Value::String("suspended".to_string()));
+        let co_id =
+            COROUTINE_REGISTRY.with(|reg| reg.borrow().get(&id).map(|h| h.co_id).unwrap_or(0));
+        tbl.set_str(
+            "_id",
+            crate::vm::value::Value::Int(num_bigint::BigInt::from(co_id)),
+        );
+        tbl.set_str(
+            "status",
+            crate::vm::value::Value::String("suspended".to_string()),
+        );
         tbl
     })))];
 
@@ -2866,7 +3012,9 @@ fn runtime_coroutine_resume(args: Vec<Value>) -> Result<Vec<Value>, String> {
 
     let res = COROUTINE_REGISTRY.with(|reg| -> Result<Vec<crate::vm::value::Value>, String> {
         let mut b = reg.borrow_mut();
-        let coro = b.get_mut(&id).ok_or_else(|| "coroutine not found in registry".to_string())?;
+        let coro = b
+            .get_mut(&id)
+            .ok_or_else(|| "coroutine not found in registry".to_string())?;
         *coro.status.borrow_mut() = "running".to_string();
         crate::vm::libs::coroutine::coroutine_resume(&mut coro.vm, &vm_args)
     });
@@ -2894,7 +3042,9 @@ fn runtime_coroutine_resume(args: Vec<Value>) -> Result<Vec<Value>, String> {
                     reg.borrow_mut().remove(&id);
                 }
             });
-            t.borrow_mut().fields.insert("status".to_string(), Value::String(new_status));
+            t.borrow_mut()
+                .fields
+                .insert("status".to_string(), Value::String(new_status));
 
             let mut out = Vec::new();
             for v in vm_vals {
@@ -2909,7 +3059,9 @@ fn runtime_coroutine_resume(args: Vec<Value>) -> Result<Vec<Value>, String> {
                 }
                 reg.borrow_mut().remove(&id);
             });
-            t.borrow_mut().fields.insert("status".to_string(), Value::String("dead".to_string()));
+            t.borrow_mut()
+                .fields
+                .insert("status".to_string(), Value::String("dead".to_string()));
             Ok(vec![Value::Bool(false), Value::String(err)])
         }
     }
@@ -2928,10 +3080,17 @@ fn runtime_coroutine_status(args: Vec<Value>) -> Result<Vec<Value>, String> {
         _ => 0,
     };
     if id > 0
-        && let Some(st) = COROUTINE_REGISTRY.with(|reg| reg.borrow().get(&id).map(|h| h.status.borrow().clone())) {
-            return Ok(vec![Value::String(st)]);
+        && let Some(st) =
+            COROUTINE_REGISTRY.with(|reg| reg.borrow().get(&id).map(|h| h.status.borrow().clone()))
+    {
+        return Ok(vec![Value::String(st)]);
     }
-    let st = t.borrow().fields.get("status").cloned().unwrap_or(Value::String("dead".to_string()));
+    let st = t
+        .borrow()
+        .fields
+        .get("status")
+        .cloned()
+        .unwrap_or(Value::String("dead".to_string()));
     Ok(vec![st])
 }
 
@@ -2963,7 +3122,10 @@ fn runtime_coroutine_wrap(args: Vec<Value>) -> Result<Vec<Value>, String> {
         frozen: false,
         metatable: None,
     };
-    mt.fields.insert("__call".to_string(), native("wrapped_coroutine_call", runtime_wrapped_coroutine_call));
+    mt.fields.insert(
+        "__call".to_string(),
+        native("wrapped_coroutine_call", runtime_wrapped_coroutine_call),
+    );
     wrapper.metatable = Some(Rc::new(RefCell::new(mt)));
 
     Ok(vec![Value::Table(Rc::new(RefCell::new(wrapper)))])
@@ -2973,7 +3135,12 @@ fn runtime_wrapped_coroutine_call(args: Vec<Value>) -> Result<Vec<Value>, String
     let Some(Value::Table(wrap_tbl)) = args.first() else {
         return Err("coroutine wrapper called without self".to_string());
     };
-    let co_table = wrap_tbl.borrow().fields.get("_co").cloned().unwrap_or(Value::Nil);
+    let co_table = wrap_tbl
+        .borrow()
+        .fields
+        .get("_co")
+        .cloned()
+        .unwrap_or(Value::Nil);
     if matches!(co_table, Value::Nil) {
         return Err("invalid coroutine wrapper".to_string());
     }
@@ -2983,7 +3150,10 @@ fn runtime_wrapped_coroutine_call(args: Vec<Value>) -> Result<Vec<Value>, String
     if let Some(Value::Bool(true)) = res.first() {
         Ok(res[1..].to_vec())
     } else {
-        let err_msg = res.get(1).map(|v| v.to_string()).unwrap_or_else(|| "error in coroutine".to_string());
+        let err_msg = res
+            .get(1)
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "error in coroutine".to_string());
         Err(err_msg)
     }
 }
@@ -3099,5 +3269,3 @@ assert(captured_err ~= nil)";
         assert!(res.is_ok(), "failed with error: {:?}", res.err());
     }
 }
-
-

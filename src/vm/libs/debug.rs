@@ -12,12 +12,21 @@ pub fn create_debug_lib() -> Value {
     let t = Rc::new(RefCell::new(VmTable::new()));
     let mut b = t.borrow_mut();
 
-    b.set_str("traceback", Value::Native("debug.traceback", debug_traceback));
+    b.set_str(
+        "traceback",
+        Value::Native("debug.traceback", debug_traceback),
+    );
     b.set_str("getinfo", Value::Native("debug.getinfo", debug_getinfo));
     b.set_str("getlocal", Value::Native("debug.getlocal", debug_getlocal));
     b.set_str("setlocal", Value::Native("debug.setlocal", debug_setlocal));
-    b.set_str("getupvalue", Value::Native("debug.getupvalue", debug_getupvalue));
-    b.set_str("setupvalue", Value::Native("debug.setupvalue", debug_setupvalue));
+    b.set_str(
+        "getupvalue",
+        Value::Native("debug.getupvalue", debug_getupvalue),
+    );
+    b.set_str(
+        "setupvalue",
+        Value::Native("debug.setupvalue", debug_setupvalue),
+    );
 
     Value::Table(t.clone())
 }
@@ -25,9 +34,10 @@ pub fn create_debug_lib() -> Value {
 fn debug_traceback(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let mut out = String::new();
     if let Some(msg) = args.first()
-        && !matches!(msg, Value::Nil) {
-            out.push_str(&msg.to_string());
-            out.push('\n');
+        && !matches!(msg, Value::Nil)
+    {
+        out.push_str(&msg.to_string());
+        out.push('\n');
     }
 
     out.push_str("stack traceback:\n");
@@ -72,7 +82,11 @@ fn debug_getinfo(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         Value::Closure(c) => {
             let tbl = Rc::new(RefCell::new(VmTable::new()));
             let mut b = tbl.borrow_mut();
-            let name = c.proto.name.clone().unwrap_or_else(|| "<anonymous>".to_string());
+            let name = c
+                .proto
+                .name
+                .clone()
+                .unwrap_or_else(|| "<anonymous>".to_string());
             b.set_str("name", Value::String(name.clone()));
             b.set_str("what", Value::String("Lua".to_string()));
             b.set_str("source", Value::String(name));
@@ -132,7 +146,10 @@ fn get_frame_info(vm: &VM, level: usize) -> Result<Vec<Value>, String> {
     let tbl = Rc::new(RefCell::new(VmTable::new()));
     let mut b = tbl.borrow_mut();
 
-    let name = proto.name.clone().unwrap_or_else(|| "<anonymous>".to_string());
+    let name = proto
+        .name
+        .clone()
+        .unwrap_or_else(|| "<anonymous>".to_string());
     b.set_str("name", Value::String(name.clone()));
     b.set_str("what", Value::String("Lua".to_string()));
     b.set_str("source", Value::String(name));

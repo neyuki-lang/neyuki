@@ -102,7 +102,11 @@ impl fmt::Display for Value {
             Value::Float(n) => write!(f, "{}", n),
             Value::String(s) => write!(f, "{}", s),
             Value::Table(_) => write!(f, "table"),
-            Value::Closure(c) => write!(f, "function({})", c.proto.name.as_deref().unwrap_or("anonymous")),
+            Value::Closure(c) => write!(
+                f,
+                "function({})",
+                c.proto.name.as_deref().unwrap_or("anonymous")
+            ),
             Value::Native(name, _) => write!(f, "native function({})", name),
             Value::Buffer(b) => write!(f, "buffer({})", b.borrow().len()),
         }
@@ -122,8 +126,12 @@ impl PartialEq for Value {
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Int(a), Value::Int(b)) => a == b,
             (Value::Float(a), Value::Float(b)) => a == b,
-            (Value::Int(a), Value::Float(b)) => num_traits::ToPrimitive::to_f64(a).is_some_and(|v| v == *b),
-            (Value::Float(a), Value::Int(b)) => num_traits::ToPrimitive::to_f64(b).is_some_and(|v| *a == v),
+            (Value::Int(a), Value::Float(b)) => {
+                num_traits::ToPrimitive::to_f64(a).is_some_and(|v| v == *b)
+            }
+            (Value::Float(a), Value::Int(b)) => {
+                num_traits::ToPrimitive::to_f64(b).is_some_and(|v| *a == v)
+            }
             (Value::String(a), Value::String(b)) => a == b,
             (Value::Table(a), Value::Table(b)) => Rc::ptr_eq(a, b),
             (Value::Closure(a), Value::Closure(b)) => Rc::ptr_eq(a, b),

@@ -12,13 +12,17 @@ use crate::vm::value::{Value, VmTable};
 fn to_f64(val: &Value) -> Result<f64, String> {
     match val {
         Value::Float(f) => Ok(*f),
-        Value::Int(i) => i.to_f64().ok_or_else(|| "number conversion error".to_string()),
+        Value::Int(i) => i
+            .to_f64()
+            .ok_or_else(|| "number conversion error".to_string()),
         _ => Err("math library expects number".to_string()),
     }
 }
 
 fn math_abs(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let val = args.first().ok_or_else(|| "math.abs expects 1 argument".to_string())?;
+    let val = args
+        .first()
+        .ok_or_else(|| "math.abs expects 1 argument".to_string())?;
     match val {
         Value::Int(i) => Ok(vec![Value::Int(i.abs())]),
         Value::Float(f) => Ok(vec![Value::Float(f.abs())]),
@@ -27,22 +31,34 @@ fn math_abs(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 }
 
 fn math_floor(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let f = to_f64(args.first().ok_or_else(|| "math.floor expects 1 argument".to_string())?)?;
+    let f = to_f64(
+        args.first()
+            .ok_or_else(|| "math.floor expects 1 argument".to_string())?,
+    )?;
     Ok(vec![Value::Float(f.floor())])
 }
 
 fn math_ceil(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let f = to_f64(args.first().ok_or_else(|| "math.ceil expects 1 argument".to_string())?)?;
+    let f = to_f64(
+        args.first()
+            .ok_or_else(|| "math.ceil expects 1 argument".to_string())?,
+    )?;
     Ok(vec![Value::Float(f.ceil())])
 }
 
 fn math_round(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let f = to_f64(args.first().ok_or_else(|| "math.round expects 1 argument".to_string())?)?;
+    let f = to_f64(
+        args.first()
+            .ok_or_else(|| "math.round expects 1 argument".to_string())?,
+    )?;
     Ok(vec![Value::Float(f.round())])
 }
 
 fn math_sqrt(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let f = to_f64(args.first().ok_or_else(|| "math.sqrt expects 1 argument".to_string())?)?;
+    let f = to_f64(
+        args.first()
+            .ok_or_else(|| "math.sqrt expects 1 argument".to_string())?,
+    )?;
     if f < 0.0 {
         return Err("math.sqrt expects non-negative number".to_string());
     }
@@ -50,58 +66,94 @@ fn math_sqrt(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 }
 
 fn math_sin(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let f = to_f64(args.first().ok_or_else(|| "math.sin expects 1 argument".to_string())?)?;
+    let f = to_f64(
+        args.first()
+            .ok_or_else(|| "math.sin expects 1 argument".to_string())?,
+    )?;
     Ok(vec![Value::Float(f.sin())])
 }
 
 fn math_cos(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let f = to_f64(args.first().ok_or_else(|| "math.cos expects 1 argument".to_string())?)?;
+    let f = to_f64(
+        args.first()
+            .ok_or_else(|| "math.cos expects 1 argument".to_string())?,
+    )?;
     Ok(vec![Value::Float(f.cos())])
 }
 
 fn math_tan(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let f = to_f64(args.first().ok_or_else(|| "math.tan expects 1 argument".to_string())?)?;
+    let f = to_f64(
+        args.first()
+            .ok_or_else(|| "math.tan expects 1 argument".to_string())?,
+    )?;
     Ok(vec![Value::Float(f.tan())])
 }
 
 fn math_asin(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let f = to_f64(args.first().ok_or_else(|| "math.asin expects 1 argument".to_string())?)?;
+    let f = to_f64(
+        args.first()
+            .ok_or_else(|| "math.asin expects 1 argument".to_string())?,
+    )?;
     Ok(vec![Value::Float(f.asin())])
 }
 
 fn math_acos(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let f = to_f64(args.first().ok_or_else(|| "math.acos expects 1 argument".to_string())?)?;
+    let f = to_f64(
+        args.first()
+            .ok_or_else(|| "math.acos expects 1 argument".to_string())?,
+    )?;
     Ok(vec![Value::Float(f.acos())])
 }
 
 fn math_atan(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let f = to_f64(args.first().ok_or_else(|| "math.atan expects 1 argument".to_string())?)?;
+    let f = to_f64(
+        args.first()
+            .ok_or_else(|| "math.atan expects 1 argument".to_string())?,
+    )?;
     Ok(vec![Value::Float(f.atan())])
 }
 
 fn math_atan2(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let y = to_f64(args.first().ok_or_else(|| "math.atan2 expects 2 arguments".to_string())?)?;
-    let x = to_f64(args.get(1).ok_or_else(|| "math.atan2 expects 2 arguments".to_string())?)?;
+    let y = to_f64(
+        args.first()
+            .ok_or_else(|| "math.atan2 expects 2 arguments".to_string())?,
+    )?;
+    let x = to_f64(
+        args.get(1)
+            .ok_or_else(|| "math.atan2 expects 2 arguments".to_string())?,
+    )?;
     Ok(vec![Value::Float(y.atan2(x))])
 }
 
 fn math_deg(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let f = to_f64(args.first().ok_or_else(|| "math.deg expects 1 argument".to_string())?)?;
+    let f = to_f64(
+        args.first()
+            .ok_or_else(|| "math.deg expects 1 argument".to_string())?,
+    )?;
     Ok(vec![Value::Float(f.to_degrees())])
 }
 
 fn math_rad(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let f = to_f64(args.first().ok_or_else(|| "math.rad expects 1 argument".to_string())?)?;
+    let f = to_f64(
+        args.first()
+            .ok_or_else(|| "math.rad expects 1 argument".to_string())?,
+    )?;
     Ok(vec![Value::Float(f.to_radians())])
 }
 
 fn math_exp(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let f = to_f64(args.first().ok_or_else(|| "math.exp expects 1 argument".to_string())?)?;
+    let f = to_f64(
+        args.first()
+            .ok_or_else(|| "math.exp expects 1 argument".to_string())?,
+    )?;
     Ok(vec![Value::Float(f.exp())])
 }
 
 fn math_log(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let f = to_f64(args.first().ok_or_else(|| "math.log expects at least 1 argument".to_string())?)?;
+    let f = to_f64(
+        args.first()
+            .ok_or_else(|| "math.log expects at least 1 argument".to_string())?,
+    )?;
     if let Some(base_val) = args.get(1) {
         let base = to_f64(base_val)?;
         Ok(vec![Value::Float(f.log(base))])
@@ -139,9 +191,18 @@ fn math_max(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 }
 
 fn math_clamp(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let val = to_f64(args.first().ok_or_else(|| "math.clamp expects 3 arguments".to_string())?)?;
-    let min = to_f64(args.get(1).ok_or_else(|| "math.clamp expects 3 arguments".to_string())?)?;
-    let max = to_f64(args.get(2).ok_or_else(|| "math.clamp expects 3 arguments".to_string())?)?;
+    let val = to_f64(
+        args.first()
+            .ok_or_else(|| "math.clamp expects 3 arguments".to_string())?,
+    )?;
+    let min = to_f64(
+        args.get(1)
+            .ok_or_else(|| "math.clamp expects 3 arguments".to_string())?,
+    )?;
+    let max = to_f64(
+        args.get(2)
+            .ok_or_else(|| "math.clamp expects 3 arguments".to_string())?,
+    )?;
     if min > max {
         return Err("math.clamp min cannot be greater than max".to_string());
     }
@@ -149,7 +210,10 @@ fn math_clamp(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 }
 
 fn math_sign(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let val = to_f64(args.first().ok_or_else(|| "math.sign expects 1 argument".to_string())?)?;
+    let val = to_f64(
+        args.first()
+            .ok_or_else(|| "math.sign expects 1 argument".to_string())?,
+    )?;
     let res = if val > 0.0 {
         1.0
     } else if val < 0.0 {

@@ -1,8 +1,8 @@
 // Bytecode disassembler for inspecting and dumping Neyuki bytecode.
 
-use std::fmt::Write;
 use crate::bytecode::instruction::Instruction;
 use crate::bytecode::proto::{Constant, Proto};
+use std::fmt::Write;
 
 #[allow(dead_code)]
 pub fn disassemble_proto(proto: &Proto, indent: usize) -> String {
@@ -52,7 +52,14 @@ pub fn disassemble_proto(proto: &Proto, indent: usize) -> String {
     // List instructions
     for (ip, inst) in proto.instructions.iter().enumerate() {
         let line = proto.lines.get(ip).copied().unwrap_or(0);
-        let _ = writeln!(out, "{}  {:04} [L{:03}] {}", pad, ip, line, format_instruction(inst));
+        let _ = writeln!(
+            out,
+            "{}  {:04} [L{:03}] {}",
+            pad,
+            ip,
+            line,
+            format_instruction(inst)
+        );
     }
 
     // Disassemble nested protos
@@ -74,13 +81,25 @@ fn format_instruction(inst: &Instruction) -> String {
         Instruction::Move { dst, src } => format!("MOVE         R{}, R{}", dst, src),
         Instruction::GetGlobal { dst, name_k } => format!("GETGLOBAL    R{}, K{}", dst, name_k),
         Instruction::SetGlobal { src, name_k } => format!("SETGLOBAL    K{}, R{}", name_k, src),
-        Instruction::GetUpval { dst, upval_idx } => format!("GETUPVAL     R{}, U{}", dst, upval_idx),
-        Instruction::SetUpval { src, upval_idx } => format!("SETUPVAL     U{}, R{}", upval_idx, src),
+        Instruction::GetUpval { dst, upval_idx } => {
+            format!("GETUPVAL     R{}, U{}", dst, upval_idx)
+        }
+        Instruction::SetUpval { src, upval_idx } => {
+            format!("SETUPVAL     U{}, R{}", upval_idx, src)
+        }
         Instruction::NewTable { dst } => format!("NEWTABLE     R{}", dst),
-        Instruction::GetTable { dst, table, key } => format!("GETTABLE     R{}, R{}[R{}]", dst, table, key),
-        Instruction::SetTable { table, key, val } => format!("SETTABLE     R{}[R{}], R{}", table, key, val),
-        Instruction::GetTableK { dst, table, key_k } => format!("GETTABLEK    R{}, R{}[K{}]", dst, table, key_k),
-        Instruction::SetTableK { table, key_k, val } => format!("SETTABLEK    R{}[K{}], R{}", table, key_k, val),
+        Instruction::GetTable { dst, table, key } => {
+            format!("GETTABLE     R{}, R{}[R{}]", dst, table, key)
+        }
+        Instruction::SetTable { table, key, val } => {
+            format!("SETTABLE     R{}[R{}], R{}", table, key, val)
+        }
+        Instruction::GetTableK { dst, table, key_k } => {
+            format!("GETTABLEK    R{}, R{}[K{}]", dst, table, key_k)
+        }
+        Instruction::SetTableK { table, key_k, val } => {
+            format!("SETTABLEK    R{}[K{}], R{}", table, key_k, val)
+        }
         Instruction::AppendArray { table, src } => format!("APPEND       R{}, R{}", table, src),
         Instruction::Add { dst, a, b } => format!("ADD          R{}, R{}, R{}", dst, a, b),
         Instruction::Sub { dst, a, b } => format!("SUB          R{}, R{}, R{}", dst, a, b),
@@ -102,21 +121,53 @@ fn format_instruction(inst: &Instruction) -> String {
         Instruction::Len { dst, src } => format!("LEN          R{}, R{}", dst, src),
         Instruction::BitNot { dst, src } => format!("BITNOT       R{}, R{}", dst, src),
         Instruction::Coalesce { dst, a, b } => format!("COALESCE     R{}, R{}, R{}", dst, a, b),
-        Instruction::Eq { a, b, jump_if_false } => format!("EQ           R{}, R{}, offset {}", a, b, jump_if_false),
-        Instruction::Ne { a, b, jump_if_false } => format!("NE           R{}, R{}, offset {}", a, b, jump_if_false),
-        Instruction::Lt { a, b, jump_if_false } => format!("LT           R{}, R{}, offset {}", a, b, jump_if_false),
-        Instruction::Le { a, b, jump_if_false } => format!("LE           R{}, R{}, offset {}", a, b, jump_if_false),
-        Instruction::Gt { a, b, jump_if_false } => format!("GT           R{}, R{}, offset {}", a, b, jump_if_false),
-        Instruction::Ge { a, b, jump_if_false } => format!("GE           R{}, R{}, offset {}", a, b, jump_if_false),
-        Instruction::Test { reg, jump_if_false } => format!("TEST         R{}, offset {}", reg, jump_if_false),
+        Instruction::Eq {
+            a,
+            b,
+            jump_if_false,
+        } => format!("EQ           R{}, R{}, offset {}", a, b, jump_if_false),
+        Instruction::Ne {
+            a,
+            b,
+            jump_if_false,
+        } => format!("NE           R{}, R{}, offset {}", a, b, jump_if_false),
+        Instruction::Lt {
+            a,
+            b,
+            jump_if_false,
+        } => format!("LT           R{}, R{}, offset {}", a, b, jump_if_false),
+        Instruction::Le {
+            a,
+            b,
+            jump_if_false,
+        } => format!("LE           R{}, R{}, offset {}", a, b, jump_if_false),
+        Instruction::Gt {
+            a,
+            b,
+            jump_if_false,
+        } => format!("GT           R{}, R{}, offset {}", a, b, jump_if_false),
+        Instruction::Ge {
+            a,
+            b,
+            jump_if_false,
+        } => format!("GE           R{}, R{}, offset {}", a, b, jump_if_false),
+        Instruction::Test { reg, jump_if_false } => {
+            format!("TEST         R{}, offset {}", reg, jump_if_false)
+        }
         Instruction::Jump { offset } => format!("JUMP         offset {}", offset),
-        Instruction::Call { callee, argc, retc } => format!("CALL         R{}, argc {}, retc {}", callee, argc, retc),
+        Instruction::Call { callee, argc, retc } => {
+            format!("CALL         R{}, argc {}, retc {}", callee, argc, retc)
+        }
         Instruction::Return { base, count } => format!("RETURN       R{}, count {}", base, count),
-        Instruction::Closure { dst, proto_idx } => format!("CLOSURE      R{}, proto P{}", dst, proto_idx),
+        Instruction::Closure { dst, proto_idx } => {
+            format!("CLOSURE      R{}, proto P{}", dst, proto_idx)
+        }
         Instruction::Vararg { dst, count } => format!("VARARG       R{}, count {}", dst, count),
         Instruction::ForPrep { base, jump } => format!("FORPREP      R{}, offset {}", base, jump),
         Instruction::ForLoop { base, jump } => format!("FORLOOP      R{}, offset {}", base, jump),
-        Instruction::SetList { table, base, count } => format!("SETLIST      R{}, R{}, count {}", table, base, count),
+        Instruction::SetList { table, base, count } => {
+            format!("SETLIST      R{}, R{}, count {}", table, base, count)
+        }
         Instruction::TForCall { base, retc } => format!("TFORCALL     R{}, {}", base, retc),
         Instruction::TForLoop { base, jump } => format!("TFORLOOP     R{}, {}", base, jump),
     }

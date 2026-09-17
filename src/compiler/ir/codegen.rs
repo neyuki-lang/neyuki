@@ -81,8 +81,12 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
             IrInst::LoadConst { dst, val } => {
                 let r = regs.get(*dst, &mut proto);
                 match val {
-                    IrConstant::Nil => { proto.emit(Instruction::LoadNil { dst: r }, 1); }
-                    IrConstant::Bool(b) => { proto.emit(Instruction::LoadBool { dst: r, val: *b }, 1); }
+                    IrConstant::Nil => {
+                        proto.emit(Instruction::LoadNil { dst: r }, 1);
+                    }
+                    IrConstant::Bool(b) => {
+                        proto.emit(Instruction::LoadBool { dst: r, val: *b }, 1);
+                    }
                     IrConstant::Int(i) => {
                         let k = proto.add_constant(Constant::Int(i.clone()));
                         proto.emit(Instruction::LoadK { dst: r, k }, 1);
@@ -111,30 +115,96 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
                 let ra = regs.get(*lhs, &mut proto);
                 let rb = regs.get(*rhs, &mut proto);
                 match op {
-                    IrBinaryOp::Eq | IrBinaryOp::Ne | IrBinaryOp::Lt | IrBinaryOp::Le | IrBinaryOp::Gt | IrBinaryOp::Ge => {
+                    IrBinaryOp::Eq
+                    | IrBinaryOp::Ne
+                    | IrBinaryOp::Lt
+                    | IrBinaryOp::Le
+                    | IrBinaryOp::Gt
+                    | IrBinaryOp::Ge => {
                         let false_jump = match op {
-                            IrBinaryOp::Eq => proto.emit(Instruction::Eq { a: ra, b: rb, jump_if_false: 0 }, 1),
-                            IrBinaryOp::Ne => proto.emit(Instruction::Ne { a: ra, b: rb, jump_if_false: 0 }, 1),
-                            IrBinaryOp::Lt => proto.emit(Instruction::Lt { a: ra, b: rb, jump_if_false: 0 }, 1),
-                            IrBinaryOp::Le => proto.emit(Instruction::Le { a: ra, b: rb, jump_if_false: 0 }, 1),
-                            IrBinaryOp::Gt => proto.emit(Instruction::Gt { a: ra, b: rb, jump_if_false: 0 }, 1),
-                            IrBinaryOp::Ge => proto.emit(Instruction::Ge { a: ra, b: rb, jump_if_false: 0 }, 1),
+                            IrBinaryOp::Eq => proto.emit(
+                                Instruction::Eq {
+                                    a: ra,
+                                    b: rb,
+                                    jump_if_false: 0,
+                                },
+                                1,
+                            ),
+                            IrBinaryOp::Ne => proto.emit(
+                                Instruction::Ne {
+                                    a: ra,
+                                    b: rb,
+                                    jump_if_false: 0,
+                                },
+                                1,
+                            ),
+                            IrBinaryOp::Lt => proto.emit(
+                                Instruction::Lt {
+                                    a: ra,
+                                    b: rb,
+                                    jump_if_false: 0,
+                                },
+                                1,
+                            ),
+                            IrBinaryOp::Le => proto.emit(
+                                Instruction::Le {
+                                    a: ra,
+                                    b: rb,
+                                    jump_if_false: 0,
+                                },
+                                1,
+                            ),
+                            IrBinaryOp::Gt => proto.emit(
+                                Instruction::Gt {
+                                    a: ra,
+                                    b: rb,
+                                    jump_if_false: 0,
+                                },
+                                1,
+                            ),
+                            IrBinaryOp::Ge => proto.emit(
+                                Instruction::Ge {
+                                    a: ra,
+                                    b: rb,
+                                    jump_if_false: 0,
+                                },
+                                1,
+                            ),
                             _ => unreachable!(),
                         };
                         proto.emit(Instruction::LoadBool { dst: rd, val: true }, 1);
                         let skip = proto.emit(Instruction::Jump { offset: 1 }, 1);
                         let false_target = proto.instructions.len();
-                        let false_offset = (false_target as isize - (false_jump as isize + 1)) as i16;
+                        let false_offset =
+                            (false_target as isize - (false_jump as isize + 1)) as i16;
                         match &mut proto.instructions[false_jump] {
-                            Instruction::Eq { jump_if_false: o, .. }
-                            | Instruction::Ne { jump_if_false: o, .. }
-                            | Instruction::Lt { jump_if_false: o, .. }
-                            | Instruction::Le { jump_if_false: o, .. }
-                            | Instruction::Gt { jump_if_false: o, .. }
-                            | Instruction::Ge { jump_if_false: o, .. } => *o = false_offset,
+                            Instruction::Eq {
+                                jump_if_false: o, ..
+                            }
+                            | Instruction::Ne {
+                                jump_if_false: o, ..
+                            }
+                            | Instruction::Lt {
+                                jump_if_false: o, ..
+                            }
+                            | Instruction::Le {
+                                jump_if_false: o, ..
+                            }
+                            | Instruction::Gt {
+                                jump_if_false: o, ..
+                            }
+                            | Instruction::Ge {
+                                jump_if_false: o, ..
+                            } => *o = false_offset,
                             _ => {}
                         }
-                        proto.emit(Instruction::LoadBool { dst: rd, val: false }, 1);
+                        proto.emit(
+                            Instruction::LoadBool {
+                                dst: rd,
+                                val: false,
+                            },
+                            1,
+                        );
                         let skip_target = proto.instructions.len();
                         let skip_offset = (skip_target as isize - (skip as isize + 1)) as i16;
                         if let Instruction::Jump { offset: o } = &mut proto.instructions[skip] {
@@ -143,22 +213,86 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
                     }
                     _ => {
                         let inst = match op {
-                            IrBinaryOp::Add => Instruction::Add { dst: rd, a: ra, b: rb },
-                            IrBinaryOp::Sub => Instruction::Sub { dst: rd, a: ra, b: rb },
-                            IrBinaryOp::Mul => Instruction::Mul { dst: rd, a: ra, b: rb },
-                            IrBinaryOp::Div => Instruction::Div { dst: rd, a: ra, b: rb },
-                            IrBinaryOp::IDiv => Instruction::IDiv { dst: rd, a: ra, b: rb },
-                            IrBinaryOp::Mod => Instruction::Mod { dst: rd, a: ra, b: rb },
-                            IrBinaryOp::Pow => Instruction::Pow { dst: rd, a: ra, b: rb },
-                            IrBinaryOp::BitAnd => Instruction::BitAnd { dst: rd, a: ra, b: rb },
-                            IrBinaryOp::BitOr => Instruction::BitOr { dst: rd, a: ra, b: rb },
-                            IrBinaryOp::BitXor => Instruction::BitXor { dst: rd, a: ra, b: rb },
-                            IrBinaryOp::Shl => Instruction::Shl { dst: rd, a: ra, b: rb },
-                            IrBinaryOp::Shr => Instruction::Shr { dst: rd, a: ra, b: rb },
-                            IrBinaryOp::LShl => Instruction::LShl { dst: rd, a: ra, b: rb },
-                            IrBinaryOp::LShr => Instruction::LShr { dst: rd, a: ra, b: rb },
-                            IrBinaryOp::Concat => Instruction::Concat { dst: rd, a: ra, b: rb },
-                            IrBinaryOp::Coalesce => Instruction::Coalesce { dst: rd, a: ra, b: rb },
+                            IrBinaryOp::Add => Instruction::Add {
+                                dst: rd,
+                                a: ra,
+                                b: rb,
+                            },
+                            IrBinaryOp::Sub => Instruction::Sub {
+                                dst: rd,
+                                a: ra,
+                                b: rb,
+                            },
+                            IrBinaryOp::Mul => Instruction::Mul {
+                                dst: rd,
+                                a: ra,
+                                b: rb,
+                            },
+                            IrBinaryOp::Div => Instruction::Div {
+                                dst: rd,
+                                a: ra,
+                                b: rb,
+                            },
+                            IrBinaryOp::IDiv => Instruction::IDiv {
+                                dst: rd,
+                                a: ra,
+                                b: rb,
+                            },
+                            IrBinaryOp::Mod => Instruction::Mod {
+                                dst: rd,
+                                a: ra,
+                                b: rb,
+                            },
+                            IrBinaryOp::Pow => Instruction::Pow {
+                                dst: rd,
+                                a: ra,
+                                b: rb,
+                            },
+                            IrBinaryOp::BitAnd => Instruction::BitAnd {
+                                dst: rd,
+                                a: ra,
+                                b: rb,
+                            },
+                            IrBinaryOp::BitOr => Instruction::BitOr {
+                                dst: rd,
+                                a: ra,
+                                b: rb,
+                            },
+                            IrBinaryOp::BitXor => Instruction::BitXor {
+                                dst: rd,
+                                a: ra,
+                                b: rb,
+                            },
+                            IrBinaryOp::Shl => Instruction::Shl {
+                                dst: rd,
+                                a: ra,
+                                b: rb,
+                            },
+                            IrBinaryOp::Shr => Instruction::Shr {
+                                dst: rd,
+                                a: ra,
+                                b: rb,
+                            },
+                            IrBinaryOp::LShl => Instruction::LShl {
+                                dst: rd,
+                                a: ra,
+                                b: rb,
+                            },
+                            IrBinaryOp::LShr => Instruction::LShr {
+                                dst: rd,
+                                a: ra,
+                                b: rb,
+                            },
+                            IrBinaryOp::Concat => Instruction::Concat {
+                                dst: rd,
+                                a: ra,
+                                b: rb,
+                            },
+                            IrBinaryOp::Coalesce => Instruction::Coalesce {
+                                dst: rd,
+                                a: ra,
+                                b: rb,
+                            },
                             _ => unreachable!(),
                         };
                         proto.emit(inst, 1);
@@ -184,13 +318,27 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
                 let rd = regs.get(*dst, &mut proto);
                 let rt = regs.get(*table, &mut proto);
                 let rk = regs.get(*key, &mut proto);
-                proto.emit(Instruction::GetTable { dst: rd, table: rt, key: rk }, 1);
+                proto.emit(
+                    Instruction::GetTable {
+                        dst: rd,
+                        table: rt,
+                        key: rk,
+                    },
+                    1,
+                );
             }
             IrInst::SetTable { table, key, val } => {
                 let rt = regs.get(*table, &mut proto);
                 let rk = regs.get(*key, &mut proto);
                 let rv = regs.get(*val, &mut proto);
-                proto.emit(Instruction::SetTable { table: rt, key: rk, val: rv }, 1);
+                proto.emit(
+                    Instruction::SetTable {
+                        table: rt,
+                        key: rk,
+                        val: rv,
+                    },
+                    1,
+                );
             }
             IrInst::AppendArray { table, src } => {
                 let rt = regs.get(*table, &mut proto);
@@ -209,31 +357,73 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
             }
             IrInst::GetUpval { dst, index } => {
                 let rd = regs.get(*dst, &mut proto);
-                proto.emit(Instruction::GetUpval { dst: rd, upval_idx: *index }, 1);
+                proto.emit(
+                    Instruction::GetUpval {
+                        dst: rd,
+                        upval_idx: *index,
+                    },
+                    1,
+                );
             }
             IrInst::SetUpval { index, src } => {
                 let rs = regs.get(*src, &mut proto);
-                proto.emit(Instruction::SetUpval { src: rs, upval_idx: *index }, 1);
+                proto.emit(
+                    Instruction::SetUpval {
+                        src: rs,
+                        upval_idx: *index,
+                    },
+                    1,
+                );
             }
             IrInst::Closure { dst, proto_idx } => {
                 let rd = regs.get(*dst, &mut proto);
-                proto.emit(Instruction::Closure { dst: rd, proto_idx: *proto_idx }, 1);
+                proto.emit(
+                    Instruction::Closure {
+                        dst: rd,
+                        proto_idx: *proto_idx,
+                    },
+                    1,
+                );
             }
             IrInst::Vararg { dst, count } => {
                 let rd = regs.get(*dst, &mut proto);
-                proto.emit(Instruction::Vararg { dst: rd, count: *count }, 1);
+                proto.emit(
+                    Instruction::Vararg {
+                        dst: rd,
+                        count: *count,
+                    },
+                    1,
+                );
             }
-            IrInst::ForPrep { base, limit, step, loop_var, jump } => {
+            IrInst::ForPrep {
+                base,
+                limit,
+                step,
+                loop_var,
+                jump,
+            } => {
                 let rb = regs.get(*base, &mut proto);
                 let r_limit = regs.get(*limit, &mut proto);
                 if r_limit != rb + 1 {
-                    proto.emit(Instruction::Move { dst: rb + 1, src: r_limit }, 1);
+                    proto.emit(
+                        Instruction::Move {
+                            dst: rb + 1,
+                            src: r_limit,
+                        },
+                        1,
+                    );
                 }
                 regs.bind(*limit, rb + 1, &mut proto);
 
                 let r_step = regs.get(*step, &mut proto);
                 if r_step != rb + 2 {
-                    proto.emit(Instruction::Move { dst: rb + 2, src: r_step }, 1);
+                    proto.emit(
+                        Instruction::Move {
+                            dst: rb + 2,
+                            src: r_step,
+                        },
+                        1,
+                    );
                 }
                 regs.bind(*step, rb + 2, &mut proto);
 
@@ -247,17 +437,34 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
                 let ip = proto.emit(Instruction::ForLoop { base: rb, jump: 0 }, 1);
                 jump_patches.push((ip, *jump));
             }
-            IrInst::TForCall { base, state, ctrl, vars } => {
+            IrInst::TForCall {
+                base,
+                state,
+                ctrl,
+                vars,
+            } => {
                 let rb = regs.get(*base, &mut proto);
                 let r_state = regs.get(*state, &mut proto);
                 if r_state != rb + 1 {
-                    proto.emit(Instruction::Move { dst: rb + 1, src: r_state }, 1);
+                    proto.emit(
+                        Instruction::Move {
+                            dst: rb + 1,
+                            src: r_state,
+                        },
+                        1,
+                    );
                 }
                 regs.bind(*state, rb + 1, &mut proto);
 
                 let r_ctrl = regs.get(*ctrl, &mut proto);
                 if r_ctrl != rb + 2 {
-                    proto.emit(Instruction::Move { dst: rb + 2, src: r_ctrl }, 1);
+                    proto.emit(
+                        Instruction::Move {
+                            dst: rb + 2,
+                            src: r_ctrl,
+                        },
+                        1,
+                    );
                 }
                 regs.bind(*ctrl, rb + 2, &mut proto);
 
@@ -265,27 +472,51 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
                     regs.bind(*v, rb + 3 + i as u8, &mut proto);
                 }
 
-                proto.emit(Instruction::TForCall { base: rb, retc: vars.len() as u8 }, 1);
+                proto.emit(
+                    Instruction::TForCall {
+                        base: rb,
+                        retc: vars.len() as u8,
+                    },
+                    1,
+                );
             }
             IrInst::TForLoop { base, jump } => {
                 let rb = regs.get(*base, &mut proto);
                 let ip = proto.emit(Instruction::TForLoop { base: rb, jump: 0 }, 1);
                 jump_patches.push((ip, *jump));
             }
-            IrInst::Call { dst, callee, args, retc } => {
+            IrInst::Call {
+                dst,
+                callee,
+                args,
+                retc,
+            } => {
                 let rc = regs.get(*callee, &mut proto);
                 for (i, arg) in args.iter().enumerate() {
                     let ra = regs.get(*arg, &mut proto);
                     let target_reg = rc + 1 + i as u8;
                     if ra != target_reg {
-                        proto.emit(Instruction::Move { dst: target_reg, src: ra }, 1);
+                        proto.emit(
+                            Instruction::Move {
+                                dst: target_reg,
+                                src: ra,
+                            },
+                            1,
+                        );
                     }
                 }
                 let needed_regs = (rc as usize) + 1 + (args.len()).max(*retc as usize);
                 if needed_regs > proto.max_registers as usize {
                     proto.max_registers = needed_regs as u8;
                 }
-                proto.emit(Instruction::Call { callee: rc, argc: args.len() as u8, retc: *retc }, 1);
+                proto.emit(
+                    Instruction::Call {
+                        callee: rc,
+                        argc: args.len() as u8,
+                        retc: *retc,
+                    },
+                    1,
+                );
                 if let Some(d) = dst {
                     let rd = regs.get(*d, &mut proto);
                     if rd != rc {
@@ -295,7 +526,12 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
             }
             IrInst::Return(vars) => {
                 if vars.is_empty() {
-                    let r = if proto.max_registers == 0 { proto.max_registers = 1; 0 } else { 0 };
+                    let r = if proto.max_registers == 0 {
+                        proto.max_registers = 1;
+                        0
+                    } else {
+                        0
+                    };
                     proto.emit(Instruction::LoadNil { dst: r }, 1);
                     proto.emit(Instruction::Return { base: r, count: 1 }, 1);
                 } else if vars.len() == 1 {
@@ -307,14 +543,26 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
                         let vr = regs.get(*v, &mut proto);
                         let target_r = base + 1 + i as u8;
                         if vr != target_r {
-                            proto.emit(Instruction::Move { dst: target_r, src: vr }, 1);
+                            proto.emit(
+                                Instruction::Move {
+                                    dst: target_r,
+                                    src: vr,
+                                },
+                                1,
+                            );
                         }
                     }
                     let needed = base as usize + vars.len();
                     if needed > proto.max_registers as usize {
                         proto.max_registers = needed as u8;
                     }
-                    proto.emit(Instruction::Return { base, count: vars.len() as u8 }, 1);
+                    proto.emit(
+                        Instruction::Return {
+                            base,
+                            count: vars.len() as u8,
+                        },
+                        1,
+                    );
                 }
             }
             IrInst::Jump(label) => {
@@ -323,7 +571,13 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
             }
             IrInst::JumpIfFalse { cond, target } => {
                 let r = regs.get(*cond, &mut proto);
-                let ip = proto.emit(Instruction::Test { reg: r, jump_if_false: 0 }, 1);
+                let ip = proto.emit(
+                    Instruction::Test {
+                        reg: r,
+                        jump_if_false: 0,
+                    },
+                    1,
+                );
                 jump_patches.push((ip, *target));
             }
         }
@@ -334,7 +588,9 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
             let offset = (target_ip as isize - (jump_ip as isize + 1)) as i16;
             match &mut proto.instructions[jump_ip] {
                 Instruction::Jump { offset: o } => *o = offset,
-                Instruction::Test { jump_if_false: o, .. } => *o = offset,
+                Instruction::Test {
+                    jump_if_false: o, ..
+                } => *o = offset,
                 Instruction::ForPrep { jump: o, .. } => *o = offset,
                 Instruction::ForLoop { jump: o, .. } => *o = offset,
                 Instruction::TForLoop { jump: o, .. } => *o = offset,

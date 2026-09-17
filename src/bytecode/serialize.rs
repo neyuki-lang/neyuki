@@ -1,9 +1,9 @@
 // Binary serialization for Neyuki bytecode files.
 
-use num_bigint::{BigInt, Sign};
 use crate::bytecode::format::BytecodeHeader;
 use crate::bytecode::instruction::Instruction;
 use crate::bytecode::proto::{Constant, Proto};
+use num_bigint::{BigInt, Sign};
 
 #[allow(unused_imports)]
 pub use crate::bytecode::deserialize::deserialize;
@@ -267,37 +267,61 @@ fn write_instruction(buf: &mut Vec<u8>, inst: &Instruction) {
             write_u8(buf, *a);
             write_u8(buf, *b);
         }
-        Instruction::Eq { a, b, jump_if_false } => {
+        Instruction::Eq {
+            a,
+            b,
+            jump_if_false,
+        } => {
             write_u8(buf, 34);
             write_u8(buf, *a);
             write_u8(buf, *b);
             write_i16(buf, *jump_if_false);
         }
-        Instruction::Ne { a, b, jump_if_false } => {
+        Instruction::Ne {
+            a,
+            b,
+            jump_if_false,
+        } => {
             write_u8(buf, 35);
             write_u8(buf, *a);
             write_u8(buf, *b);
             write_i16(buf, *jump_if_false);
         }
-        Instruction::Lt { a, b, jump_if_false } => {
+        Instruction::Lt {
+            a,
+            b,
+            jump_if_false,
+        } => {
             write_u8(buf, 36);
             write_u8(buf, *a);
             write_u8(buf, *b);
             write_i16(buf, *jump_if_false);
         }
-        Instruction::Le { a, b, jump_if_false } => {
+        Instruction::Le {
+            a,
+            b,
+            jump_if_false,
+        } => {
             write_u8(buf, 37);
             write_u8(buf, *a);
             write_u8(buf, *b);
             write_i16(buf, *jump_if_false);
         }
-        Instruction::Gt { a, b, jump_if_false } => {
+        Instruction::Gt {
+            a,
+            b,
+            jump_if_false,
+        } => {
             write_u8(buf, 38);
             write_u8(buf, *a);
             write_u8(buf, *b);
             write_i16(buf, *jump_if_false);
         }
-        Instruction::Ge { a, b, jump_if_false } => {
+        Instruction::Ge {
+            a,
+            b,
+            jump_if_false,
+        } => {
             write_u8(buf, 39);
             write_u8(buf, *a);
             write_u8(buf, *b);
@@ -527,7 +551,9 @@ mod tests {
         // Deterministic pseudo-random sequence for repeatability
         let mut state: u64 = 0x1234_5678_9ABC_DEF0;
         let mut rng = move || {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (state >> 32) as u32
         };
 

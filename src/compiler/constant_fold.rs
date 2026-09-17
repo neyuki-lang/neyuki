@@ -307,7 +307,11 @@ fn fold_binary_op(op: &str, left: FoldVal, right: FoldVal) -> Option<FoldVal> {
 }
 
 // Fold constant builtin calls like math.abs, bit.band, string.len, etc.
-fn fold_builtin_call(callee: &Expr, args: &[FoldVal], shadowed: &HashSet<String>) -> Option<FoldVal> {
+fn fold_builtin_call(
+    callee: &Expr,
+    args: &[FoldVal],
+    shadowed: &HashSet<String>,
+) -> Option<FoldVal> {
     match callee {
         Expr::Variable(name) => {
             if shadowed.contains(name.as_str()) {
@@ -507,9 +511,10 @@ fn fold_expr_scoped(expr: Expr, shadowed: &HashSet<String>) -> Expr {
         Expr::Unary { op, expr: inner } => {
             let folded_inner = fold_expr_scoped(*inner, shadowed);
             if let Some(c) = FoldVal::from_expr(&folded_inner)
-                && let Some(res) = fold_unary_op(&op, c) {
-                    return res.to_expr();
-                }
+                && let Some(res) = fold_unary_op(&op, c)
+            {
+                return res.to_expr();
+            }
             Expr::Unary {
                 op,
                 expr: Box::new(folded_inner),
@@ -534,22 +539,23 @@ fn fold_expr_scoped(expr: Expr, shadowed: &HashSet<String>) -> Expr {
                     return fold_expr_scoped(*right, shadowed);
                 }
             } else if op == "??"
-                && let Some(c) = FoldVal::from_expr(&folded_left) {
-                    if c != FoldVal::Nil {
-                        return folded_left;
-                    }
-                    return fold_expr_scoped(*right, shadowed);
+                && let Some(c) = FoldVal::from_expr(&folded_left)
+            {
+                if c != FoldVal::Nil {
+                    return folded_left;
                 }
+                return fold_expr_scoped(*right, shadowed);
+            }
 
             let folded_right = fold_expr_scoped(*right, shadowed);
 
             if let (Some(cl), Some(cr)) = (
                 FoldVal::from_expr(&folded_left),
                 FoldVal::from_expr(&folded_right),
-            )
-                && let Some(res) = fold_binary_op(&op, cl, cr) {
-                    return res.to_expr();
-                }
+            ) && let Some(res) = fold_binary_op(&op, cl, cr)
+            {
+                return res.to_expr();
+            }
 
             Expr::Binary {
                 left: Box::new(folded_left),
@@ -567,7 +573,10 @@ fn fold_expr_scoped(expr: Expr, shadowed: &HashSet<String>) -> Expr {
         },
         Expr::Call { callee, args } => {
             let folded_callee = fold_expr_scoped(*callee, shadowed);
-            let folded_args: Vec<Expr> = args.into_iter().map(|a| fold_expr_scoped(a, shadowed)).collect();
+            let folded_args: Vec<Expr> = args
+                .into_iter()
+                .map(|a| fold_expr_scoped(a, shadowed))
+                .collect();
 
             // Check if all arguments are constant foldables
             let mut const_args = Vec::with_capacity(folded_args.len());
@@ -581,10 +590,10 @@ fn fold_expr_scoped(expr: Expr, shadowed: &HashSet<String>) -> Expr {
                 }
             }
 
-            if all_const
-                && let Some(res) = fold_builtin_call(&folded_callee, &const_args, shadowed) {
-                    return res.to_expr();
-                }
+            if all_const && let Some(res) = fold_builtin_call(&folded_callee, &const_args, shadowed)
+            {
+                return res.to_expr();
+            }
 
             Expr::Call {
                 callee: Box::new(folded_callee),
@@ -608,7 +617,10 @@ fn fold_expr_scoped(expr: Expr, shadowed: &HashSet<String>) -> Expr {
         } => Expr::MethodCall {
             object: Box::new(fold_expr_scoped(*object, shadowed)),
             method,
-            args: args.into_iter().map(|a| fold_expr_scoped(a, shadowed)).collect(),
+            args: args
+                .into_iter()
+                .map(|a| fold_expr_scoped(a, shadowed))
+                .collect(),
         },
         Expr::Table(entries) => Expr::Table(
             entries
@@ -659,7 +671,10 @@ fn fold_stmt_scoped(stmt: Stmt, shadowed: &mut HashSet<String>) -> Option<Stmt> 
             is_const,
             initializers,
         } => {
-            let new_inits = initializers.into_iter().map(|e| fold_expr_scoped(e, shadowed)).collect();
+            let new_inits = initializers
+                .into_iter()
+                .map(|e| fold_expr_scoped(e, shadowed))
+                .collect();
             for n in &names {
                 shadowed.insert(n.clone());
             }
@@ -714,16 +729,17 @@ fn fold_stmt_scoped(stmt: Stmt, shadowed: &mut HashSet<String>) -> Option<Stmt> 
 
             // If static truthy condition, dead-branch elimination can happen
             if let Some(c) = FoldVal::from_expr(&folded_cond)
-                && c.is_truthy() {
-                    let mut child_shadowed = shadowed.clone();
-                    let folded_then = fold_block(then_branch, &mut child_shadowed);
-                    return Some(Stmt::If {
-                        condition: folded_cond,
-                        then_branch: folded_then,
-                        else_if_branches: Vec::new(),
-                        else_branch: None,
-                    });
-                }
+                && c.is_truthy()
+            {
+                let mut child_shadowed = shadowed.clone();
+                let folded_then = fold_block(then_branch, &mut child_shadowed);
+                return Some(Stmt::If {
+                    condition: folded_cond,
+                    then_branch: folded_then,
+                    else_if_branches: Vec::new(),
+                    else_branch: None,
+                });
+            }
 
             let mut then_shadowed = shadowed.clone();
             let folded_then = fold_block(then_branch, &mut then_shadowed);
@@ -751,7 +767,9 @@ fn fold_stmt_scoped(stmt: Stmt, shadowed: &mut HashSet<String>) -> Option<Stmt> 
         }
         Stmt::While { condition, body } => {
             let folded_cond = fold_expr_scoped(condition, shadowed);
-            if let Some(FoldVal::Bool(false)) | Some(FoldVal::Nil) = FoldVal::from_expr(&folded_cond) {
+            if let Some(FoldVal::Bool(false)) | Some(FoldVal::Nil) =
+                FoldVal::from_expr(&folded_cond)
+            {
                 // Eliminate while false loop entirely
                 return None;
             }
@@ -803,14 +821,23 @@ fn fold_stmt_scoped(stmt: Stmt, shadowed: &mut HashSet<String>) -> Option<Stmt> 
             })
         }
         Stmt::Return(exprs) => Some(Stmt::Return(
-            exprs.into_iter().map(|e| fold_expr_scoped(e, shadowed)).collect(),
+            exprs
+                .into_iter()
+                .map(|e| fold_expr_scoped(e, shadowed))
+                .collect(),
         )),
         Stmt::Expr(expr) => Some(Stmt::Expr(fold_expr_scoped(expr, shadowed))),
         Stmt::Break => Some(Stmt::Break),
         Stmt::Continue => Some(Stmt::Continue),
         Stmt::AssignMany { targets, values } => Some(Stmt::AssignMany {
-            targets: targets.into_iter().map(|e| fold_expr_scoped(e, shadowed)).collect(),
-            values: values.into_iter().map(|e| fold_expr_scoped(e, shadowed)).collect(),
+            targets: targets
+                .into_iter()
+                .map(|e| fold_expr_scoped(e, shadowed))
+                .collect(),
+            values: values
+                .into_iter()
+                .map(|e| fold_expr_scoped(e, shadowed))
+                .collect(),
         }),
     }
 }
@@ -838,7 +865,10 @@ mod tests {
         let stmts = parser.parse_program().expect("syntax error");
         let optimized = fold_program(stmts);
         match &optimized[0] {
-            Stmt::Local { initializer: Some(Expr::Literal(val)), .. } => {
+            Stmt::Local {
+                initializer: Some(Expr::Literal(val)),
+                ..
+            } => {
                 assert_eq!(val, "70");
             }
             _ => panic!("failed to fold arithmetic"),
@@ -852,7 +882,10 @@ mod tests {
         let optimized = fold_program(stmts);
         // (1 << 4) = 16, (16 >> 2) = 4, 16 | 4 = 20
         match &optimized[0] {
-            Stmt::Local { initializer: Some(Expr::Literal(val)), .. } => {
+            Stmt::Local {
+                initializer: Some(Expr::Literal(val)),
+                ..
+            } => {
                 assert_eq!(val, "20");
             }
             _ => panic!("failed to fold bitwise"),
@@ -865,13 +898,19 @@ mod tests {
         let stmts = parser.parse_program().expect("syntax error");
         let optimized = fold_program(stmts);
         match &optimized[0] {
-            Stmt::Local { initializer: Some(Expr::Literal(val)), .. } => {
+            Stmt::Local {
+                initializer: Some(Expr::Literal(val)),
+                ..
+            } => {
                 assert_eq!(val, "42");
             }
             _ => panic!("failed to fold math.abs"),
         }
         match &optimized[1] {
-            Stmt::Local { initializer: Some(Expr::Literal(val)), .. } => {
+            Stmt::Local {
+                initializer: Some(Expr::Literal(val)),
+                ..
+            } => {
                 assert_eq!(val, "15");
             }
             _ => panic!("failed to fold bit.band"),
@@ -885,7 +924,10 @@ mod tests {
         let optimized = fold_program(stmts);
         // math.abs(-42) should remain as a call expression because `math` is shadowed!
         match &optimized[1] {
-            Stmt::Local { initializer: Some(Expr::Call { .. }), .. } => {}
+            Stmt::Local {
+                initializer: Some(Expr::Call { .. }),
+                ..
+            } => {}
             _ => panic!("shadowed math was incorrectly folded into a constant!"),
         }
     }
@@ -896,13 +938,19 @@ mod tests {
         let stmts = parser.parse_program().expect("syntax error");
         let optimized = fold_program(stmts);
         match &optimized[0] {
-            Stmt::Local { initializer: Some(Expr::Literal(val)), .. } => {
+            Stmt::Local {
+                initializer: Some(Expr::Literal(val)),
+                ..
+            } => {
                 assert_eq!(val, "true");
             }
             _ => panic!("failed to fold 1 == 1.0"),
         }
         match &optimized[1] {
-            Stmt::Local { initializer: Some(Expr::Literal(val)), .. } => {
+            Stmt::Local {
+                initializer: Some(Expr::Literal(val)),
+                ..
+            } => {
                 let parsed: f64 = val.parse().expect("valid float");
                 assert!((parsed - 0.5).abs() < 1e-6);
             }

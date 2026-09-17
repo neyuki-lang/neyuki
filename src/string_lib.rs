@@ -173,7 +173,10 @@ fn builtin_rep(args: Vec<Value>) -> Result<Vec<Value>, String> {
     }
     const MAX_REP_COUNT: i64 = 10_000_000;
     if n > MAX_REP_COUNT {
-        return Err(format!("count exceeds maximum limit ({}) in 'string.rep'", MAX_REP_COUNT));
+        return Err(format!(
+            "count exceeds maximum limit ({}) in 'string.rep'",
+            MAX_REP_COUNT
+        ));
     }
     if s.is_empty() && sep.is_empty() {
         return Ok(vec![Value::String(String::new())]);

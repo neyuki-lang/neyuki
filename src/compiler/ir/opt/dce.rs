@@ -11,12 +11,16 @@ pub fn dead_code_elimination(module: &mut IrModule) {
 
     for inst in &module.main.instructions {
         match inst {
-            IrInst::Move { src, .. } => { used_vars.insert(*src); }
+            IrInst::Move { src, .. } => {
+                used_vars.insert(*src);
+            }
             IrInst::BinOp { lhs, rhs, .. } => {
                 used_vars.insert(*lhs);
                 used_vars.insert(*rhs);
             }
-            IrInst::UnOp { src, .. } => { used_vars.insert(*src); }
+            IrInst::UnOp { src, .. } => {
+                used_vars.insert(*src);
+            }
             IrInst::GetTable { table, key, .. } => {
                 used_vars.insert(*table);
                 used_vars.insert(*key);
@@ -30,7 +34,9 @@ pub fn dead_code_elimination(module: &mut IrModule) {
                 used_vars.insert(*table);
                 used_vars.insert(*src);
             }
-            IrInst::SetGlobal { src, .. } => { used_vars.insert(*src); }
+            IrInst::SetGlobal { src, .. } => {
+                used_vars.insert(*src);
+            }
             IrInst::Call { callee, args, .. } => {
                 used_vars.insert(*callee);
                 for arg in args {
@@ -42,7 +48,9 @@ pub fn dead_code_elimination(module: &mut IrModule) {
                     used_vars.insert(*v);
                 }
             }
-            IrInst::JumpIfFalse { cond, .. } => { used_vars.insert(*cond); }
+            IrInst::JumpIfFalse { cond, .. } => {
+                used_vars.insert(*cond);
+            }
             _ => {}
         }
     }

@@ -2,14 +2,14 @@ use std::env;
 use std::process;
 
 pub mod ast;
+#[path = "../bench/mod.rs"]
+mod bench;
 mod bytecode;
 mod compiler;
 pub mod diagnostics;
-#[path = "../bench/mod.rs"]
-mod bench;
+mod fs_lib;
 #[path = "../fuzz/mod.rs"]
 mod fuzz;
-mod fs_lib;
 mod http_lib;
 mod io_lib;
 mod lexer;

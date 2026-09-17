@@ -19,41 +19,65 @@ fn to_string_arg(val: &Value) -> Result<String, String> {
 
 fn to_isize(val: &Value, name: &str) -> Result<isize, String> {
     match val {
-        Value::Int(i) => i.to_isize().ok_or_else(|| format!("{} is out of bounds", name)),
+        Value::Int(i) => i
+            .to_isize()
+            .ok_or_else(|| format!("{} is out of bounds", name)),
         Value::Float(f) => Ok(*f as isize),
         _ => Err(format!("{} expects an integer", name)),
     }
 }
 
 fn string_len(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let s = to_string_arg(args.first().ok_or_else(|| "string.len expects 1 argument".to_string())?)?;
+    let s = to_string_arg(
+        args.first()
+            .ok_or_else(|| "string.len expects 1 argument".to_string())?,
+    )?;
     Ok(vec![Value::Int(BigInt::from(s.len()))])
 }
 
 fn string_lower(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let s = to_string_arg(args.first().ok_or_else(|| "string.lower expects 1 argument".to_string())?)?;
+    let s = to_string_arg(
+        args.first()
+            .ok_or_else(|| "string.lower expects 1 argument".to_string())?,
+    )?;
     Ok(vec![Value::String(s.to_lowercase())])
 }
 
 fn string_upper(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let s = to_string_arg(args.first().ok_or_else(|| "string.upper expects 1 argument".to_string())?)?;
+    let s = to_string_arg(
+        args.first()
+            .ok_or_else(|| "string.upper expects 1 argument".to_string())?,
+    )?;
     Ok(vec![Value::String(s.to_uppercase())])
 }
 
 fn string_reverse(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let s = to_string_arg(args.first().ok_or_else(|| "string.reverse expects 1 argument".to_string())?)?;
+    let s = to_string_arg(
+        args.first()
+            .ok_or_else(|| "string.reverse expects 1 argument".to_string())?,
+    )?;
     Ok(vec![Value::String(s.chars().rev().collect())])
 }
 
 fn string_rep(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let s = to_string_arg(args.first().ok_or_else(|| "string.rep expects at least 2 arguments".to_string())?)?;
-    let n = to_isize(args.get(1).ok_or_else(|| "string.rep expects at least 2 arguments".to_string())?, "n")?;
+    let s = to_string_arg(
+        args.first()
+            .ok_or_else(|| "string.rep expects at least 2 arguments".to_string())?,
+    )?;
+    let n = to_isize(
+        args.get(1)
+            .ok_or_else(|| "string.rep expects at least 2 arguments".to_string())?,
+        "n",
+    )?;
     if n <= 0 {
         return Ok(vec![Value::String(String::new())]);
     }
     const MAX_REP_COUNT: isize = 10_000_000;
     if n > MAX_REP_COUNT {
-        return Err(format!("count exceeds maximum limit ({}) in 'string.rep'", MAX_REP_COUNT));
+        return Err(format!(
+            "count exceeds maximum limit ({}) in 'string.rep'",
+            MAX_REP_COUNT
+        ));
     }
     let sep = if let Some(sep_val) = args.get(2) {
         to_string_arg(sep_val)?
@@ -79,8 +103,15 @@ fn string_rep(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 }
 
 fn string_sub(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let s = to_string_arg(args.first().ok_or_else(|| "string.sub expects at least 2 arguments".to_string())?)?;
-    let i = to_isize(args.get(1).ok_or_else(|| "string.sub expects at least 2 arguments".to_string())?, "start")?;
+    let s = to_string_arg(
+        args.first()
+            .ok_or_else(|| "string.sub expects at least 2 arguments".to_string())?,
+    )?;
+    let i = to_isize(
+        args.get(1)
+            .ok_or_else(|| "string.sub expects at least 2 arguments".to_string())?,
+        "start",
+    )?;
     let j = if let Some(jv) = args.get(2) {
         to_isize(jv, "end")?
     } else {
@@ -112,7 +143,10 @@ fn string_sub(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 }
 
 fn string_byte(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let s = to_string_arg(args.first().ok_or_else(|| "string.byte expects at least 1 argument".to_string())?)?;
+    let s = to_string_arg(
+        args.first()
+            .ok_or_else(|| "string.byte expects at least 1 argument".to_string())?,
+    )?;
     let i = if let Some(iv) = args.get(1) {
         to_isize(iv, "start")?
     } else {
@@ -165,7 +199,10 @@ fn string_char(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 }
 
 fn string_split(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let s = to_string_arg(args.first().ok_or_else(|| "string.split expects at least 1 argument".to_string())?)?;
+    let s = to_string_arg(
+        args.first()
+            .ok_or_else(|| "string.split expects at least 1 argument".to_string())?,
+    )?;
     let sep = if let Some(v) = args.get(1) {
         to_string_arg(v)?
     } else {
@@ -175,7 +212,9 @@ fn string_split(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let parts: Vec<Value> = if sep.is_empty() {
         s.chars().map(|c| Value::String(c.to_string())).collect()
     } else {
-        s.split(&sep).map(|p| Value::String(p.to_string())).collect()
+        s.split(&sep)
+            .map(|p| Value::String(p.to_string()))
+            .collect()
     };
 
     let mut table = VmTable::new();
@@ -186,8 +225,14 @@ fn string_split(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 }
 
 fn string_find(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let s = to_string_arg(args.first().ok_or_else(|| "string.find expects 2 arguments".to_string())?)?;
-    let pattern = to_string_arg(args.get(1).ok_or_else(|| "string.find expects 2 arguments".to_string())?)?;
+    let s = to_string_arg(
+        args.first()
+            .ok_or_else(|| "string.find expects 2 arguments".to_string())?,
+    )?;
+    let pattern = to_string_arg(
+        args.get(1)
+            .ok_or_else(|| "string.find expects 2 arguments".to_string())?,
+    )?;
 
     if let Some(pos) = s.find(&pattern) {
         let start = pos + 1;
@@ -202,7 +247,10 @@ fn string_find(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 }
 
 fn string_format(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let fmt = to_string_arg(args.first().ok_or_else(|| "string.format expects format string".to_string())?)?;
+    let fmt = to_string_arg(
+        args.first()
+            .ok_or_else(|| "string.format expects format string".to_string())?,
+    )?;
     let mut out = String::new();
     let mut arg_idx = 1;
     let bytes = fmt.as_bytes();
@@ -218,7 +266,9 @@ fn string_format(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
                 i += 1;
                 continue;
             }
-            let val = args.get(arg_idx).ok_or_else(|| "not enough arguments to string.format".to_string())?;
+            let val = args
+                .get(arg_idx)
+                .ok_or_else(|| "not enough arguments to string.format".to_string())?;
             arg_idx += 1;
             match bytes[i] {
                 b's' => out.push_str(&val.to_string()),
@@ -265,7 +315,12 @@ fn string_format(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
                 }
                 b'q' => {
                     out.push('"');
-                    out.push_str(&val.to_string().replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n"));
+                    out.push_str(
+                        &val.to_string()
+                            .replace('\\', "\\\\")
+                            .replace('"', "\\\"")
+                            .replace('\n', "\\n"),
+                    );
                     out.push('"');
                 }
                 other => {

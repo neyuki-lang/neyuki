@@ -14,7 +14,7 @@ pub mod types;
 #[allow(unused_imports)]
 pub use block::{BasicBlock, ControlFlowGraph, IrFunction, IrModule};
 #[allow(unused_imports)]
-pub use builder::{ast_to_ir, IrBuilder};
+pub use builder::{IrBuilder, ast_to_ir};
 pub use codegen::ir_to_bytecode;
 pub use inst::IrInst;
 pub use opt::{constant_propagation, dead_code_elimination};
@@ -44,13 +44,21 @@ mod tests {
         let stmts = compile_source(code).expect("syntax error");
         let mut ir_module = ast_to_ir(&stmts);
 
-        let has_binop_before = ir_module.main.instructions.iter().any(|i| matches!(i, IrInst::BinOp { .. }));
+        let has_binop_before = ir_module
+            .main
+            .instructions
+            .iter()
+            .any(|i| matches!(i, IrInst::BinOp { .. }));
         assert!(has_binop_before);
 
         constant_propagation(&mut ir_module);
 
         let has_folded_30 = ir_module.main.instructions.iter().any(|i| {
-            if let IrInst::LoadConst { val: IrConstant::Int(bi), .. } = i {
+            if let IrInst::LoadConst {
+                val: IrConstant::Int(bi),
+                ..
+            } = i
+            {
                 bi == &BigInt::from(30)
             } else {
                 false
@@ -68,7 +76,8 @@ mod tests {
 
     #[test]
     fn test_ir_if_control_flow() {
-        let code = "local x = 5\nlocal res = 0\nif x == 5 then res = 100 else res = 200 end\nreturn res";
+        let code =
+            "local x = 5\nlocal res = 0\nif x == 5 then res = 100 else res = 200 end\nreturn res";
         let stmts = compile_source(code).expect("syntax error");
         let mut ir_module = ast_to_ir(&stmts);
         constant_propagation(&mut ir_module);
@@ -82,7 +91,8 @@ mod tests {
 
     #[test]
     fn test_ir_while_loop() {
-        let code = "local sum = 0\nlocal i = 1\nwhile i <= 4 do sum = sum + i; i = i + 1 end\nreturn sum";
+        let code =
+            "local sum = 0\nlocal i = 1\nwhile i <= 4 do sum = sum + i; i = i + 1 end\nreturn sum";
         let stmts = compile_source(code).expect("syntax error");
         let ir_module = ast_to_ir(&stmts);
         let proto = ir_to_bytecode(&ir_module).expect("ir lowering failed");

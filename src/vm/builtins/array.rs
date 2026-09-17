@@ -17,7 +17,10 @@ pub fn builtin_array_create(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, S
     };
     const MAX_ARRAY_SIZE: usize = 1_000_000;
     if count > MAX_ARRAY_SIZE {
-        return Err(format!("array size exceeds maximum limit ({})", MAX_ARRAY_SIZE));
+        return Err(format!(
+            "array size exceeds maximum limit ({})",
+            MAX_ARRAY_SIZE
+        ));
     }
     let init_val = args.get(1).cloned().unwrap_or(Value::Nil);
 
@@ -31,7 +34,9 @@ pub fn builtin_array_create(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, S
 }
 
 pub fn builtin_table_clear(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let tbl_val = args.first().ok_or_else(|| "table.clear expects a table".to_string())?;
+    let tbl_val = args
+        .first()
+        .ok_or_else(|| "table.clear expects a table".to_string())?;
     match tbl_val {
         Value::Table(t) => {
             let mut tbl = t.borrow_mut();

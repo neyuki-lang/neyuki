@@ -48,7 +48,12 @@ fn unescape_string(input: &str) -> Result<String, String> {
                         match chars.next() {
                             Some('}') => break,
                             Some(h) if h.is_ascii_hexdigit() => hex.push(h),
-                            Some(other) => return Err(format!("invalid character '{}' in unicode escape", other)),
+                            Some(other) => {
+                                return Err(format!(
+                                    "invalid character '{}' in unicode escape",
+                                    other
+                                ));
+                            }
                             None => return Err("unterminated unicode escape".to_string()),
                         }
                     }
@@ -140,7 +145,10 @@ pub fn parse_assembly(text: &str) -> Result<Proto, String> {
                 let in_stack = rhs.starts_with("stack");
                 if let (Some(open), Some(close)) = (rhs.find('['), rhs.rfind(']')) {
                     let idx = rhs[open + 1..close].trim().parse::<u8>().unwrap_or(0);
-                    proto.upvalues.push(crate::bytecode::proto::UpvalueDesc { in_stack, index: idx });
+                    proto.upvalues.push(crate::bytecode::proto::UpvalueDesc {
+                        in_stack,
+                        index: idx,
+                    });
                 }
             }
             continue;
@@ -209,8 +217,12 @@ fn parse_proto_idx(token: &str) -> Result<u16, String> {
 // Parses "R1[R2]" into (1, 2)
 fn parse_table_and_key(token: &str) -> Result<(u8, u8), String> {
     let clean = token.trim().trim_end_matches(',');
-    let open = clean.find('[').ok_or_else(|| format!("expected '[' in table access, got {}", clean))?;
-    let close = clean.rfind(']').ok_or_else(|| format!("expected ']' in table access, got {}", clean))?;
+    let open = clean
+        .find('[')
+        .ok_or_else(|| format!("expected '[' in table access, got {}", clean))?;
+    let close = clean
+        .rfind(']')
+        .ok_or_else(|| format!("expected ']' in table access, got {}", clean))?;
     let table = parse_reg(&clean[..open])?;
     let key = parse_reg(&clean[open + 1..close])?;
     Ok((table, key))
@@ -219,8 +231,12 @@ fn parse_table_and_key(token: &str) -> Result<(u8, u8), String> {
 // Parses "R1[K2]" into (1, 2)
 fn parse_table_and_const_key(token: &str) -> Result<(u8, u16), String> {
     let clean = token.trim().trim_end_matches(',');
-    let open = clean.find('[').ok_or_else(|| format!("expected '[' in table access, got {}", clean))?;
-    let close = clean.rfind(']').ok_or_else(|| format!("expected ']' in table access, got {}", clean))?;
+    let open = clean
+        .find('[')
+        .ok_or_else(|| format!("expected '[' in table access, got {}", clean))?;
+    let close = clean
+        .rfind(']')
+        .ok_or_else(|| format!("expected ']' in table access, got {}", clean))?;
     let table = parse_reg(&clean[..open])?;
     let key_k = parse_const_idx(&clean[open + 1..close])?;
     Ok((table, key_k))
@@ -240,12 +256,21 @@ fn parse_instruction_line(line: &str) -> Result<Option<Instruction>, String> {
         }
         "LOADBOOL" => {
             let dst = parse_reg(parts.get(1).ok_or("LOADBOOL missing dst")?)?;
-            let val = parts.get(2).ok_or("LOADBOOL missing val")?.trim_end_matches(',') == "true";
+            let val = parts
+                .get(2)
+                .ok_or("LOADBOOL missing val")?
+                .trim_end_matches(',')
+                == "true";
             Ok(Some(Instruction::LoadBool { dst, val }))
         }
         "LOADINT" => {
             let dst = parse_reg(parts.get(1).ok_or("LOADINT missing dst")?)?;
-            let val = parts.get(2).ok_or("LOADINT missing val")?.trim_end_matches(',').parse::<i32>().map_err(|e| e.to_string())?;
+            let val = parts
+                .get(2)
+                .ok_or("LOADINT missing val")?
+                .trim_end_matches(',')
+                .parse::<i32>()
+                .map_err(|e| e.to_string())?;
             Ok(Some(Instruction::LoadInt { dst, val }))
         }
         "LOADK" => {
@@ -284,21 +309,25 @@ fn parse_instruction_line(line: &str) -> Result<Option<Instruction>, String> {
         }
         "GETTABLE" => {
             let dst = parse_reg(parts.get(1).ok_or("GETTABLE missing dst")?)?;
-            let (table, key) = parse_table_and_key(parts.get(2).ok_or("GETTABLE missing table[key]")?)?;
+            let (table, key) =
+                parse_table_and_key(parts.get(2).ok_or("GETTABLE missing table[key]")?)?;
             Ok(Some(Instruction::GetTable { dst, table, key }))
         }
         "SETTABLE" => {
-            let (table, key) = parse_table_and_key(parts.get(1).ok_or("SETTABLE missing table[key]")?)?;
+            let (table, key) =
+                parse_table_and_key(parts.get(1).ok_or("SETTABLE missing table[key]")?)?;
             let val = parse_reg(parts.get(2).ok_or("SETTABLE missing val")?)?;
             Ok(Some(Instruction::SetTable { table, key, val }))
         }
         "GETTABLEK" => {
             let dst = parse_reg(parts.get(1).ok_or("GETTABLEK missing dst")?)?;
-            let (table, key_k) = parse_table_and_const_key(parts.get(2).ok_or("GETTABLEK missing table[key_k]")?)?;
+            let (table, key_k) =
+                parse_table_and_const_key(parts.get(2).ok_or("GETTABLEK missing table[key_k]")?)?;
             Ok(Some(Instruction::GetTableK { dst, table, key_k }))
         }
         "SETTABLEK" => {
-            let (table, key_k) = parse_table_and_const_key(parts.get(1).ok_or("SETTABLEK missing table[key_k]")?)?;
+            let (table, key_k) =
+                parse_table_and_const_key(parts.get(1).ok_or("SETTABLEK missing table[key_k]")?)?;
             let val = parse_reg(parts.get(2).ok_or("SETTABLEK missing val")?)?;
             Ok(Some(Instruction::SetTableK { table, key_k, val }))
         }
@@ -429,16 +458,45 @@ fn parse_instruction_line(line: &str) -> Result<Option<Instruction>, String> {
             let offset_token = if parts.len() >= 5 && parts[3] == "offset" {
                 parts[4]
             } else {
-                parts.get(3).ok_or_else(|| format!("{} missing offset", op))?
+                parts
+                    .get(3)
+                    .ok_or_else(|| format!("{} missing offset", op))?
             };
-            let jump_if_false = offset_token.trim_end_matches(',').parse::<i16>().map_err(|e| e.to_string())?;
+            let jump_if_false = offset_token
+                .trim_end_matches(',')
+                .parse::<i16>()
+                .map_err(|e| e.to_string())?;
             let inst = match op {
-                "EQ" => Instruction::Eq { a, b, jump_if_false },
-                "NE" => Instruction::Ne { a, b, jump_if_false },
-                "LT" => Instruction::Lt { a, b, jump_if_false },
-                "LE" => Instruction::Le { a, b, jump_if_false },
-                "GT" => Instruction::Gt { a, b, jump_if_false },
-                "GE" => Instruction::Ge { a, b, jump_if_false },
+                "EQ" => Instruction::Eq {
+                    a,
+                    b,
+                    jump_if_false,
+                },
+                "NE" => Instruction::Ne {
+                    a,
+                    b,
+                    jump_if_false,
+                },
+                "LT" => Instruction::Lt {
+                    a,
+                    b,
+                    jump_if_false,
+                },
+                "LE" => Instruction::Le {
+                    a,
+                    b,
+                    jump_if_false,
+                },
+                "GT" => Instruction::Gt {
+                    a,
+                    b,
+                    jump_if_false,
+                },
+                "GE" => Instruction::Ge {
+                    a,
+                    b,
+                    jump_if_false,
+                },
                 _ => unreachable!(),
             };
             Ok(Some(inst))
@@ -450,7 +508,10 @@ fn parse_instruction_line(line: &str) -> Result<Option<Instruction>, String> {
             } else {
                 parts.get(2).ok_or("TEST missing offset")?
             };
-            let jump_if_false = offset_token.trim_end_matches(',').parse::<i16>().map_err(|e| e.to_string())?;
+            let jump_if_false = offset_token
+                .trim_end_matches(',')
+                .parse::<i16>()
+                .map_err(|e| e.to_string())?;
             Ok(Some(Instruction::Test { reg, jump_if_false }))
         }
         "JUMP" => {
@@ -459,20 +520,39 @@ fn parse_instruction_line(line: &str) -> Result<Option<Instruction>, String> {
             } else {
                 parts.get(1).ok_or("JUMP missing offset")?
             };
-            let offset = offset_token.trim_end_matches(',').parse::<i16>().map_err(|e| e.to_string())?;
+            let offset = offset_token
+                .trim_end_matches(',')
+                .parse::<i16>()
+                .map_err(|e| e.to_string())?;
             Ok(Some(Instruction::Jump { offset }))
         }
         "CALL" => {
             let callee = parse_reg(parts.get(1).ok_or("CALL missing callee")?)?;
             let argc = if parts.len() >= 4 && parts[2] == "argc" {
-                parts[3].trim_end_matches(',').parse::<u8>().map_err(|e| e.to_string())?
+                parts[3]
+                    .trim_end_matches(',')
+                    .parse::<u8>()
+                    .map_err(|e| e.to_string())?
             } else {
-                parts.get(2).ok_or("CALL missing argc")?.trim_end_matches(',').parse::<u8>().map_err(|e| e.to_string())?
+                parts
+                    .get(2)
+                    .ok_or("CALL missing argc")?
+                    .trim_end_matches(',')
+                    .parse::<u8>()
+                    .map_err(|e| e.to_string())?
             };
             let retc = if parts.len() >= 6 && parts[4] == "retc" {
-                parts[5].trim_end_matches(',').parse::<u8>().map_err(|e| e.to_string())?
+                parts[5]
+                    .trim_end_matches(',')
+                    .parse::<u8>()
+                    .map_err(|e| e.to_string())?
             } else {
-                parts.get(3).ok_or("CALL missing retc")?.trim_end_matches(',').parse::<u8>().map_err(|e| e.to_string())?
+                parts
+                    .get(3)
+                    .ok_or("CALL missing retc")?
+                    .trim_end_matches(',')
+                    .parse::<u8>()
+                    .map_err(|e| e.to_string())?
             };
             Ok(Some(Instruction::Call { callee, argc, retc }))
         }
@@ -500,9 +580,17 @@ fn parse_instruction_line(line: &str) -> Result<Option<Instruction>, String> {
         "VARARG" => {
             let dst = parse_reg(parts.get(1).ok_or("VARARG missing dst")?)?;
             let count = if parts.len() >= 4 && parts[2] == "count" {
-                parts[3].trim_end_matches(',').parse::<u8>().map_err(|e| e.to_string())?
+                parts[3]
+                    .trim_end_matches(',')
+                    .parse::<u8>()
+                    .map_err(|e| e.to_string())?
             } else {
-                parts.get(2).ok_or("VARARG missing count")?.trim_end_matches(',').parse::<u8>().map_err(|e| e.to_string())?
+                parts
+                    .get(2)
+                    .ok_or("VARARG missing count")?
+                    .trim_end_matches(',')
+                    .parse::<u8>()
+                    .map_err(|e| e.to_string())?
             };
             Ok(Some(Instruction::Vararg { dst, count }))
         }
@@ -513,7 +601,10 @@ fn parse_instruction_line(line: &str) -> Result<Option<Instruction>, String> {
             } else {
                 parts.get(2).ok_or("FORPREP missing offset")?
             };
-            let jump = offset_token.trim_end_matches(',').parse::<i16>().map_err(|e| e.to_string())?;
+            let jump = offset_token
+                .trim_end_matches(',')
+                .parse::<i16>()
+                .map_err(|e| e.to_string())?;
             Ok(Some(Instruction::ForPrep { base, jump }))
         }
         "FORLOOP" => {
@@ -523,30 +614,54 @@ fn parse_instruction_line(line: &str) -> Result<Option<Instruction>, String> {
             } else {
                 parts.get(2).ok_or("FORLOOP missing offset")?
             };
-            let jump = offset_token.trim_end_matches(',').parse::<i16>().map_err(|e| e.to_string())?;
+            let jump = offset_token
+                .trim_end_matches(',')
+                .parse::<i16>()
+                .map_err(|e| e.to_string())?;
             Ok(Some(Instruction::ForLoop { base, jump }))
         }
         "SETLIST" => {
             let table = parse_reg(parts.get(1).ok_or("SETLIST missing table")?)?;
             let base = parse_reg(parts.get(2).ok_or("SETLIST missing base")?)?;
             let count = if parts.len() >= 5 && parts[3] == "count" {
-                parts[4].trim_end_matches(',').parse::<u8>().map_err(|e| e.to_string())?
+                parts[4]
+                    .trim_end_matches(',')
+                    .parse::<u8>()
+                    .map_err(|e| e.to_string())?
             } else {
-                parts.get(3).ok_or("SETLIST missing count")?.trim_end_matches(',').parse::<u8>().map_err(|e| e.to_string())?
+                parts
+                    .get(3)
+                    .ok_or("SETLIST missing count")?
+                    .trim_end_matches(',')
+                    .parse::<u8>()
+                    .map_err(|e| e.to_string())?
             };
             Ok(Some(Instruction::SetList { table, base, count }))
         }
         "TFORCALL" => {
             let base = parse_reg(parts.get(1).ok_or("TFORCALL missing base")?)?;
-            let retc = parts.get(2).ok_or("TFORCALL missing retc")?.trim_end_matches(',').parse::<u8>().map_err(|e| e.to_string())?;
+            let retc = parts
+                .get(2)
+                .ok_or("TFORCALL missing retc")?
+                .trim_end_matches(',')
+                .parse::<u8>()
+                .map_err(|e| e.to_string())?;
             Ok(Some(Instruction::TForCall { base, retc }))
         }
         "TFORLOOP" => {
             let base = parse_reg(parts.get(1).ok_or("TFORLOOP missing base")?)?;
-            let jump = parts.get(2).ok_or("TFORLOOP missing jump")?.trim_end_matches(',').parse::<i16>().map_err(|e| e.to_string())?;
+            let jump = parts
+                .get(2)
+                .ok_or("TFORLOOP missing jump")?
+                .trim_end_matches(',')
+                .parse::<i16>()
+                .map_err(|e| e.to_string())?;
             Ok(Some(Instruction::TForLoop { base, jump }))
         }
-        _ => Err(format!("unknown or unsupported instruction mnemonic: '{}'", op)),
+        _ => Err(format!(
+            "unknown or unsupported instruction mnemonic: '{}'",
+            op
+        )),
     }
 }
 
@@ -559,8 +674,12 @@ mod tests {
     fn test_disasm_and_parse_assembly() {
         let mut proto = Proto::new(Some("test_func".to_string()), 2, false);
         proto.max_registers = 8;
-        proto.instructions.push(Instruction::LoadInt { dst: 0, val: 42 });
-        proto.instructions.push(Instruction::Return { base: 0, count: 1 });
+        proto
+            .instructions
+            .push(Instruction::LoadInt { dst: 0, val: 42 });
+        proto
+            .instructions
+            .push(Instruction::Return { base: 0, count: 1 });
 
         let asm = disassemble_proto(&proto, 0);
         let parsed = parse_assembly(&asm).expect("failed to parse assembly");
@@ -572,9 +691,13 @@ mod tests {
     #[test]
     fn test_unescape_and_string_constants_roundtrip() {
         let mut proto = Proto::new(Some("string_test".to_string()), 0, false);
-        proto.constants.push(Constant::String("hello \"world\"\nnewline\\slash\ttab".to_string()));
+        proto.constants.push(Constant::String(
+            "hello \"world\"\nnewline\\slash\ttab".to_string(),
+        ));
         proto.instructions.push(Instruction::LoadK { dst: 0, k: 0 });
-        proto.instructions.push(Instruction::Return { base: 0, count: 1 });
+        proto
+            .instructions
+            .push(Instruction::Return { base: 0, count: 1 });
 
         let asm = disassemble_proto(&proto, 0);
         let parsed = parse_assembly(&asm).expect("failed to parse assembly with escaped string");
@@ -590,67 +713,190 @@ mod tests {
         let bad_asm = "0000 [L001] INVALID_OP R0, R1\n";
         let err = parse_assembly(bad_asm);
         assert!(err.is_err());
-        assert!(err.unwrap_err().contains("unknown or unsupported instruction mnemonic"));
+        assert!(
+            err.unwrap_err()
+                .contains("unknown or unsupported instruction mnemonic")
+        );
     }
 
     #[test]
     fn test_all_instruction_types_roundtrip() {
         let mut proto = Proto::new(Some("all_ops".to_string()), 3, true);
         proto.max_registers = 16;
-        proto.constants.push(Constant::String("test_str".to_string()));
+        proto
+            .constants
+            .push(Constant::String("test_str".to_string()));
 
         proto.instructions.push(Instruction::LoadNil { dst: 0 });
-        proto.instructions.push(Instruction::LoadBool { dst: 1, val: true });
-        proto.instructions.push(Instruction::LoadInt { dst: 2, val: -100 });
+        proto
+            .instructions
+            .push(Instruction::LoadBool { dst: 1, val: true });
+        proto
+            .instructions
+            .push(Instruction::LoadInt { dst: 2, val: -100 });
         proto.instructions.push(Instruction::LoadK { dst: 3, k: 0 });
-        proto.instructions.push(Instruction::Move { dst: 4, src: 0 });
-        proto.instructions.push(Instruction::GetGlobal { dst: 5, name_k: 0 });
-        proto.instructions.push(Instruction::SetGlobal { src: 5, name_k: 0 });
-        proto.instructions.push(Instruction::GetUpval { dst: 6, upval_idx: 1 });
-        proto.instructions.push(Instruction::SetUpval { src: 6, upval_idx: 1 });
+        proto
+            .instructions
+            .push(Instruction::Move { dst: 4, src: 0 });
+        proto
+            .instructions
+            .push(Instruction::GetGlobal { dst: 5, name_k: 0 });
+        proto
+            .instructions
+            .push(Instruction::SetGlobal { src: 5, name_k: 0 });
+        proto.instructions.push(Instruction::GetUpval {
+            dst: 6,
+            upval_idx: 1,
+        });
+        proto.instructions.push(Instruction::SetUpval {
+            src: 6,
+            upval_idx: 1,
+        });
         proto.instructions.push(Instruction::NewTable { dst: 7 });
-        proto.instructions.push(Instruction::GetTable { dst: 8, table: 7, key: 0 });
-        proto.instructions.push(Instruction::SetTable { table: 7, key: 0, val: 1 });
-        proto.instructions.push(Instruction::GetTableK { dst: 8, table: 7, key_k: 0 });
-        proto.instructions.push(Instruction::SetTableK { table: 7, key_k: 0, val: 1 });
-        proto.instructions.push(Instruction::AppendArray { table: 7, src: 1 });
-        proto.instructions.push(Instruction::Add { dst: 0, a: 1, b: 2 });
-        proto.instructions.push(Instruction::Sub { dst: 0, a: 1, b: 2 });
-        proto.instructions.push(Instruction::Mul { dst: 0, a: 1, b: 2 });
-        proto.instructions.push(Instruction::Div { dst: 0, a: 1, b: 2 });
-        proto.instructions.push(Instruction::IDiv { dst: 0, a: 1, b: 2 });
-        proto.instructions.push(Instruction::Mod { dst: 0, a: 1, b: 2 });
-        proto.instructions.push(Instruction::Pow { dst: 0, a: 1, b: 2 });
-        proto.instructions.push(Instruction::BitAnd { dst: 0, a: 1, b: 2 });
-        proto.instructions.push(Instruction::BitOr { dst: 0, a: 1, b: 2 });
-        proto.instructions.push(Instruction::BitXor { dst: 0, a: 1, b: 2 });
-        proto.instructions.push(Instruction::Shl { dst: 0, a: 1, b: 2 });
-        proto.instructions.push(Instruction::Shr { dst: 0, a: 1, b: 2 });
-        proto.instructions.push(Instruction::LShl { dst: 0, a: 1, b: 2 });
-        proto.instructions.push(Instruction::LShr { dst: 0, a: 1, b: 2 });
-        proto.instructions.push(Instruction::Concat { dst: 0, a: 1, b: 2 });
-        proto.instructions.push(Instruction::Coalesce { dst: 0, a: 1, b: 2 });
+        proto.instructions.push(Instruction::GetTable {
+            dst: 8,
+            table: 7,
+            key: 0,
+        });
+        proto.instructions.push(Instruction::SetTable {
+            table: 7,
+            key: 0,
+            val: 1,
+        });
+        proto.instructions.push(Instruction::GetTableK {
+            dst: 8,
+            table: 7,
+            key_k: 0,
+        });
+        proto.instructions.push(Instruction::SetTableK {
+            table: 7,
+            key_k: 0,
+            val: 1,
+        });
+        proto
+            .instructions
+            .push(Instruction::AppendArray { table: 7, src: 1 });
+        proto
+            .instructions
+            .push(Instruction::Add { dst: 0, a: 1, b: 2 });
+        proto
+            .instructions
+            .push(Instruction::Sub { dst: 0, a: 1, b: 2 });
+        proto
+            .instructions
+            .push(Instruction::Mul { dst: 0, a: 1, b: 2 });
+        proto
+            .instructions
+            .push(Instruction::Div { dst: 0, a: 1, b: 2 });
+        proto
+            .instructions
+            .push(Instruction::IDiv { dst: 0, a: 1, b: 2 });
+        proto
+            .instructions
+            .push(Instruction::Mod { dst: 0, a: 1, b: 2 });
+        proto
+            .instructions
+            .push(Instruction::Pow { dst: 0, a: 1, b: 2 });
+        proto
+            .instructions
+            .push(Instruction::BitAnd { dst: 0, a: 1, b: 2 });
+        proto
+            .instructions
+            .push(Instruction::BitOr { dst: 0, a: 1, b: 2 });
+        proto
+            .instructions
+            .push(Instruction::BitXor { dst: 0, a: 1, b: 2 });
+        proto
+            .instructions
+            .push(Instruction::Shl { dst: 0, a: 1, b: 2 });
+        proto
+            .instructions
+            .push(Instruction::Shr { dst: 0, a: 1, b: 2 });
+        proto
+            .instructions
+            .push(Instruction::LShl { dst: 0, a: 1, b: 2 });
+        proto
+            .instructions
+            .push(Instruction::LShr { dst: 0, a: 1, b: 2 });
+        proto
+            .instructions
+            .push(Instruction::Concat { dst: 0, a: 1, b: 2 });
+        proto
+            .instructions
+            .push(Instruction::Coalesce { dst: 0, a: 1, b: 2 });
         proto.instructions.push(Instruction::Unm { dst: 0, src: 1 });
         proto.instructions.push(Instruction::Not { dst: 0, src: 1 });
         proto.instructions.push(Instruction::Len { dst: 0, src: 1 });
-        proto.instructions.push(Instruction::BitNot { dst: 0, src: 1 });
-        proto.instructions.push(Instruction::Eq { a: 0, b: 1, jump_if_false: 3 });
-        proto.instructions.push(Instruction::Ne { a: 0, b: 1, jump_if_false: -2 });
-        proto.instructions.push(Instruction::Lt { a: 0, b: 1, jump_if_false: 1 });
-        proto.instructions.push(Instruction::Le { a: 0, b: 1, jump_if_false: 1 });
-        proto.instructions.push(Instruction::Gt { a: 0, b: 1, jump_if_false: 1 });
-        proto.instructions.push(Instruction::Ge { a: 0, b: 1, jump_if_false: 1 });
-        proto.instructions.push(Instruction::Test { reg: 0, jump_if_false: 2 });
+        proto
+            .instructions
+            .push(Instruction::BitNot { dst: 0, src: 1 });
+        proto.instructions.push(Instruction::Eq {
+            a: 0,
+            b: 1,
+            jump_if_false: 3,
+        });
+        proto.instructions.push(Instruction::Ne {
+            a: 0,
+            b: 1,
+            jump_if_false: -2,
+        });
+        proto.instructions.push(Instruction::Lt {
+            a: 0,
+            b: 1,
+            jump_if_false: 1,
+        });
+        proto.instructions.push(Instruction::Le {
+            a: 0,
+            b: 1,
+            jump_if_false: 1,
+        });
+        proto.instructions.push(Instruction::Gt {
+            a: 0,
+            b: 1,
+            jump_if_false: 1,
+        });
+        proto.instructions.push(Instruction::Ge {
+            a: 0,
+            b: 1,
+            jump_if_false: 1,
+        });
+        proto.instructions.push(Instruction::Test {
+            reg: 0,
+            jump_if_false: 2,
+        });
         proto.instructions.push(Instruction::Jump { offset: -5 });
-        proto.instructions.push(Instruction::Call { callee: 0, argc: 2, retc: 1 });
-        proto.instructions.push(Instruction::Closure { dst: 0, proto_idx: 1 });
-        proto.instructions.push(Instruction::Vararg { dst: 0, count: 2 });
-        proto.instructions.push(Instruction::ForPrep { base: 0, jump: 4 });
-        proto.instructions.push(Instruction::ForLoop { base: 0, jump: -3 });
-        proto.instructions.push(Instruction::SetList { table: 7, base: 0, count: 3 });
-        proto.instructions.push(Instruction::TForCall { base: 0, retc: 2 });
-        proto.instructions.push(Instruction::TForLoop { base: 0, jump: 5 });
-        proto.instructions.push(Instruction::Return { base: 0, count: 1 });
+        proto.instructions.push(Instruction::Call {
+            callee: 0,
+            argc: 2,
+            retc: 1,
+        });
+        proto.instructions.push(Instruction::Closure {
+            dst: 0,
+            proto_idx: 1,
+        });
+        proto
+            .instructions
+            .push(Instruction::Vararg { dst: 0, count: 2 });
+        proto
+            .instructions
+            .push(Instruction::ForPrep { base: 0, jump: 4 });
+        proto
+            .instructions
+            .push(Instruction::ForLoop { base: 0, jump: -3 });
+        proto.instructions.push(Instruction::SetList {
+            table: 7,
+            base: 0,
+            count: 3,
+        });
+        proto
+            .instructions
+            .push(Instruction::TForCall { base: 0, retc: 2 });
+        proto
+            .instructions
+            .push(Instruction::TForLoop { base: 0, jump: 5 });
+        proto
+            .instructions
+            .push(Instruction::Return { base: 0, count: 1 });
 
         let asm = disassemble_proto(&proto, 0);
         let parsed = parse_assembly(&asm).expect("failed to parse all instructions");

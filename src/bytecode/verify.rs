@@ -16,9 +16,17 @@ impl std::fmt::Display for BytecodeVerifyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let name = self.proto_name.as_deref().unwrap_or("<anonymous>");
         if let Some(pc) = self.pc {
-            write!(f, "bytecode verification failed in '{}' at pc [{}]: {}", name, pc, self.message)
+            write!(
+                f,
+                "bytecode verification failed in '{}' at pc [{}]: {}",
+                name, pc, self.message
+            )
         } else {
-            write!(f, "bytecode verification failed in '{}': {}", name, self.message)
+            write!(
+                f,
+                "bytecode verification failed in '{}': {}",
+                name, self.message
+            )
         }
     }
 }
@@ -34,7 +42,10 @@ pub fn verify_proto(proto: &Proto) -> Result<(), BytecodeVerifyError> {
 fn verify_proto_depth(proto: &Proto, depth: usize) -> Result<(), BytecodeVerifyError> {
     if depth >= MAX_VERIFY_DEPTH {
         return Err(BytecodeVerifyError {
-            message: format!("nested prototype depth limit ({}) exceeded", MAX_VERIFY_DEPTH),
+            message: format!(
+                "nested prototype depth limit ({}) exceeded",
+                MAX_VERIFY_DEPTH
+            ),
             proto_name: proto.name.clone(),
             pc: None,
         });
@@ -51,7 +62,10 @@ fn verify_proto_depth(proto: &Proto, depth: usize) -> Result<(), BytecodeVerifyE
         // all registers when max_registers==0. Now always enforce the limit.
         if reg >= proto.max_registers {
             return Err(BytecodeVerifyError {
-                message: format!("register R{} exceeds prototype max_registers ({})", reg, proto.max_registers),
+                message: format!(
+                    "register R{} exceeds prototype max_registers ({})",
+                    reg, proto.max_registers
+                ),
                 proto_name: name.clone(),
                 pc: Some(pc),
             });
@@ -62,7 +76,10 @@ fn verify_proto_depth(proto: &Proto, depth: usize) -> Result<(), BytecodeVerifyE
     let check_const = |k: u16, pc: usize| -> Result<(), BytecodeVerifyError> {
         if k as usize >= num_constants {
             return Err(BytecodeVerifyError {
-                message: format!("constant index K{} exceeds constant pool size ({})", k, num_constants),
+                message: format!(
+                    "constant index K{} exceeds constant pool size ({})",
+                    k, num_constants
+                ),
                 proto_name: name.clone(),
                 pc: Some(pc),
             });
@@ -74,7 +91,10 @@ fn verify_proto_depth(proto: &Proto, depth: usize) -> Result<(), BytecodeVerifyE
         let target_ip = pc as isize + 1 + offset as isize;
         if target_ip < 0 || target_ip > num_insts as isize {
             return Err(BytecodeVerifyError {
-                message: format!("jump offset {} targets invalid instruction index {} (total: {})", offset, target_ip, num_insts),
+                message: format!(
+                    "jump offset {} targets invalid instruction index {} (total: {})",
+                    offset, target_ip, num_insts
+                ),
                 proto_name: name.clone(),
                 pc: Some(pc),
             });
@@ -87,7 +107,12 @@ fn verify_proto_depth(proto: &Proto, depth: usize) -> Result<(), BytecodeVerifyE
         let top = base as usize + span;
         if top > proto.max_registers as usize {
             return Err(BytecodeVerifyError {
-                message: format!("register range R{}..R{} exceeds prototype max_registers ({})", base, top - 1, proto.max_registers),
+                message: format!(
+                    "register range R{}..R{} exceeds prototype max_registers ({})",
+                    base,
+                    top - 1,
+                    proto.max_registers
+                ),
                 proto_name: name.clone(),
                 pc: Some(pc),
             });
@@ -189,7 +214,10 @@ fn verify_proto_depth(proto: &Proto, depth: usize) -> Result<(), BytecodeVerifyE
                 check_reg(*dst, pc)?;
                 if *upval_idx as usize >= num_upvalues {
                     return Err(BytecodeVerifyError {
-                        message: format!("upvalue index {} exceeds prototype upvalues count ({})", upval_idx, num_upvalues),
+                        message: format!(
+                            "upvalue index {} exceeds prototype upvalues count ({})",
+                            upval_idx, num_upvalues
+                        ),
                         proto_name: name.clone(),
                         pc: Some(pc),
                     });
@@ -199,7 +227,10 @@ fn verify_proto_depth(proto: &Proto, depth: usize) -> Result<(), BytecodeVerifyE
                 check_reg(*src, pc)?;
                 if *upval_idx as usize >= num_upvalues {
                     return Err(BytecodeVerifyError {
-                        message: format!("upvalue index {} exceeds prototype upvalues count ({})", upval_idx, num_upvalues),
+                        message: format!(
+                            "upvalue index {} exceeds prototype upvalues count ({})",
+                            upval_idx, num_upvalues
+                        ),
                         proto_name: name.clone(),
                         pc: Some(pc),
                     });
@@ -209,7 +240,10 @@ fn verify_proto_depth(proto: &Proto, depth: usize) -> Result<(), BytecodeVerifyE
                 check_reg(*dst, pc)?;
                 if *proto_idx as usize >= num_protos {
                     return Err(BytecodeVerifyError {
-                        message: format!("closure prototype index {} exceeds protos count ({})", proto_idx, num_protos),
+                        message: format!(
+                            "closure prototype index {} exceeds protos count ({})",
+                            proto_idx, num_protos
+                        ),
                         proto_name: name.clone(),
                         pc: Some(pc),
                     });
@@ -247,7 +281,10 @@ fn verify_proto_depth(proto: &Proto, depth: usize) -> Result<(), BytecodeVerifyE
                 let max_top = args_top.max(rets_top);
                 if max_top > proto.max_registers as usize {
                     return Err(BytecodeVerifyError {
-                        message: format!("call callee R{} with argc {} / retc {} exceeds max_registers ({})", callee, argc, retc, proto.max_registers),
+                        message: format!(
+                            "call callee R{} with argc {} / retc {} exceeds max_registers ({})",
+                            callee, argc, retc, proto.max_registers
+                        ),
                         proto_name: name.clone(),
                         pc: Some(pc),
                     });
@@ -272,12 +309,36 @@ fn verify_proto_depth(proto: &Proto, depth: usize) -> Result<(), BytecodeVerifyE
                 check_reg(*reg, pc)?;
                 check_jump(*jump_if_false, pc)?;
             }
-            Instruction::Eq { a, b, jump_if_false }
-            | Instruction::Ne { a, b, jump_if_false }
-            | Instruction::Lt { a, b, jump_if_false }
-            | Instruction::Le { a, b, jump_if_false }
-            | Instruction::Gt { a, b, jump_if_false }
-            | Instruction::Ge { a, b, jump_if_false } => {
+            Instruction::Eq {
+                a,
+                b,
+                jump_if_false,
+            }
+            | Instruction::Ne {
+                a,
+                b,
+                jump_if_false,
+            }
+            | Instruction::Lt {
+                a,
+                b,
+                jump_if_false,
+            }
+            | Instruction::Le {
+                a,
+                b,
+                jump_if_false,
+            }
+            | Instruction::Gt {
+                a,
+                b,
+                jump_if_false,
+            }
+            | Instruction::Ge {
+                a,
+                b,
+                jump_if_false,
+            } => {
                 check_reg(*a, pc)?;
                 check_reg(*b, pc)?;
                 check_jump(*jump_if_false, pc)?;
@@ -312,4 +373,3 @@ fn verify_proto_depth(proto: &Proto, depth: usize) -> Result<(), BytecodeVerifyE
 
     Ok(())
 }
-

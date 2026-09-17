@@ -10,7 +10,11 @@ pub fn fold_builtin_call(callee: &Expr, args: &[Expr]) -> Option<Expr> {
     fold_builtin_call_scoped(callee, args, &std::collections::HashSet::new())
 }
 
-pub fn fold_builtin_call_scoped(callee: &Expr, args: &[Expr], shadowed: &std::collections::HashSet<String>) -> Option<Expr> {
+pub fn fold_builtin_call_scoped(
+    callee: &Expr,
+    args: &[Expr],
+    shadowed: &std::collections::HashSet<String>,
+) -> Option<Expr> {
     let (mod_name, func_name) = match callee {
         Expr::Member { object, field } => match &**object {
             Expr::Variable(name) => {
@@ -260,7 +264,10 @@ mod tests {
         };
         let res = fold_builtin_call(
             &band_call,
-            &[Expr::Literal("15".to_string()), Expr::Literal("7".to_string())],
+            &[
+                Expr::Literal("15".to_string()),
+                Expr::Literal("7".to_string()),
+            ],
         );
         assert_eq!(res, Some(Expr::Literal("7".to_string())));
 

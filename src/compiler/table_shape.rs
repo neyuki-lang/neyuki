@@ -136,9 +136,18 @@ mod tests {
     #[test]
     fn test_table_shape_pure_array() {
         let entries = vec![
-            TableEntry { key: None, value: Expr::Literal("1".to_string()) },
-            TableEntry { key: None, value: Expr::Literal("2".to_string()) },
-            TableEntry { key: None, value: Expr::Literal("3".to_string()) },
+            TableEntry {
+                key: None,
+                value: Expr::Literal("1".to_string()),
+            },
+            TableEntry {
+                key: None,
+                value: Expr::Literal("2".to_string()),
+            },
+            TableEntry {
+                key: None,
+                value: Expr::Literal("3".to_string()),
+            },
         ];
         let shape = TableShape::analyze(&entries);
         assert_eq!(shape.kind, TableShapeKind::PureArray(3));
@@ -150,8 +159,14 @@ mod tests {
     #[test]
     fn test_table_shape_record() {
         let entries = vec![
-            TableEntry { key: Some("name".to_string()), value: Expr::Str("Neyuki".to_string()) },
-            TableEntry { key: Some("version".to_string()), value: Expr::Literal("1".to_string()) },
+            TableEntry {
+                key: Some("name".to_string()),
+                value: Expr::Str("Neyuki".to_string()),
+            },
+            TableEntry {
+                key: Some("version".to_string()),
+                value: Expr::Literal("1".to_string()),
+            },
         ];
         let shape = TableShape::analyze(&entries);
         assert_eq!(
@@ -166,8 +181,14 @@ mod tests {
     #[test]
     fn test_table_shape_duplicate_keys() {
         let entries = vec![
-            TableEntry { key: Some("a".to_string()), value: Expr::Literal("1".to_string()) },
-            TableEntry { key: Some("a".to_string()), value: Expr::Literal("2".to_string()) },
+            TableEntry {
+                key: Some("a".to_string()),
+                value: Expr::Literal("1".to_string()),
+            },
+            TableEntry {
+                key: Some("a".to_string()),
+                value: Expr::Literal("2".to_string()),
+            },
         ];
         let shape = TableShape::analyze(&entries);
         assert!(shape.has_duplicate_keys);

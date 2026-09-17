@@ -1,7 +1,7 @@
 // Execution frame
 
-use std::rc::Rc;
 use crate::vm::value::{Value, VmClosure};
+use std::rc::Rc;
 
 pub struct CallFrame {
     pub closure: Rc<VmClosure>,

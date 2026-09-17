@@ -7,8 +7,8 @@ pub mod machine;
 pub mod ops;
 pub mod value;
 
-use std::fs;
 pub use machine::VM;
+use std::fs;
 pub use value::Value;
 
 use crate::bytecode::deserialize;
@@ -22,6 +22,7 @@ pub fn execute_bytecode(bytes: &[u8]) -> Result<Value, String> {
 
 // Execute compiled bytecode file
 pub fn execute_bytecode_file(path: &str) -> Result<Value, String> {
-    let bytes = fs::read(path).map_err(|e| format!("failed to read bytecode file {}: {}", path, e))?;
+    let bytes =
+        fs::read(path).map_err(|e| format!("failed to read bytecode file {}: {}", path, e))?;
     execute_bytecode(&bytes)
 }

@@ -39,7 +39,10 @@ pub fn constant_propagation(module: &mut IrModule) {
 
                 if let Some(folded_val) = folded {
                     const_map.insert(dst, folded_val.clone());
-                    optimized_insts.push(IrInst::LoadConst { dst, val: folded_val });
+                    optimized_insts.push(IrInst::LoadConst {
+                        dst,
+                        val: folded_val,
+                    });
                 } else {
                     optimized_insts.push(IrInst::BinOp { dst, op, lhs, rhs });
                 }

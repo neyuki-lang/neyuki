@@ -24,12 +24,18 @@ fn os_time(_vm: &mut VM, _args: &[Value]) -> Result<Vec<Value>, String> {
 }
 
 fn os_difftime(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let t2 = match args.first().ok_or_else(|| "os.difftime expects 2 arguments".to_string())? {
+    let t2 = match args
+        .first()
+        .ok_or_else(|| "os.difftime expects 2 arguments".to_string())?
+    {
         Value::Int(i) => i.to_f64().unwrap_or(0.0),
         Value::Float(f) => *f,
         _ => return Err("os.difftime expects numbers".to_string()),
     };
-    let t1 = match args.get(1).ok_or_else(|| "os.difftime expects 2 arguments".to_string())? {
+    let t1 = match args
+        .get(1)
+        .ok_or_else(|| "os.difftime expects 2 arguments".to_string())?
+    {
         Value::Int(i) => i.to_f64().unwrap_or(0.0),
         Value::Float(f) => *f,
         _ => return Err("os.difftime expects numbers".to_string()),
@@ -41,14 +47,17 @@ fn os_difftime(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 // Only explicitly permitted non-sensitive environment variables can be accessed.
 pub fn is_env_var_allowed(name: &str) -> bool {
     const ALLOWED_ENV_VARS: &[&str] = &[
-        "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL",
-        "LC_CTYPE", "TERM", "TMPDIR", "TMP", "TEMP", "PWD",
+        "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR",
+        "TMP", "TEMP", "PWD",
     ];
     ALLOWED_ENV_VARS.contains(&name)
 }
 
 fn os_getenv(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let varname = match args.first().ok_or_else(|| "os.getenv expects variable name".to_string())? {
+    let varname = match args
+        .first()
+        .ok_or_else(|| "os.getenv expects variable name".to_string())?
+    {
         Value::String(s) => s,
         _ => return Err("os.getenv expects string".to_string()),
     };

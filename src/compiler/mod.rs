@@ -7,13 +7,13 @@ pub mod cost_model;
 pub mod ir;
 pub mod table_shape;
 
-use std::fs;
 use crate::bytecode::proto::Proto;
 use crate::bytecode::serialize::serialize;
 use crate::parser::{Param, Parser, Stmt};
+use std::fs;
 
 #[allow(unused_imports)]
-pub use codegen::{Compiler, CompileError};
+pub use codegen::{CompileError, Compiler};
 pub use constant_fold::fold_program;
 
 // Parse Neyuki source code into AST statements
@@ -97,8 +97,14 @@ pub fn compile_to_proto(statements: &[Stmt]) -> Proto {
             eprintln!("{}", err);
             // Return a minimal proto that immediately returns nil
             let mut p = Proto::new(Some("error".to_string()), 0, false);
-            p.emit(crate::bytecode::instruction::Instruction::LoadNil { dst: 0 }, 0);
-            p.emit(crate::bytecode::instruction::Instruction::Return { base: 0, count: 1 }, 0);
+            p.emit(
+                crate::bytecode::instruction::Instruction::LoadNil { dst: 0 },
+                0,
+            );
+            p.emit(
+                crate::bytecode::instruction::Instruction::Return { base: 0, count: 1 },
+                0,
+            );
             p.max_registers = 1;
             p
         }

@@ -12,7 +12,7 @@ pub use deserialize::deserialize;
 #[allow(unused_imports)]
 pub use disasm::disassemble_proto;
 #[allow(unused_imports)]
-pub use format::{BytecodeHeader, BYTECODE_VERSION, MAGIC};
+pub use format::{BYTECODE_VERSION, BytecodeHeader, MAGIC};
 #[allow(unused_imports)]
 pub use instruction::Instruction;
 #[allow(unused_imports)]
@@ -22,4 +22,4 @@ pub use proto::{Constant, Proto, UpvalueDesc};
 #[allow(unused_imports)]
 pub use serialize::serialize;
 #[allow(unused_imports)]
-pub use verify::{verify_proto, BytecodeVerifyError};
+pub use verify::{BytecodeVerifyError, verify_proto};

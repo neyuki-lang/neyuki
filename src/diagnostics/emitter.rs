@@ -37,7 +37,12 @@ pub fn render_report(source_name: &str, source: &str, diagnostics: &[Diagnostic]
             // Show source line if within bounds
             if line_idx >= 1 && line_idx <= lines.len() {
                 let line_content = lines[line_idx - 1];
-                out.push_str(&format!("{:pad$} | {}\n", line_idx, line_content, pad = pad));
+                out.push_str(&format!(
+                    "{:pad$} | {}\n",
+                    line_idx,
+                    line_content,
+                    pad = pad
+                ));
 
                 // Caret underline
                 let start_col = col_idx.saturating_sub(1);
@@ -73,10 +78,21 @@ pub fn render_report(source_name: &str, source: &str, diagnostics: &[Diagnostic]
             if line_idx >= 1 && line_idx <= lines.len() {
                 let pad = line_idx.to_string().len();
                 let line_content = lines[line_idx - 1];
-                out.push_str(&format!("{:pad$} | {}\n", line_idx, line_content, pad = pad));
+                out.push_str(&format!(
+                    "{:pad$} | {}\n",
+                    line_idx,
+                    line_content,
+                    pad = pad
+                ));
                 let col = sec.span.start.column.max(1) as usize - 1;
                 let spaces = " ".repeat(col);
-                out.push_str(&format!("{:pad$} | {}--- {}\n", "", spaces, sec.message, pad = pad));
+                out.push_str(&format!(
+                    "{:pad$} | {}--- {}\n",
+                    "",
+                    spaces,
+                    sec.message,
+                    pad = pad
+                ));
             }
         }
 

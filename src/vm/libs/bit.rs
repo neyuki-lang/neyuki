@@ -52,46 +52,68 @@ fn bit_bxor(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 }
 
 fn bit_bnot(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let val = args.first().ok_or_else(|| "bit.bnot expects 1 argument".to_string())?;
+    let val = args
+        .first()
+        .ok_or_else(|| "bit.bnot expects 1 argument".to_string())?;
     let u = to_u32(val)?;
     Ok(vec![Value::Int(BigInt::from(!u))])
 }
 
 fn bit_lshift(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let val = args.first().ok_or_else(|| "bit.lshift expects 2 arguments".to_string())?;
-    let disp = args.get(1).ok_or_else(|| "bit.lshift expects 2 arguments".to_string())?;
+    let val = args
+        .first()
+        .ok_or_else(|| "bit.lshift expects 2 arguments".to_string())?;
+    let disp = args
+        .get(1)
+        .ok_or_else(|| "bit.lshift expects 2 arguments".to_string())?;
     let u = to_u32(val)?;
     let s = to_u32(disp)? % 32;
     Ok(vec![Value::Int(BigInt::from(u << s))])
 }
 
 fn bit_rshift(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let val = args.first().ok_or_else(|| "bit.rshift expects 2 arguments".to_string())?;
-    let disp = args.get(1).ok_or_else(|| "bit.rshift expects 2 arguments".to_string())?;
+    let val = args
+        .first()
+        .ok_or_else(|| "bit.rshift expects 2 arguments".to_string())?;
+    let disp = args
+        .get(1)
+        .ok_or_else(|| "bit.rshift expects 2 arguments".to_string())?;
     let u = to_u32(val)?;
     let s = to_u32(disp)? % 32;
     Ok(vec![Value::Int(BigInt::from(u >> s))])
 }
 
 fn bit_arshift(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let val = args.first().ok_or_else(|| "bit.arshift expects 2 arguments".to_string())?;
-    let disp = args.get(1).ok_or_else(|| "bit.arshift expects 2 arguments".to_string())?;
+    let val = args
+        .first()
+        .ok_or_else(|| "bit.arshift expects 2 arguments".to_string())?;
+    let disp = args
+        .get(1)
+        .ok_or_else(|| "bit.arshift expects 2 arguments".to_string())?;
     let i = to_i32(val)?;
     let s = to_u32(disp)? % 32;
     Ok(vec![Value::Int(BigInt::from(i >> s))])
 }
 
 fn bit_rol(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let val = args.first().ok_or_else(|| "bit.rol expects 2 arguments".to_string())?;
-    let disp = args.get(1).ok_or_else(|| "bit.rol expects 2 arguments".to_string())?;
+    let val = args
+        .first()
+        .ok_or_else(|| "bit.rol expects 2 arguments".to_string())?;
+    let disp = args
+        .get(1)
+        .ok_or_else(|| "bit.rol expects 2 arguments".to_string())?;
     let u = to_u32(val)?;
     let s = to_u32(disp)? % 32;
     Ok(vec![Value::Int(BigInt::from(u.rotate_left(s)))])
 }
 
 fn bit_ror(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let val = args.first().ok_or_else(|| "bit.ror expects 2 arguments".to_string())?;
-    let disp = args.get(1).ok_or_else(|| "bit.ror expects 2 arguments".to_string())?;
+    let val = args
+        .first()
+        .ok_or_else(|| "bit.ror expects 2 arguments".to_string())?;
+    let disp = args
+        .get(1)
+        .ok_or_else(|| "bit.ror expects 2 arguments".to_string())?;
     let u = to_u32(val)?;
     let s = to_u32(disp)? % 32;
     Ok(vec![Value::Int(BigInt::from(u.rotate_right(s)))])
@@ -107,8 +129,12 @@ fn bit_btest(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 }
 
 fn bit_extract(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let val = args.first().ok_or_else(|| "bit.extract expects at least 2 arguments".to_string())?;
-    let field = args.get(1).ok_or_else(|| "bit.extract expects at least 2 arguments".to_string())?;
+    let val = args
+        .first()
+        .ok_or_else(|| "bit.extract expects at least 2 arguments".to_string())?;
+    let field = args
+        .get(1)
+        .ok_or_else(|| "bit.extract expects at least 2 arguments".to_string())?;
     let width = args.get(2);
     let u = to_u32(val)?;
     let f = to_u32(field)?;
@@ -122,9 +148,15 @@ fn bit_extract(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 }
 
 fn bit_replace(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let val = args.first().ok_or_else(|| "bit.replace expects at least 3 arguments".to_string())?;
-    let rep = args.get(1).ok_or_else(|| "bit.replace expects at least 3 arguments".to_string())?;
-    let field = args.get(2).ok_or_else(|| "bit.replace expects at least 3 arguments".to_string())?;
+    let val = args
+        .first()
+        .ok_or_else(|| "bit.replace expects at least 3 arguments".to_string())?;
+    let rep = args
+        .get(1)
+        .ok_or_else(|| "bit.replace expects at least 3 arguments".to_string())?;
+    let field = args
+        .get(2)
+        .ok_or_else(|| "bit.replace expects at least 3 arguments".to_string())?;
     let width = args.get(3);
     let u = to_u32(val)?;
     let v = to_u32(rep)?;
@@ -139,9 +171,15 @@ fn bit_replace(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 }
 
 fn bit_tohex(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let val = args.first().ok_or_else(|| "bit.tohex expects at least 1 argument".to_string())?;
+    let val = args
+        .first()
+        .ok_or_else(|| "bit.tohex expects at least 1 argument".to_string())?;
     let u = to_u32(val)?;
-    let n = if let Some(nv) = args.get(1) { to_i32(nv)? } else { 8 };
+    let n = if let Some(nv) = args.get(1) {
+        to_i32(nv)?
+    } else {
+        8
+    };
     if n.unsigned_abs() > 64 {
         return Err("bit.tohex: width out of range (-64..64)".to_string());
     }
@@ -152,11 +190,17 @@ fn bit_tohex(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     } else {
         format!("{:0width$x}", u, width = len)
     };
-    Ok(vec![Value::String(if n < 0 { res.to_uppercase() } else { res })])
+    Ok(vec![Value::String(if n < 0 {
+        res.to_uppercase()
+    } else {
+        res
+    })])
 }
 
 fn bit_tobit(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let val = args.first().ok_or_else(|| "bit.tobit expects 1 argument".to_string())?;
+    let val = args
+        .first()
+        .ok_or_else(|| "bit.tobit expects 1 argument".to_string())?;
     let i = to_i32(val)?;
     Ok(vec![Value::Int(BigInt::from(i))])
 }

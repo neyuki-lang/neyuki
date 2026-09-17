@@ -31,7 +31,10 @@ fn utf8_char(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     for (idx, arg) in args.iter().enumerate() {
         let code = match arg {
             Value::Int(i) => i.to_u32().ok_or_else(|| {
-                format!("bad argument #{} to 'utf8.char' (value out of range)", idx + 1)
+                format!(
+                    "bad argument #{} to 'utf8.char' (value out of range)",
+                    idx + 1
+                )
             })?,
             Value::Float(f) => *f as u32,
             _ => {
@@ -39,7 +42,7 @@ fn utf8_char(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
                     "bad argument #{} to 'utf8.char' (number expected, got {})",
                     idx + 1,
                     arg.type_name()
-                ))
+                ));
             }
         };
 
@@ -168,7 +171,10 @@ fn utf8_offset(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     };
 
     let i = match args.get(2) {
-        Some(Value::Int(v)) => v.to_isize().unwrap_or(if n >= 0 { 1 } else { s.len() as isize + 1 }),
+        Some(Value::Int(v)) => {
+            v.to_isize()
+                .unwrap_or(if n >= 0 { 1 } else { s.len() as isize + 1 })
+        }
         Some(Value::Float(f)) => *f as isize,
         _ => {
             if n >= 0 {
@@ -262,7 +268,9 @@ fn utf8_codes(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 
         if let Some(ch) = s[start_byte..].chars().next() {
             let next_pos = pos + ch.len_utf8();
-            state.borrow_mut().set_str("pos", Value::Int(BigInt::from(next_pos)));
+            state
+                .borrow_mut()
+                .set_str("pos", Value::Int(BigInt::from(next_pos)));
             Ok(vec![
                 Value::Int(BigInt::from(pos)),
                 Value::Int(BigInt::from(ch as u32)),

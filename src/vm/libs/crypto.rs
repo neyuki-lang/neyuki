@@ -33,7 +33,7 @@ pub fn sha256(msg: &[u8]) -> String {
     let mut h = H0;
     let mut w = [0u32; 64];
 
-    for chunk in bytes.chunks_exact(64) {
+    for chunk in bytes.as_chunks::<64>().0 {
         for (t, slot) in w.iter_mut().take(16).enumerate() {
             let i = t * 4;
             *slot = u32::from_be_bytes([chunk[i], chunk[i + 1], chunk[i + 2], chunk[i + 3]]);
@@ -41,7 +41,10 @@ pub fn sha256(msg: &[u8]) -> String {
         for t in 16..64 {
             let s0 = w[t - 15].rotate_right(7) ^ w[t - 15].rotate_right(18) ^ (w[t - 15] >> 3);
             let s1 = w[t - 2].rotate_right(17) ^ w[t - 2].rotate_right(19) ^ (w[t - 2] >> 10);
-            w[t] = w[t - 16].wrapping_add(s0).wrapping_add(w[t - 7]).wrapping_add(s1);
+            w[t] = w[t - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[t - 7])
+                .wrapping_add(s1);
         }
 
         let mut a = h[0];

@@ -88,7 +88,10 @@ impl CostModel {
 
             Instruction::GetGlobal { .. } | Instruction::SetGlobal { .. } => self.table_access_cost,
             Instruction::GetUpval { .. } | Instruction::SetUpval { .. } => self.register_move_cost,
-            Instruction::Concat { .. } | Instruction::Not { .. } | Instruction::Len { .. } | Instruction::Coalesce { .. } => self.arithmetic_cost,
+            Instruction::Concat { .. }
+            | Instruction::Not { .. }
+            | Instruction::Len { .. }
+            | Instruction::Coalesce { .. } => self.arithmetic_cost,
         }
     }
 
@@ -128,12 +131,15 @@ impl CostModel {
                 initializer.as_ref().map_or(1, |e| self.expr_cost(e) + 1)
             }
             Stmt::Assign { value, .. } => self.expr_cost(value) + 1,
-            Stmt::AssignMany { targets, values } => {
-                (targets.len() + values.len()) as u32 * 2
-            }
+            Stmt::AssignMany { targets, values } => (targets.len() + values.len()) as u32 * 2,
             Stmt::Increment { .. } => 2,
             Stmt::Expr(e) => self.expr_cost(e),
-            Stmt::If { condition, then_branch, else_if_branches, else_branch } => {
+            Stmt::If {
+                condition,
+                then_branch,
+                else_if_branches,
+                else_branch,
+            } => {
                 let mut cost = self.expr_cost(condition) + self.branch_cost;
                 for s in then_branch {
                     cost = cost.saturating_add(self.stmt_cost(s));
@@ -199,7 +205,9 @@ impl CostModel {
 
     pub fn expr_cost(&self, expr: &Expr) -> u32 {
         match expr {
-            Expr::Literal(_) | Expr::Str(_) | Expr::Variable(_) | Expr::Vararg => self.const_load_cost,
+            Expr::Literal(_) | Expr::Str(_) | Expr::Variable(_) | Expr::Vararg => {
+                self.const_load_cost
+            }
             Expr::Binary { left, right, .. } => {
                 self.expr_cost(left) + self.expr_cost(right) + self.arithmetic_cost
             }
@@ -236,9 +244,7 @@ impl CostModel {
                 }
                 cost
             }
-            Expr::Interp(parts) => {
-                parts.len() as u32 * 3
-            }
+            Expr::Interp(parts) => parts.len() as u32 * 3,
         }
     }
 }
@@ -252,7 +258,11 @@ mod tests {
         let model = CostModel::default();
         let load_cost = model.instruction_cost(&Instruction::LoadInt { dst: 0, val: 10 });
         let add_cost = model.instruction_cost(&Instruction::Add { dst: 0, a: 1, b: 2 });
-        let call_cost = model.instruction_cost(&Instruction::Call { callee: 0, argc: 1, retc: 1 });
+        let call_cost = model.instruction_cost(&Instruction::Call {
+            callee: 0,
+            argc: 1,
+            retc: 1,
+        });
 
         assert_eq!(load_cost, 1);
         assert_eq!(add_cost, 2);
@@ -264,9 +274,15 @@ mod tests {
         let model = CostModel::default();
         let mut small_proto = Proto::new(Some("add_one".to_string()), 1, false);
         small_proto.max_registers = 2;
-        small_proto.instructions.push(Instruction::LoadInt { dst: 1, val: 1 });
-        small_proto.instructions.push(Instruction::Add { dst: 0, a: 0, b: 1 });
-        small_proto.instructions.push(Instruction::Return { base: 0, count: 1 });
+        small_proto
+            .instructions
+            .push(Instruction::LoadInt { dst: 1, val: 1 });
+        small_proto
+            .instructions
+            .push(Instruction::Add { dst: 0, a: 0, b: 1 });
+        small_proto
+            .instructions
+            .push(Instruction::Return { base: 0, count: 1 });
 
         assert!(model.should_inline(&small_proto));
 
@@ -274,7 +290,9 @@ mod tests {
         let mut heavy_proto = Proto::new(Some("heavy".to_string()), 0, false);
         heavy_proto.max_registers = 16;
         for _ in 0..30 {
-            heavy_proto.instructions.push(Instruction::NewTable { dst: 0 });
+            heavy_proto
+                .instructions
+                .push(Instruction::NewTable { dst: 0 });
         }
         assert!(!model.should_inline(&heavy_proto));
     }

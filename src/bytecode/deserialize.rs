@@ -1,10 +1,10 @@
 // Binary deserialization for Neyuki bytecode files with integrated verification.
 
-use num_bigint::{BigInt, Sign};
 use crate::bytecode::format::BytecodeHeader;
 use crate::bytecode::instruction::Instruction;
 use crate::bytecode::proto::{Constant, Proto, UpvalueDesc};
 use crate::bytecode::verify::verify_proto;
+use num_bigint::{BigInt, Sign};
 
 pub fn deserialize(bytes: &[u8]) -> Result<Proto, String> {
     let (header, mut cursor) = BytecodeHeader::parse(bytes)?;
@@ -143,7 +143,9 @@ fn read_constant(bytes: &[u8], cursor: &mut usize) -> Result<Constant, String> {
 fn read_instruction(bytes: &[u8], cursor: &mut usize) -> Result<Instruction, String> {
     let tag = read_u8(bytes, cursor)?;
     match tag {
-        1 => Ok(Instruction::LoadNil { dst: read_u8(bytes, cursor)? }),
+        1 => Ok(Instruction::LoadNil {
+            dst: read_u8(bytes, cursor)?,
+        }),
         2 => Ok(Instruction::LoadBool {
             dst: read_u8(bytes, cursor)?,
             val: read_u8(bytes, cursor)? != 0,
@@ -176,7 +178,9 @@ fn read_instruction(bytes: &[u8], cursor: &mut usize) -> Result<Instruction, Str
             src: read_u8(bytes, cursor)?,
             upval_idx: read_u8(bytes, cursor)?,
         }),
-        10 => Ok(Instruction::NewTable { dst: read_u8(bytes, cursor)? }),
+        10 => Ok(Instruction::NewTable {
+            dst: read_u8(bytes, cursor)?,
+        }),
         11 => Ok(Instruction::GetTable {
             dst: read_u8(bytes, cursor)?,
             table: read_u8(bytes, cursor)?,
@@ -321,7 +325,9 @@ fn read_instruction(bytes: &[u8], cursor: &mut usize) -> Result<Instruction, Str
             reg: read_u8(bytes, cursor)?,
             jump_if_false: read_i16(bytes, cursor)?,
         }),
-        41 => Ok(Instruction::Jump { offset: read_i16(bytes, cursor)? }),
+        41 => Ok(Instruction::Jump {
+            offset: read_i16(bytes, cursor)?,
+        }),
         42 => Ok(Instruction::Call {
             callee: read_u8(bytes, cursor)?,
             argc: read_u8(bytes, cursor)?,
@@ -377,7 +383,10 @@ fn read_instruction(bytes: &[u8], cursor: &mut usize) -> Result<Instruction, Str
 fn read_proto(bytes: &[u8], cursor: &mut usize, depth: usize) -> Result<Proto, String> {
     const MAX_PROTO_DEPTH: usize = 64;
     if depth > MAX_PROTO_DEPTH {
-        return Err(format!("bytecode nested prototype depth limit ({}) exceeded", MAX_PROTO_DEPTH));
+        return Err(format!(
+            "bytecode nested prototype depth limit ({}) exceeded",
+            MAX_PROTO_DEPTH
+        ));
     }
 
     let has_name = read_u8(bytes, cursor)? != 0;
@@ -392,7 +401,10 @@ fn read_proto(bytes: &[u8], cursor: &mut usize, depth: usize) -> Result<Proto, S
 
     let num_constants = read_u32(bytes, cursor)? as usize;
     if num_constants > 65535 {
-        return Err(format!("proto constant pool too large: {} (max 65535)", num_constants));
+        return Err(format!(
+            "proto constant pool too large: {} (max 65535)",
+            num_constants
+        ));
     }
     let mut constants = Vec::with_capacity(num_constants);
     for _ in 0..num_constants {
@@ -401,7 +413,10 @@ fn read_proto(bytes: &[u8], cursor: &mut usize, depth: usize) -> Result<Proto, S
 
     let num_instructions = read_u32(bytes, cursor)? as usize;
     if num_instructions > 0x10_0000 {
-        return Err(format!("proto instruction count too large: {} (max 1048576)", num_instructions));
+        return Err(format!(
+            "proto instruction count too large: {} (max 1048576)",
+            num_instructions
+        ));
     }
     let mut instructions = Vec::with_capacity(num_instructions);
     for _ in 0..num_instructions {
@@ -410,7 +425,10 @@ fn read_proto(bytes: &[u8], cursor: &mut usize, depth: usize) -> Result<Proto, S
 
     let num_protos = read_u32(bytes, cursor)? as usize;
     if num_protos > 4096 {
-        return Err(format!("proto nested prototype count too large: {} (max 4096)", num_protos));
+        return Err(format!(
+            "proto nested prototype count too large: {} (max 4096)",
+            num_protos
+        ));
     }
     let mut protos = Vec::with_capacity(num_protos);
     for _ in 0..num_protos {
@@ -419,7 +437,10 @@ fn read_proto(bytes: &[u8], cursor: &mut usize, depth: usize) -> Result<Proto, S
 
     let num_upvalues = read_u32(bytes, cursor)? as usize;
     if num_upvalues > 255 {
-        return Err(format!("proto upvalue count too large: {} (max 255)", num_upvalues));
+        return Err(format!(
+            "proto upvalue count too large: {} (max 255)",
+            num_upvalues
+        ));
     }
     let mut upvalues = Vec::with_capacity(num_upvalues);
     for _ in 0..num_upvalues {
@@ -430,7 +451,10 @@ fn read_proto(bytes: &[u8], cursor: &mut usize, depth: usize) -> Result<Proto, S
 
     let num_lines = read_u32(bytes, cursor)? as usize;
     if num_lines > 0x10_0000 {
-        return Err(format!("proto line info too large: {} (max 1048576)", num_lines));
+        return Err(format!(
+            "proto line info too large: {} (max 1048576)",
+            num_lines
+        ));
     }
     let mut lines = Vec::with_capacity(num_lines);
     for _ in 0..num_lines {
@@ -439,7 +463,10 @@ fn read_proto(bytes: &[u8], cursor: &mut usize, depth: usize) -> Result<Proto, S
 
     let num_locals = read_u32(bytes, cursor)? as usize;
     if num_locals > 65535 {
-        return Err(format!("proto local variable count too large: {} (max 65535)", num_locals));
+        return Err(format!(
+            "proto local variable count too large: {} (max 65535)",
+            num_locals
+        ));
     }
     let mut local_names = Vec::with_capacity(num_locals);
     for _ in 0..num_locals {
@@ -447,7 +474,12 @@ fn read_proto(bytes: &[u8], cursor: &mut usize, depth: usize) -> Result<Proto, S
         let reg = read_u8(bytes, cursor)?;
         let from_pc = read_u32(bytes, cursor)?;
         let to_pc = read_u32(bytes, cursor)?;
-        local_names.push(crate::bytecode::proto::LocalVarInfo { name, reg, from_pc, to_pc });
+        local_names.push(crate::bytecode::proto::LocalVarInfo {
+            name,
+            reg,
+            from_pc,
+            to_pc,
+        });
     }
 
     Ok(Proto {

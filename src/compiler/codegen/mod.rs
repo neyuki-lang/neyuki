@@ -59,19 +59,36 @@ impl Compiler {
         let target_ip = self.current().proto.instructions.len();
         let raw_offset = target_ip as isize - (jump_ip as isize + 1);
         if raw_offset > i16::MAX as isize || raw_offset < i16::MIN as isize {
-            self.emit_error(format!("jump offset {} exceeds i16 range — function too large", raw_offset));
+            self.emit_error(format!(
+                "jump offset {} exceeds i16 range — function too large",
+                raw_offset
+            ));
         }
         let offset = raw_offset as i16;
         let insts = &mut self.current_mut().proto.instructions;
         match &mut insts[jump_ip] {
             Instruction::Jump { offset: o } => *o = offset,
-            Instruction::Test { jump_if_false: o, .. } => *o = offset,
-            Instruction::Eq { jump_if_false: o, .. } => *o = offset,
-            Instruction::Ne { jump_if_false: o, .. } => *o = offset,
-            Instruction::Lt { jump_if_false: o, .. } => *o = offset,
-            Instruction::Le { jump_if_false: o, .. } => *o = offset,
-            Instruction::Gt { jump_if_false: o, .. } => *o = offset,
-            Instruction::Ge { jump_if_false: o, .. } => *o = offset,
+            Instruction::Test {
+                jump_if_false: o, ..
+            } => *o = offset,
+            Instruction::Eq {
+                jump_if_false: o, ..
+            } => *o = offset,
+            Instruction::Ne {
+                jump_if_false: o, ..
+            } => *o = offset,
+            Instruction::Lt {
+                jump_if_false: o, ..
+            } => *o = offset,
+            Instruction::Le {
+                jump_if_false: o, ..
+            } => *o = offset,
+            Instruction::Gt {
+                jump_if_false: o, ..
+            } => *o = offset,
+            Instruction::Ge {
+                jump_if_false: o, ..
+            } => *o = offset,
             Instruction::TForLoop { jump: o, .. } => *o = offset,
             Instruction::ForPrep { jump: o, .. } => *o = offset,
             Instruction::ForLoop { jump: o, .. } => *o = offset,
@@ -94,7 +111,11 @@ impl Compiler {
         Ok(self.funcs.pop().unwrap().finish())
     }
 
-    pub(crate) fn resolve_upval_rec(funcs: &mut [FuncState], func_idx: usize, name: &str) -> Option<u8> {
+    pub(crate) fn resolve_upval_rec(
+        funcs: &mut [FuncState],
+        func_idx: usize,
+        name: &str,
+    ) -> Option<u8> {
         if func_idx == 0 {
             return None;
         }

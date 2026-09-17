@@ -20,7 +20,10 @@ pub fn builtin_print(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String>
 pub fn builtin_assert(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let cond = args.first().cloned().unwrap_or(Value::Nil);
     if !cond.is_truthy() {
-        let msg = args.get(1).map(|v| v.to_string()).unwrap_or_else(|| "assertion failed".to_string());
+        let msg = args
+            .get(1)
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "assertion failed".to_string());
         return Err(msg);
     }
     Ok(vec![cond])
@@ -39,14 +42,17 @@ pub fn builtin_typeof(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String
 pub fn builtin_tostring(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let val = args.first().unwrap_or(&Value::Nil);
     if let Value::Table(t) = val {
-        let handler = t.borrow().metatable.as_ref().and_then(|mt| {
-            mt.borrow().fields.get("__tostring").cloned()
-        });
+        let handler = t
+            .borrow()
+            .metatable
+            .as_ref()
+            .and_then(|mt| mt.borrow().fields.get("__tostring").cloned());
         if let Some(h) = handler
-            && !matches!(h, Value::Nil) {
-                let res = vm.call_function(h, std::slice::from_ref(val))?;
-                return Ok(vec![res.into_iter().next().unwrap_or(Value::Nil)]);
-            }
+            && !matches!(h, Value::Nil)
+        {
+            let res = vm.call_function(h, std::slice::from_ref(val))?;
+            return Ok(vec![res.into_iter().next().unwrap_or(Value::Nil)]);
+        }
     }
     Ok(vec![Value::String(val.to_string())])
 }
@@ -82,7 +88,10 @@ pub fn builtin_tonumber(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, Stri
             (1, s_trimmed)
         };
         let s_digits = if base == 16 {
-            if let Some(stripped) = s_digits.strip_prefix("0x").or_else(|| s_digits.strip_prefix("0X")) {
+            if let Some(stripped) = s_digits
+                .strip_prefix("0x")
+                .or_else(|| s_digits.strip_prefix("0X"))
+            {
                 stripped
             } else {
                 s_digits
@@ -117,7 +126,9 @@ pub fn builtin_tonumber(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, Stri
             } else {
                 (1, s_trimmed)
             };
-            if let Some(stripped_hex) = s_rest.strip_prefix("0x").or_else(|| s_rest.strip_prefix("0X"))
+            if let Some(stripped_hex) = s_rest
+                .strip_prefix("0x")
+                .or_else(|| s_rest.strip_prefix("0X"))
                 && !stripped_hex.is_empty()
                 && let Some(bi) = BigInt::parse_bytes(stripped_hex.as_bytes(), 16)
             {
@@ -142,12 +153,15 @@ pub fn builtin_int(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let val = args.first().unwrap_or(&Value::Nil);
     match val {
         Value::Int(i) => Ok(vec![Value::Int(i.clone())]),
-        Value::Float(f) => Ok(vec![Value::Int(BigInt::from_f64(f.trunc()).unwrap_or_default())]),
+        Value::Float(f) => Ok(vec![Value::Int(
+            BigInt::from_f64(f.trunc()).unwrap_or_default(),
+        )]),
         Value::String(s) => {
             if s.len() > 65_536 {
                 return Err("integer string exceeds maximum length limit (65536 bytes)".to_string());
             }
-            let bi = BigInt::parse_bytes(s.as_bytes(), 10).ok_or_else(|| "invalid integer string".to_string())?;
+            let bi = BigInt::parse_bytes(s.as_bytes(), 10)
+                .ok_or_else(|| "invalid integer string".to_string())?;
             Ok(vec![Value::Int(bi)])
         }
         _ => Err("int expects number or string".to_string()),
@@ -160,7 +174,9 @@ pub fn builtin_float(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String>
         Value::Float(f) => Ok(vec![Value::Float(*f)]),
         Value::Int(i) => Ok(vec![Value::Float(i.to_f64().unwrap_or(0.0))]),
         Value::String(s) => {
-            let f = s.parse::<f64>().map_err(|_| "invalid float string".to_string())?;
+            let f = s
+                .parse::<f64>()
+                .map_err(|_| "invalid float string".to_string())?;
             Ok(vec![Value::Float(f)])
         }
         _ => Err("float expects number or string".to_string()),
@@ -168,12 +184,17 @@ pub fn builtin_float(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String>
 }
 
 pub fn builtin_error(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let msg = args.first().map(|v| v.to_string()).unwrap_or_else(|| "error".to_string());
+    let msg = args
+        .first()
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "error".to_string());
     Err(msg)
 }
 
 pub fn builtin_pcall(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let func = args.first().ok_or_else(|| "pcall expects at least 1 argument".to_string())?;
+    let func = args
+        .first()
+        .ok_or_else(|| "pcall expects at least 1 argument".to_string())?;
     match vm.call_function(func.clone(), &args[1..]) {
         Ok(mut res) => {
             res.insert(0, Value::Bool(true));
@@ -184,8 +205,12 @@ pub fn builtin_pcall(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> 
 }
 
 pub fn builtin_xpcall(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let func = args.first().ok_or_else(|| "xpcall expects at least 2 arguments".to_string())?;
-    let err_handler = args.get(1).ok_or_else(|| "xpcall expects at least 2 arguments".to_string())?;
+    let func = args
+        .first()
+        .ok_or_else(|| "xpcall expects at least 2 arguments".to_string())?;
+    let err_handler = args
+        .get(1)
+        .ok_or_else(|| "xpcall expects at least 2 arguments".to_string())?;
     let call_args = if args.len() > 2 { &args[2..] } else { &[] };
     match vm.call_function(func.clone(), call_args) {
         Ok(mut res) => {
@@ -199,14 +224,20 @@ pub fn builtin_xpcall(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String>
                     let ret = h_res.into_iter().next().unwrap_or(err_val);
                     Ok(vec![Value::Bool(false), ret])
                 }
-                Err(h_err) => Ok(vec![Value::Bool(false), Value::String(format!("error in error handling: {}", h_err))]),
+                Err(h_err) => Ok(vec![
+                    Value::Bool(false),
+                    Value::String(format!("error in error handling: {}", h_err)),
+                ]),
             }
         }
     }
 }
 
 pub fn builtin_require(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let pkg = match args.first().ok_or_else(|| "require expects a module path".to_string())? {
+    let pkg = match args
+        .first()
+        .ok_or_else(|| "require expects a module path".to_string())?
+    {
         Value::String(s) => s.as_str(),
         _ => return Err("require expects string argument".to_string()),
     };
@@ -244,10 +275,14 @@ pub fn builtin_require(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String
                     )
                 })
             {
-                return Err(format!("security error: path traversal forbidden in require: '{}'", pkg));
+                return Err(format!(
+                    "security error: path traversal forbidden in require: '{}'",
+                    pkg
+                ));
             }
             if let Ok(bytes) = std::fs::read(&path) {
-                let proto = if bytes.starts_with(crate::bytecode::MAGIC) || path.ends_with(".nykb") {
+                let proto = if bytes.starts_with(crate::bytecode::MAGIC) || path.ends_with(".nykb")
+                {
                     let p = crate::bytecode::deserialize(&bytes)?;
                     crate::bytecode::verify_proto(&p)
                         .map_err(|e| format!("bytecode verification failed: {}", e))?;
@@ -261,7 +296,10 @@ pub fn builtin_require(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String
                         .iter()
                         .find(|d| d.severity == crate::diagnostics::severity::Severity::Error)
                     {
-                        return Err(format!("semantic error in module '{}': {}", pkg, err.message));
+                        return Err(format!(
+                            "semantic error in module '{}': {}",
+                            pkg, err.message
+                        ));
                     }
                     let p = crate::compiler::try_compile_to_proto(&stmts)?;
                     crate::bytecode::verify_proto(&p)

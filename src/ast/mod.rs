@@ -8,4 +8,4 @@ pub mod visitor;
 pub use expr::{Expr, InterpPart, Param, TableEntry};
 pub use span::{SourceLocation, Span};
 pub use stmt::Stmt;
-pub use visitor::{walk_expr, walk_stmt, AstVisitor};
+pub use visitor::{AstVisitor, walk_expr, walk_stmt};

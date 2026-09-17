@@ -9,7 +9,9 @@ use crate::vm::value::Value;
 pub fn to_bigint(v: Value) -> Result<BigInt, String> {
     match v {
         Value::Int(i) => Ok(i),
-        Value::Float(f) => BigInt::from_f64(f.trunc()).ok_or_else(|| "cannot convert float to integer".to_string()),
+        Value::Float(f) => {
+            BigInt::from_f64(f.trunc()).ok_or_else(|| "cannot convert float to integer".to_string())
+        }
         _ => Err("expected integer".to_string()),
     }
 }
@@ -17,7 +19,9 @@ pub fn to_bigint(v: Value) -> Result<BigInt, String> {
 pub fn to_f64(v: Value) -> Result<f64, String> {
     match v {
         Value::Float(f) => Ok(f),
-        Value::Int(i) => i.to_f64().ok_or_else(|| "integer overflow in float conversion".to_string()),
+        Value::Int(i) => i
+            .to_f64()
+            .ok_or_else(|| "integer overflow in float conversion".to_string()),
         _ => Err("expected number".to_string()),
     }
 }
@@ -91,9 +95,10 @@ pub fn eval_mod(a: Value, b: Value) -> Result<Value, String> {
 pub fn eval_pow(a: Value, b: Value) -> Result<Value, String> {
     if let (Value::Int(ia), Value::Int(ib)) = (&a, &b)
         && ib.sign() != Sign::Minus
-            && let Some(exp) = ib.to_u32() {
-                return Ok(Value::Int(ia.pow(exp)));
-            }
+        && let Some(exp) = ib.to_u32()
+    {
+        return Ok(Value::Int(ia.pow(exp)));
+    }
     let fa = to_f64(a)?;
     let fb = to_f64(b)?;
     Ok(Value::Float(fa.powf(fb)))
@@ -121,10 +126,14 @@ pub fn eval_shl(a: Value, b: Value) -> Result<Value, String> {
     let ia = to_bigint(a)?;
     let ib = to_bigint(b)?;
     if ib.sign() == Sign::Minus {
-        let shift = (-ib).to_usize().ok_or_else(|| "shift is too large".to_string())?;
+        let shift = (-ib)
+            .to_usize()
+            .ok_or_else(|| "shift is too large".to_string())?;
         Ok(Value::Int(ia >> shift))
     } else {
-        let shift = ib.to_usize().ok_or_else(|| "shift is too large".to_string())?;
+        let shift = ib
+            .to_usize()
+            .ok_or_else(|| "shift is too large".to_string())?;
         Ok(Value::Int(ia << shift))
     }
 }
@@ -133,10 +142,14 @@ pub fn eval_shr(a: Value, b: Value) -> Result<Value, String> {
     let ia = to_bigint(a)?;
     let ib = to_bigint(b)?;
     if ib.sign() == Sign::Minus {
-        let shift = (-ib).to_usize().ok_or_else(|| "shift is too large".to_string())?;
+        let shift = (-ib)
+            .to_usize()
+            .ok_or_else(|| "shift is too large".to_string())?;
         Ok(Value::Int(ia << shift))
     } else {
-        let shift = ib.to_usize().ok_or_else(|| "shift is too large".to_string())?;
+        let shift = ib
+            .to_usize()
+            .ok_or_else(|| "shift is too large".to_string())?;
         Ok(Value::Int(ia >> shift))
     }
 }

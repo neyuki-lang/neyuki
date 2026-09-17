@@ -112,7 +112,10 @@ impl FuncState {
     }
 
     pub(crate) fn finish(mut self) -> Proto {
-        let needs_return = !matches!(self.proto.instructions.last(), Some(Instruction::Return { .. }));
+        let needs_return = !matches!(
+            self.proto.instructions.last(),
+            Some(Instruction::Return { .. })
+        );
         if needs_return {
             let r = self.alloc_reg();
             self.emit(Instruction::LoadNil { dst: r });

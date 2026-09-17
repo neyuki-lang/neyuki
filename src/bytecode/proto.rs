@@ -1,7 +1,7 @@
 // Function prototype and constant definitions for bytecode.
 
-use num_bigint::BigInt;
 use crate::bytecode::instruction::Instruction;
+use num_bigint::BigInt;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Constant {
@@ -81,7 +81,12 @@ impl Proto {
 
     // Register a local variable in debug info
     pub fn push_local(&mut self, name: String, reg: u8, from_pc: u32) {
-        self.local_names.push(LocalVarInfo { name, reg, from_pc, to_pc: u32::MAX });
+        self.local_names.push(LocalVarInfo {
+            name,
+            reg,
+            from_pc,
+            to_pc: u32::MAX,
+        });
     }
 
     // Close a local variable's scope at the current pc

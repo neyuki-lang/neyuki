@@ -17,14 +17,19 @@ fn get_table(val: &Value) -> Result<&Rc<RefCell<VmTable>>, String> {
 
 fn to_isize(val: &Value, name: &str) -> Result<isize, String> {
     match val {
-        Value::Int(i) => i.to_isize().ok_or_else(|| format!("{} is out of bounds", name)),
+        Value::Int(i) => i
+            .to_isize()
+            .ok_or_else(|| format!("{} is out of bounds", name)),
         Value::Float(f) => Ok(*f as isize),
         _ => Err(format!("{} expects an integer", name)),
     }
 }
 
 fn table_insert(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let tbl_rc = get_table(args.first().ok_or_else(|| "table.insert expects at least 2 arguments".to_string())?)?;
+    let tbl_rc = get_table(
+        args.first()
+            .ok_or_else(|| "table.insert expects at least 2 arguments".to_string())?,
+    )?;
     let mut tbl = tbl_rc.borrow_mut();
     if tbl.frozen {
         return Err("cannot modify frozen table".to_string());
@@ -46,7 +51,10 @@ fn table_insert(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 }
 
 fn table_remove(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let tbl_rc = get_table(args.first().ok_or_else(|| "table.remove expects table".to_string())?)?;
+    let tbl_rc = get_table(
+        args.first()
+            .ok_or_else(|| "table.remove expects table".to_string())?,
+    )?;
     let mut tbl = tbl_rc.borrow_mut();
     if tbl.frozen {
         return Err("cannot modify frozen table".to_string());
@@ -72,7 +80,10 @@ fn table_remove(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 }
 
 fn table_concat(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let tbl_rc = get_table(args.first().ok_or_else(|| "table.concat expects table".to_string())?)?;
+    let tbl_rc = get_table(
+        args.first()
+            .ok_or_else(|| "table.concat expects table".to_string())?,
+    )?;
     let sep = if let Some(sv) = args.get(1) {
         match sv {
             Value::String(s) => s.clone(),
@@ -122,7 +133,10 @@ fn table_pack(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 }
 
 fn table_unpack(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let tbl_rc = get_table(args.first().ok_or_else(|| "table.unpack expects table".to_string())?)?;
+    let tbl_rc = get_table(
+        args.first()
+            .ok_or_else(|| "table.unpack expects table".to_string())?,
+    )?;
     let tbl = tbl_rc.borrow();
     let len = tbl.array.len();
     let i = if let Some(iv) = args.get(1) {
@@ -156,19 +170,28 @@ fn table_unpack(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 }
 
 fn table_freeze(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let tbl_rc = get_table(args.first().ok_or_else(|| "table.freeze expects table".to_string())?)?;
+    let tbl_rc = get_table(
+        args.first()
+            .ok_or_else(|| "table.freeze expects table".to_string())?,
+    )?;
     tbl_rc.borrow_mut().frozen = true;
     Ok(vec![Value::Table(tbl_rc.clone())])
 }
 
 fn table_isfrozen(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let tbl_rc = get_table(args.first().ok_or_else(|| "table.isfrozen expects table".to_string())?)?;
+    let tbl_rc = get_table(
+        args.first()
+            .ok_or_else(|| "table.isfrozen expects table".to_string())?,
+    )?;
     let frozen = tbl_rc.borrow().frozen;
     Ok(vec![Value::Bool(frozen)])
 }
 
 fn table_clear(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let tbl_rc = get_table(args.first().ok_or_else(|| "table.clear expects table".to_string())?)?;
+    let tbl_rc = get_table(
+        args.first()
+            .ok_or_else(|| "table.clear expects table".to_string())?,
+    )?;
     let mut tbl = tbl_rc.borrow_mut();
     if tbl.frozen {
         return Err("cannot clear frozen table".to_string());
@@ -179,7 +202,10 @@ fn table_clear(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 }
 
 fn table_clone(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let tbl_rc = get_table(args.first().ok_or_else(|| "table.clone expects table".to_string())?)?;
+    let tbl_rc = get_table(
+        args.first()
+            .ok_or_else(|| "table.clone expects table".to_string())?,
+    )?;
     let tbl = tbl_rc.borrow();
     let mut new_tbl = VmTable::new();
     new_tbl.array = tbl.array.clone();
@@ -191,62 +217,85 @@ fn table_clone(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 }
 
 fn table_sort(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let tbl_rc = get_table(args.first().ok_or_else(|| "table.sort expects table".to_string())?)?.clone();
+    let tbl_rc = get_table(
+        args.first()
+            .ok_or_else(|| "table.sort expects table".to_string())?,
+    )?
+    .clone();
     if tbl_rc.borrow().frozen {
         return Err("cannot sort frozen table".to_string());
     }
 
     let comp = args.get(1).cloned();
     if let Some(comp_fn) = comp
-        && !matches!(comp_fn, Value::Nil) {
-            let mut items = std::mem::take(&mut tbl_rc.borrow_mut().array);
-            let mut sort_err = None;
-            for i in 1..items.len() {
-                let mut j = i;
-                while j > 0 {
-                    let a = &items[j - 1];
-                    let b = &items[j];
-                    match vm.call_function(comp_fn.clone(), &[b.clone(), a.clone()]) {
-                        Ok(res) => {
-                            let b_less_than_a = res.first().map(|v| v.is_truthy()).unwrap_or(false);
-                            if b_less_than_a {
-                                items.swap(j - 1, j);
-                                j -= 1;
-                            } else {
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            sort_err = Some(e);
+        && !matches!(comp_fn, Value::Nil)
+    {
+        let mut items = std::mem::take(&mut tbl_rc.borrow_mut().array);
+        let mut sort_err = None;
+        for i in 1..items.len() {
+            let mut j = i;
+            while j > 0 {
+                let a = &items[j - 1];
+                let b = &items[j];
+                match vm.call_function(comp_fn.clone(), &[b.clone(), a.clone()]) {
+                    Ok(res) => {
+                        let b_less_than_a = res.first().map(|v| v.is_truthy()).unwrap_or(false);
+                        if b_less_than_a {
+                            items.swap(j - 1, j);
+                            j -= 1;
+                        } else {
                             break;
                         }
                     }
-                }
-                if sort_err.is_some() {
-                    break;
+                    Err(e) => {
+                        sort_err = Some(e);
+                        break;
+                    }
                 }
             }
-            tbl_rc.borrow_mut().array = items;
-            if let Some(err) = sort_err {
-                return Err(err);
+            if sort_err.is_some() {
+                break;
             }
-        } else {
-            let mut tbl = tbl_rc.borrow_mut();
-            tbl.array.sort_by(|a, b| match (a, b) {
-                (Value::Int(ia), Value::Int(ib)) => ia.cmp(ib),
-                (Value::String(sa), Value::String(sb)) => sa.cmp(sb),
-                (Value::Float(fa), Value::Float(fb)) => fa.partial_cmp(fb).unwrap_or(std::cmp::Ordering::Equal),
-                _ => a.to_string().cmp(&b.to_string()),
-            });
         }
+        tbl_rc.borrow_mut().array = items;
+        if let Some(err) = sort_err {
+            return Err(err);
+        }
+    } else {
+        let mut tbl = tbl_rc.borrow_mut();
+        tbl.array.sort_by(|a, b| match (a, b) {
+            (Value::Int(ia), Value::Int(ib)) => ia.cmp(ib),
+            (Value::String(sa), Value::String(sb)) => sa.cmp(sb),
+            (Value::Float(fa), Value::Float(fb)) => {
+                fa.partial_cmp(fb).unwrap_or(std::cmp::Ordering::Equal)
+            }
+            _ => a.to_string().cmp(&b.to_string()),
+        });
+    }
     Ok(vec![])
 }
 
 fn table_move(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let a1_rc = get_table(args.first().ok_or_else(|| "table.move expects at least 4 arguments".to_string())?)?.clone();
-    let f = to_isize(args.get(1).ok_or_else(|| "table.move expects f".to_string())?, "f")?;
-    let e = to_isize(args.get(2).ok_or_else(|| "table.move expects e".to_string())?, "e")?;
-    let t = to_isize(args.get(3).ok_or_else(|| "table.move expects t".to_string())?, "t")?;
+    let a1_rc = get_table(
+        args.first()
+            .ok_or_else(|| "table.move expects at least 4 arguments".to_string())?,
+    )?
+    .clone();
+    let f = to_isize(
+        args.get(1)
+            .ok_or_else(|| "table.move expects f".to_string())?,
+        "f",
+    )?;
+    let e = to_isize(
+        args.get(2)
+            .ok_or_else(|| "table.move expects e".to_string())?,
+        "e",
+    )?;
+    let t = to_isize(
+        args.get(3)
+            .ok_or_else(|| "table.move expects t".to_string())?,
+        "t",
+    )?;
     let a2_rc = if let Some(a2_val) = args.get(4) {
         if matches!(a2_val, Value::Nil) {
             a1_rc.clone()
@@ -291,7 +340,10 @@ fn table_move(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 }
 
 pub fn table_setmetatable(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let tbl_rc = get_table(args.first().ok_or_else(|| "setmetatable expects table as 1st argument".to_string())?)?;
+    let tbl_rc = get_table(
+        args.first()
+            .ok_or_else(|| "setmetatable expects table as 1st argument".to_string())?,
+    )?;
     let mt = match args.get(1) {
         Some(Value::Table(m)) => Some(m.clone()),
         Some(Value::Nil) | None => None,
@@ -302,7 +354,10 @@ pub fn table_setmetatable(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, St
 }
 
 pub fn table_getmetatable(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let tbl_rc = get_table(args.first().ok_or_else(|| "getmetatable expects table".to_string())?)?;
+    let tbl_rc = get_table(
+        args.first()
+            .ok_or_else(|| "getmetatable expects table".to_string())?,
+    )?;
     let mt = tbl_rc.borrow().metatable.clone();
     match mt {
         Some(m) => Ok(vec![Value::Table(m)]),
@@ -323,8 +378,14 @@ pub fn create_table_lib() -> Value {
     table.set_str("clone", Value::Native("table.clone", table_clone));
     table.set_str("sort", Value::Native("table.sort", table_sort));
     table.set_str("move", Value::Native("table.move", table_move));
-    table.set_str("setmetatable", Value::Native("table.setmetatable", table_setmetatable));
-    table.set_str("getmetatable", Value::Native("table.getmetatable", table_getmetatable));
+    table.set_str(
+        "setmetatable",
+        Value::Native("table.setmetatable", table_setmetatable),
+    );
+    table.set_str(
+        "getmetatable",
+        Value::Native("table.getmetatable", table_getmetatable),
+    );
     table.frozen = true;
     Value::Table(Rc::new(RefCell::new(table)))
 }

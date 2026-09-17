@@ -24,12 +24,47 @@ impl<'a> SemanticAnalyzer<'a> {
     pub fn new(source: &'a str) -> Self {
         let mut known_globals = HashSet::new();
         let globals = [
-            "print", "assert", "require", "type", "typeof", "tostring", "tonumber", "int", "float",
-            "pcall", "xpcall", "try", "error", "pairs", "ipairs", "next", "select",
-            "rawget", "rawset", "rawequal", "rawlen", "setmetatable", "getmetatable",
-            "collectgarbage", "math", "string", "table", "bit", "bit32", "buffer",
-            "os", "coroutine", "utf8", "debug", "json", "true", "false", "nil",
-            "_G", "_VERSION", "warn",
+            "print",
+            "assert",
+            "require",
+            "type",
+            "typeof",
+            "tostring",
+            "tonumber",
+            "int",
+            "float",
+            "pcall",
+            "xpcall",
+            "try",
+            "error",
+            "pairs",
+            "ipairs",
+            "next",
+            "select",
+            "rawget",
+            "rawset",
+            "rawequal",
+            "rawlen",
+            "setmetatable",
+            "getmetatable",
+            "collectgarbage",
+            "math",
+            "string",
+            "table",
+            "bit",
+            "bit32",
+            "buffer",
+            "os",
+            "coroutine",
+            "utf8",
+            "debug",
+            "json",
+            "true",
+            "false",
+            "nil",
+            "_G",
+            "_VERSION",
+            "warn",
         ];
         for g in globals {
             known_globals.insert(g.to_string());
@@ -58,7 +93,10 @@ impl<'a> SemanticAnalyzer<'a> {
                 let diag = Diagnostic::warning(format!("unused variable '{}'", sym.name))
                     .with_code(ErrorCode::W0001)
                     .with_label(sym.span, "variable declared here but never used")
-                    .with_help(format!("if this is intentional, prefix with an underscore: '_{}'", sym.name));
+                    .with_help(format!(
+                        "if this is intentional, prefix with an underscore: '_{}'",
+                        sym.name
+                    ));
                 self.diagnostics.push(diag);
             }
         }
@@ -148,10 +186,13 @@ impl<'a> SemanticAnalyzer<'a> {
                     sym.inferred_type = self.infer_expr_type(init);
                 }
                 if let Err(orig_span) = self.scope_mgr.define(sym) {
-                    let diag = Diagnostic::error(format!("duplicate local variable '{}' in the same scope", name))
-                        .with_code(ErrorCode::E0005)
-                        .with_label(span, "redefined here")
-                        .with_secondary_label(orig_span, "previous definition was here");
+                    let diag = Diagnostic::error(format!(
+                        "duplicate local variable '{}' in the same scope",
+                        name
+                    ))
+                    .with_code(ErrorCode::E0005)
+                    .with_label(span, "redefined here")
+                    .with_secondary_label(orig_span, "previous definition was here");
                     self.diagnostics.push(diag);
                 }
 
@@ -159,8 +200,10 @@ impl<'a> SemanticAnalyzer<'a> {
                     self.analyze_expr(init);
                     let init_type = self.infer_expr_type(init);
                     if let Some(decl_type) = &declared_type
-                        && init_type != NeyukiType::Any && !init_type.is_assignable_to(decl_type) {
-                            let diag = Diagnostic::error(format!(
+                        && init_type != NeyukiType::Any
+                        && !init_type.is_assignable_to(decl_type)
+                    {
+                        let diag = Diagnostic::error(format!(
                                 "type mismatch: variable '{}' declared as '{}' but initialized with '{}'",
                                 name,
                                 decl_type.display_name(),
@@ -169,7 +212,7 @@ impl<'a> SemanticAnalyzer<'a> {
                             .with_code(ErrorCode::E0003)
                             .with_label(span, format!("expected '{}', found '{}'", decl_type.display_name(), init_type.display_name()))
                             .with_help(format!("ensure the assigned value matches '{}'", decl_type.display_name()));
-                            self.diagnostics.push(diag);
+                        self.diagnostics.push(diag);
                     }
                 }
             }
@@ -182,21 +225,19 @@ impl<'a> SemanticAnalyzer<'a> {
                     let span = self.find_ident_span(name);
                     self.check_shadowing(name, span);
 
-                    let mut sym = Symbol::new(
-                        name.clone(),
-                        SymbolKind::Variable,
-                        *is_const,
-                        None,
-                        span,
-                    );
+                    let mut sym =
+                        Symbol::new(name.clone(), SymbolKind::Variable, *is_const, None, span);
                     if let Some(init) = initializers.get(i) {
                         sym.inferred_type = self.infer_expr_type(init);
                     }
                     if let Err(orig_span) = self.scope_mgr.define(sym) {
-                        let diag = Diagnostic::error(format!("duplicate local variable '{}' in the same scope", name))
-                            .with_code(ErrorCode::E0005)
-                            .with_label(span, "redefined here")
-                            .with_secondary_label(orig_span, "previous definition was here");
+                        let diag = Diagnostic::error(format!(
+                            "duplicate local variable '{}' in the same scope",
+                            name
+                        ))
+                        .with_code(ErrorCode::E0005)
+                        .with_label(span, "redefined here")
+                        .with_secondary_label(orig_span, "previous definition was here");
                         self.diagnostics.push(diag);
                     }
                 }
@@ -230,16 +271,20 @@ impl<'a> SemanticAnalyzer<'a> {
                     if let Some(sym) = self.scope_mgr.lookup_mut(name) {
                         sym.used = true;
                         if sym.is_const {
-                            let diag = Diagnostic::error(format!("cannot increment const variable '{}'", name))
-                                .with_code(ErrorCode::E0002)
-                                .with_label(span, "cannot mutate a const variable")
-                                .with_secondary_label(sym.span, "defined as const here");
+                            let diag = Diagnostic::error(format!(
+                                "cannot increment const variable '{}'",
+                                name
+                            ))
+                            .with_code(ErrorCode::E0002)
+                            .with_label(span, "cannot mutate a const variable")
+                            .with_secondary_label(sym.span, "defined as const here");
                             self.diagnostics.push(diag);
                         }
                     } else if !self.is_known_global(name) {
-                        let diag = Diagnostic::error(format!("variable '{}' is not declared", name))
-                            .with_code(ErrorCode::E0001)
-                            .with_label(span, "cannot increment undeclared variable");
+                        let diag =
+                            Diagnostic::error(format!("variable '{}' is not declared", name))
+                                .with_code(ErrorCode::E0001)
+                                .with_label(span, "cannot increment undeclared variable");
                         self.diagnostics.push(diag);
                     }
                 }
@@ -395,12 +440,20 @@ impl<'a> SemanticAnalyzer<'a> {
                                 expected_ret.display_name()
                             ))
                             .with_code(ErrorCode::E0003)
-                            .with_label(span, format!("expected return of type '{}'", expected_ret.display_name()));
+                            .with_label(
+                                span,
+                                format!(
+                                    "expected return of type '{}'",
+                                    expected_ret.display_name()
+                                ),
+                            );
                             self.diagnostics.push(diag);
                         }
                     } else {
                         let actual_ret = self.infer_expr_type(&exprs[0]);
-                        if actual_ret != NeyukiType::Any && !actual_ret.is_assignable_to(expected_ret) {
+                        if actual_ret != NeyukiType::Any
+                            && !actual_ret.is_assignable_to(expected_ret)
+                        {
                             let span = self.find_expr_span(&exprs[0]);
                             let diag = Diagnostic::error(format!(
                                 "type mismatch: function declared with return type '{}' returns '{}'",
@@ -430,28 +483,39 @@ impl<'a> SemanticAnalyzer<'a> {
                 sym.assigned_count += 1;
                 sym.used = true;
                 if sym.is_const {
-                    let diag = Diagnostic::error(format!("cannot reassign to const variable '{}'", name))
-                        .with_code(ErrorCode::E0002)
-                        .with_label(span, "cannot reassign to a const variable")
-                        .with_secondary_label(sym.span, "defined as const here");
+                    let diag =
+                        Diagnostic::error(format!("cannot reassign to const variable '{}'", name))
+                            .with_code(ErrorCode::E0002)
+                            .with_label(span, "cannot reassign to a const variable")
+                            .with_secondary_label(sym.span, "defined as const here");
                     self.diagnostics.push(diag);
                 } else if let Some(decl_type) = &sym.declared_type
-                    && val_type != NeyukiType::Any && !val_type.is_assignable_to(decl_type) {
-                        let diag = Diagnostic::error(format!(
-                            "type mismatch in assignment to '{}': expected '{}', found '{}'",
-                            name,
+                    && val_type != NeyukiType::Any
+                    && !val_type.is_assignable_to(decl_type)
+                {
+                    let diag = Diagnostic::error(format!(
+                        "type mismatch in assignment to '{}': expected '{}', found '{}'",
+                        name,
+                        decl_type.display_name(),
+                        val_type.display_name()
+                    ))
+                    .with_code(ErrorCode::E0003)
+                    .with_label(
+                        span,
+                        format!(
+                            "expected '{}', found '{}'",
                             decl_type.display_name(),
                             val_type.display_name()
-                        ))
-                        .with_code(ErrorCode::E0003)
-                        .with_label(span, format!("expected '{}', found '{}'", decl_type.display_name(), val_type.display_name()));
-                        self.diagnostics.push(diag);
+                        ),
+                    );
+                    self.diagnostics.push(diag);
                 }
             } else if !self.is_known_global(name) {
-                let diag = Diagnostic::error(format!("variable '{}' is used before declaration", name))
-                    .with_code(ErrorCode::E0001)
-                    .with_label(span, "not found in this scope")
-                    .with_help(format!("declare 'local {} = ...' before using it", name));
+                let diag =
+                    Diagnostic::error(format!("variable '{}' is used before declaration", name))
+                        .with_code(ErrorCode::E0001)
+                        .with_label(span, "not found in this scope")
+                        .with_help(format!("declare 'local {} = ...' before using it", name));
                 self.diagnostics.push(diag);
             }
         } else {
@@ -464,10 +528,14 @@ impl<'a> SemanticAnalyzer<'a> {
             Expr::Variable(name) => {
                 let span = self.find_ident_span(name);
                 if !self.scope_mgr.mark_used(name) && !self.is_known_global(name) {
-                    let diag = Diagnostic::error(format!("cannot find variable '{}' in this scope", name))
-                        .with_code(ErrorCode::E0001)
-                        .with_label(span, "not found in this scope")
-                        .with_help(format!("declare 'local {} = ...' before accessing it", name));
+                    let diag =
+                        Diagnostic::error(format!("cannot find variable '{}' in this scope", name))
+                            .with_code(ErrorCode::E0001)
+                            .with_label(span, "not found in this scope")
+                            .with_help(format!(
+                                "declare 'local {} = ...' before accessing it",
+                                name
+                            ));
                     self.diagnostics.push(diag);
                 }
             }
@@ -481,21 +549,26 @@ impl<'a> SemanticAnalyzer<'a> {
                     && let Some(sym) = self.scope_mgr.lookup(fn_name)
                     && let Some(expected) = sym.num_params
                     && !sym.is_vararg
-                    && args.len() != expected {
-                        let span = self.find_ident_span(fn_name);
-                        let diag = Diagnostic::warning(format!(
-                            "function '{}' takes {} argument(s) but {} were supplied",
-                            fn_name,
-                            expected,
-                            args.len()
-                        ))
-                        .with_code(ErrorCode::E0004)
-                        .with_label(span, format!("takes {} arguments", expected))
-                        .with_secondary_label(sym.span, "defined here");
-                        self.diagnostics.push(diag);
+                    && args.len() != expected
+                {
+                    let span = self.find_ident_span(fn_name);
+                    let diag = Diagnostic::warning(format!(
+                        "function '{}' takes {} argument(s) but {} were supplied",
+                        fn_name,
+                        expected,
+                        args.len()
+                    ))
+                    .with_code(ErrorCode::E0004)
+                    .with_label(span, format!("takes {} arguments", expected))
+                    .with_secondary_label(sym.span, "defined here");
+                    self.diagnostics.push(diag);
                 }
             }
-            Expr::MethodCall { object, method: _, args } => {
+            Expr::MethodCall {
+                object,
+                method: _,
+                args,
+            } => {
                 self.analyze_expr(object);
                 for a in args {
                     self.analyze_expr(a);
@@ -594,11 +667,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 "and" | "or" => {
                     let r_ty = self.infer_expr_type(right);
                     let l_ty = self.infer_expr_type(left);
-                    if l_ty == r_ty {
-                        l_ty
-                    } else {
-                        NeyukiType::Any
-                    }
+                    if l_ty == r_ty { l_ty } else { NeyukiType::Any }
                 }
                 _ => NeyukiType::Number,
             },
@@ -608,10 +677,13 @@ impl<'a> SemanticAnalyzer<'a> {
 
     fn check_shadowing(&mut self, name: &str, span: Span) {
         if let Some(outer) = self.scope_mgr.find_outer(name) {
-            let diag = Diagnostic::warning(format!("declaration of '{}' shadows a variable in an outer scope", name))
-                .with_code(ErrorCode::W0003)
-                .with_label(span, "shadows previous declaration")
-                .with_secondary_label(outer.span, "outer variable was declared here");
+            let diag = Diagnostic::warning(format!(
+                "declaration of '{}' shadows a variable in an outer scope",
+                name
+            ))
+            .with_code(ErrorCode::W0003)
+            .with_label(span, "shadows previous declaration")
+            .with_secondary_label(outer.span, "outer variable was declared here");
             self.diagnostics.push(diag);
         }
     }
@@ -621,14 +693,25 @@ impl<'a> SemanticAnalyzer<'a> {
         for sym in symbols {
             if !sym.used && !sym.name.starts_with('_') {
                 let (code, msg, label_msg) = if sym.kind == SymbolKind::Parameter {
-                    (ErrorCode::W0002, format!("unused parameter '{}'", sym.name), "parameter never used")
+                    (
+                        ErrorCode::W0002,
+                        format!("unused parameter '{}'", sym.name),
+                        "parameter never used",
+                    )
                 } else {
-                    (ErrorCode::W0001, format!("unused variable '{}'", sym.name), "variable never used")
+                    (
+                        ErrorCode::W0001,
+                        format!("unused variable '{}'", sym.name),
+                        "variable never used",
+                    )
                 };
                 let diag = Diagnostic::warning(msg)
                     .with_code(code)
                     .with_label(sym.span, label_msg)
-                    .with_help(format!("if this is intentional, prefix with an underscore: '_{}'", sym.name));
+                    .with_help(format!(
+                        "if this is intentional, prefix with an underscore: '_{}'",
+                        sym.name
+                    ));
                 self.diagnostics.push(diag);
             }
         }

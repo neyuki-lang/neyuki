@@ -32,8 +32,8 @@ pub fn lint_source(source: &str) -> Result<Vec<Diagnostic>, Diagnostic> {
 }
 
 pub fn lint_file(path: &str) -> Result<Vec<Diagnostic>, String> {
-    let source = fs::read_to_string(path)
-        .map_err(|err| format!("failed to read '{}': {}", path, err))?;
+    let source =
+        fs::read_to_string(path).map_err(|err| format!("failed to read '{}': {}", path, err))?;
 
     match lint_source(&source) {
         Ok(diags) => Ok(diags),
@@ -43,8 +43,8 @@ pub fn lint_file(path: &str) -> Result<Vec<Diagnostic>, String> {
 
 // Backward-compatible CLI entry point for `neyuki lint <path>`
 pub fn lint(path: &str) -> Result<(), String> {
-    let source = fs::read_to_string(path)
-        .map_err(|err| format!("failed to read '{}': {}", path, err))?;
+    let source =
+        fs::read_to_string(path).map_err(|err| format!("failed to read '{}': {}", path, err))?;
 
     let diagnostics = lint_file(path)?;
 

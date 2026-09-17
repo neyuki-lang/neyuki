@@ -3,44 +3,45 @@
 use num_bigint::BigInt;
 use std::str::FromStr;
 
+use super::Compiler;
+use super::state::FuncState;
 use crate::bytecode::instruction::Instruction;
 use crate::bytecode::proto::Constant;
 use crate::parser::{Expr, InterpPart, Param, Stmt};
-use super::Compiler;
-use super::state::FuncState;
 
 impl Compiler {
     pub fn compile_expr(&mut self, expr: &Expr, target: Option<u8>) -> u8 {
         let dst = target.unwrap_or_else(|| self.current_mut().alloc_reg());
 
         match expr {
-            Expr::Literal(val) => {
-                match val.as_str() {
-                    "nil" => {
-                        self.current_mut().emit(Instruction::LoadNil { dst });
-                    }
-                    "true" => {
-                        self.current_mut().emit(Instruction::LoadBool { dst, val: true });
-                    }
-                    "false" => {
-                        self.current_mut().emit(Instruction::LoadBool { dst, val: false });
-                    }
-                    s => {
-                        if let Ok(i) = s.parse::<i32>() {
-                            self.current_mut().emit(Instruction::LoadInt { dst, val: i });
-                        } else if let Ok(bi) = BigInt::from_str(s) {
-                            let k = self.add_constant(Constant::Int(bi));
-                            self.current_mut().emit(Instruction::LoadK { dst, k });
-                        } else if let Ok(f) = s.parse::<f64>() {
-                            let k = self.add_constant(Constant::Float(f));
-                            self.current_mut().emit(Instruction::LoadK { dst, k });
-                        } else {
-                            let k = self.add_constant(Constant::String(s.to_string()));
-                            self.current_mut().emit(Instruction::LoadK { dst, k });
-                        }
+            Expr::Literal(val) => match val.as_str() {
+                "nil" => {
+                    self.current_mut().emit(Instruction::LoadNil { dst });
+                }
+                "true" => {
+                    self.current_mut()
+                        .emit(Instruction::LoadBool { dst, val: true });
+                }
+                "false" => {
+                    self.current_mut()
+                        .emit(Instruction::LoadBool { dst, val: false });
+                }
+                s => {
+                    if let Ok(i) = s.parse::<i32>() {
+                        self.current_mut()
+                            .emit(Instruction::LoadInt { dst, val: i });
+                    } else if let Ok(bi) = BigInt::from_str(s) {
+                        let k = self.add_constant(Constant::Int(bi));
+                        self.current_mut().emit(Instruction::LoadK { dst, k });
+                    } else if let Ok(f) = s.parse::<f64>() {
+                        let k = self.add_constant(Constant::Float(f));
+                        self.current_mut().emit(Instruction::LoadK { dst, k });
+                    } else {
+                        let k = self.add_constant(Constant::String(s.to_string()));
+                        self.current_mut().emit(Instruction::LoadK { dst, k });
                     }
                 }
-            }
+            },
             Expr::Str(s) => {
                 let k = self.add_constant(Constant::String(s.clone()));
                 self.current_mut().emit(Instruction::LoadK { dst, k });
@@ -68,22 +69,29 @@ impl Compiler {
                                 self.current_mut().emit(Instruction::LoadK { dst: r, k });
                                 r
                             }
-                            InterpPart::Expr(expr) => {
-                                self.compile_expr(expr, None)
-                            }
+                            InterpPart::Expr(expr) => self.compile_expr(expr, None),
                         };
                         if let Some(prev) = cur_reg {
                             let next = self.current_mut().alloc_reg();
-                            self.current_mut().emit(Instruction::Concat { dst: next, a: prev, b: part_reg });
+                            self.current_mut().emit(Instruction::Concat {
+                                dst: next,
+                                a: prev,
+                                b: part_reg,
+                            });
                             self.current_mut().free_reg(part_reg);
                             self.current_mut().free_reg(prev);
                             cur_reg = Some(next);
                         } else if parts.len() == 1 {
                             let empty_reg = self.current_mut().alloc_reg();
                             let k = self.add_constant(Constant::String(String::new()));
-                            self.current_mut().emit(Instruction::LoadK { dst: empty_reg, k });
+                            self.current_mut()
+                                .emit(Instruction::LoadK { dst: empty_reg, k });
                             let next = self.current_mut().alloc_reg();
-                            self.current_mut().emit(Instruction::Concat { dst: next, a: empty_reg, b: part_reg });
+                            self.current_mut().emit(Instruction::Concat {
+                                dst: next,
+                                a: empty_reg,
+                                b: part_reg,
+                            });
                             self.current_mut().free_reg(empty_reg);
                             self.current_mut().free_reg(part_reg);
                             cur_reg = Some(next);
@@ -110,14 +118,17 @@ impl Compiler {
                         });
                     }
                 } else if let Some(upval_idx) = reg_or_upval {
-                    self.current_mut().emit(Instruction::GetUpval { dst, upval_idx });
+                    self.current_mut()
+                        .emit(Instruction::GetUpval { dst, upval_idx });
                 } else {
                     let name_k = self.add_constant(Constant::String(name.clone()));
-                    self.current_mut().emit(Instruction::GetGlobal { dst, name_k });
+                    self.current_mut()
+                        .emit(Instruction::GetGlobal { dst, name_k });
                 }
             }
             Expr::Vararg => {
-                self.current_mut().emit(Instruction::Vararg { dst, count: 1 });
+                self.current_mut()
+                    .emit(Instruction::Vararg { dst, count: 1 });
             }
             Expr::Member { object, field } => {
                 let obj_reg = self.compile_expr(object, None);
@@ -148,7 +159,11 @@ impl Compiler {
                         if !array_regs.is_empty() {
                             let base = array_regs[0];
                             let count = array_regs.len() as u8;
-                            self.current_mut().emit(Instruction::SetList { table: dst, base, count });
+                            self.current_mut().emit(Instruction::SetList {
+                                table: dst,
+                                base,
+                                count,
+                            });
                             for r in array_regs.drain(..).rev() {
                                 self.current_mut().free_reg(r);
                             }
@@ -167,7 +182,11 @@ impl Compiler {
                         if array_regs.len() >= 32 {
                             let base = array_regs[0];
                             let count = array_regs.len() as u8;
-                            self.current_mut().emit(Instruction::SetList { table: dst, base, count });
+                            self.current_mut().emit(Instruction::SetList {
+                                table: dst,
+                                base,
+                                count,
+                            });
                             for r in array_regs.drain(..).rev() {
                                 self.current_mut().free_reg(r);
                             }
@@ -177,7 +196,11 @@ impl Compiler {
                 if !array_regs.is_empty() {
                     let base = array_regs[0];
                     let count = array_regs.len() as u8;
-                    self.current_mut().emit(Instruction::SetList { table: dst, base, count });
+                    self.current_mut().emit(Instruction::SetList {
+                        table: dst,
+                        base,
+                        count,
+                    });
                     for r in array_regs.drain(..).rev() {
                         self.current_mut().free_reg(r);
                     }
@@ -197,84 +220,108 @@ impl Compiler {
                 };
                 self.current_mut().free_reg(src);
             }
-            Expr::Binary { left, op, right } => {
-                match op.as_str() {
-                    "and" => {
-                        self.compile_expr(left, Some(dst));
-                        let false_jump = self.current_mut().emit(Instruction::Test {
-                            reg: dst,
-                            jump_if_false: 0,
-                        });
-                        self.compile_expr(right, Some(dst));
-                        self.patch_jump(false_jump);
-                    }
-                    "or" => {
-                        self.compile_expr(left, Some(dst));
-                        let false_jump = self.current_mut().emit(Instruction::Test {
-                            reg: dst,
-                            jump_if_false: 0,
-                        });
-                        let end_jump = self.current_mut().emit(Instruction::Jump { offset: 0 });
-                        self.patch_jump(false_jump);
-                        self.compile_expr(right, Some(dst));
-                        self.patch_jump(end_jump);
-                    }
-                    "??" => {
-                        let a = self.compile_expr(left, None);
-                        let b = self.compile_expr(right, None);
-                        self.current_mut().emit(Instruction::Coalesce { dst, a, b });
-                        self.current_mut().free_reg(b);
-                        self.current_mut().free_reg(a);
-                    }
-                    "==" | "!=" | "<" | "<=" | ">" | ">=" => {
-                        let a = self.compile_expr(left, None);
-                        let b = self.compile_expr(right, None);
-                        let false_jump = match op.as_str() {
-                            "==" => self.current_mut().emit(Instruction::Eq { a, b, jump_if_false: 0 }),
-                            "!=" => self.current_mut().emit(Instruction::Ne { a, b, jump_if_false: 0 }),
-                            "<" => self.current_mut().emit(Instruction::Lt { a, b, jump_if_false: 0 }),
-                            "<=" => self.current_mut().emit(Instruction::Le { a, b, jump_if_false: 0 }),
-                            ">" => self.current_mut().emit(Instruction::Gt { a, b, jump_if_false: 0 }),
-                            ">=" => self.current_mut().emit(Instruction::Ge { a, b, jump_if_false: 0 }),
-                            _ => unreachable!(),
-                        };
-                        self.current_mut().free_reg(b);
-                        self.current_mut().free_reg(a);
-                        self.current_mut().emit(Instruction::LoadBool { dst, val: true });
-                        let skip = self.current_mut().emit(Instruction::Jump { offset: 1 });
-                        self.patch_jump(false_jump);
-                        self.current_mut().emit(Instruction::LoadBool { dst, val: false });
-                        self.patch_jump(skip);
-                    }
-                    _ => {
-                        let a = self.compile_expr(left, None);
-                        let b = self.compile_expr(right, None);
-                        match op.as_str() {
-                            "+" => self.current_mut().emit(Instruction::Add { dst, a, b }),
-                            "-" => self.current_mut().emit(Instruction::Sub { dst, a, b }),
-                            "*" => self.current_mut().emit(Instruction::Mul { dst, a, b }),
-                            "/" => self.current_mut().emit(Instruction::Div { dst, a, b }),
-                            "//" => self.current_mut().emit(Instruction::IDiv { dst, a, b }),
-                            "%" => self.current_mut().emit(Instruction::Mod { dst, a, b }),
-                            "^" => self.current_mut().emit(Instruction::Pow { dst, a, b }),
-                            "&" => self.current_mut().emit(Instruction::BitAnd { dst, a, b }),
-                            "|" => self.current_mut().emit(Instruction::BitOr { dst, a, b }),
-                            "~" => self.current_mut().emit(Instruction::BitXor { dst, a, b }),
-                            "<<" => self.current_mut().emit(Instruction::Shl { dst, a, b }),
-                            ">>" => self.current_mut().emit(Instruction::Shr { dst, a, b }),
-                            "<<<" => self.current_mut().emit(Instruction::LShl { dst, a, b }),
-                            ">>>" => self.current_mut().emit(Instruction::LShr { dst, a, b }),
-                            ".." => self.current_mut().emit(Instruction::Concat { dst, a, b }),
-                            _ => {
-                                self.emit_error("unsupported operator");
-                                0
-                            }
-                        };
-                        self.current_mut().free_reg(b);
-                        self.current_mut().free_reg(a);
-                    }
+            Expr::Binary { left, op, right } => match op.as_str() {
+                "and" => {
+                    self.compile_expr(left, Some(dst));
+                    let false_jump = self.current_mut().emit(Instruction::Test {
+                        reg: dst,
+                        jump_if_false: 0,
+                    });
+                    self.compile_expr(right, Some(dst));
+                    self.patch_jump(false_jump);
                 }
-            }
+                "or" => {
+                    self.compile_expr(left, Some(dst));
+                    let false_jump = self.current_mut().emit(Instruction::Test {
+                        reg: dst,
+                        jump_if_false: 0,
+                    });
+                    let end_jump = self.current_mut().emit(Instruction::Jump { offset: 0 });
+                    self.patch_jump(false_jump);
+                    self.compile_expr(right, Some(dst));
+                    self.patch_jump(end_jump);
+                }
+                "??" => {
+                    let a = self.compile_expr(left, None);
+                    let b = self.compile_expr(right, None);
+                    self.current_mut().emit(Instruction::Coalesce { dst, a, b });
+                    self.current_mut().free_reg(b);
+                    self.current_mut().free_reg(a);
+                }
+                "==" | "!=" | "<" | "<=" | ">" | ">=" => {
+                    let a = self.compile_expr(left, None);
+                    let b = self.compile_expr(right, None);
+                    let false_jump = match op.as_str() {
+                        "==" => self.current_mut().emit(Instruction::Eq {
+                            a,
+                            b,
+                            jump_if_false: 0,
+                        }),
+                        "!=" => self.current_mut().emit(Instruction::Ne {
+                            a,
+                            b,
+                            jump_if_false: 0,
+                        }),
+                        "<" => self.current_mut().emit(Instruction::Lt {
+                            a,
+                            b,
+                            jump_if_false: 0,
+                        }),
+                        "<=" => self.current_mut().emit(Instruction::Le {
+                            a,
+                            b,
+                            jump_if_false: 0,
+                        }),
+                        ">" => self.current_mut().emit(Instruction::Gt {
+                            a,
+                            b,
+                            jump_if_false: 0,
+                        }),
+                        ">=" => self.current_mut().emit(Instruction::Ge {
+                            a,
+                            b,
+                            jump_if_false: 0,
+                        }),
+                        _ => unreachable!(),
+                    };
+                    self.current_mut().free_reg(b);
+                    self.current_mut().free_reg(a);
+                    self.current_mut()
+                        .emit(Instruction::LoadBool { dst, val: true });
+                    let skip = self.current_mut().emit(Instruction::Jump { offset: 1 });
+                    self.patch_jump(false_jump);
+                    self.current_mut()
+                        .emit(Instruction::LoadBool { dst, val: false });
+                    self.patch_jump(skip);
+                }
+                _ => {
+                    let a = self.compile_expr(left, None);
+                    let b = self.compile_expr(right, None);
+                    match op.as_str() {
+                        "+" => self.current_mut().emit(Instruction::Add { dst, a, b }),
+                        "-" => self.current_mut().emit(Instruction::Sub { dst, a, b }),
+                        "*" => self.current_mut().emit(Instruction::Mul { dst, a, b }),
+                        "/" => self.current_mut().emit(Instruction::Div { dst, a, b }),
+                        "//" => self.current_mut().emit(Instruction::IDiv { dst, a, b }),
+                        "%" => self.current_mut().emit(Instruction::Mod { dst, a, b }),
+                        "^" => self.current_mut().emit(Instruction::Pow { dst, a, b }),
+                        "&" => self.current_mut().emit(Instruction::BitAnd { dst, a, b }),
+                        "|" => self.current_mut().emit(Instruction::BitOr { dst, a, b }),
+                        "~" => self.current_mut().emit(Instruction::BitXor { dst, a, b }),
+                        "<<" => self.current_mut().emit(Instruction::Shl { dst, a, b }),
+                        ">>" => self.current_mut().emit(Instruction::Shr { dst, a, b }),
+                        "<<<" => self.current_mut().emit(Instruction::LShl { dst, a, b }),
+                        ">>>" => self.current_mut().emit(Instruction::LShr { dst, a, b }),
+                        ".." => self.current_mut().emit(Instruction::Concat { dst, a, b }),
+                        _ => {
+                            self.emit_error("unsupported operator");
+                            0
+                        }
+                    };
+                    self.current_mut().free_reg(b);
+                    self.current_mut().free_reg(a);
+                }
+            },
             Expr::Call { callee, args } => {
                 let func_reg = self.current_mut().alloc_reg();
                 self.compile_expr(callee, Some(func_reg));
@@ -290,17 +337,19 @@ impl Compiler {
                     retc: 1,
                 });
                 if func_reg != dst {
-                    self.current_mut().emit(Instruction::Move {
-                        dst,
-                        src: func_reg,
-                    });
+                    self.current_mut()
+                        .emit(Instruction::Move { dst, src: func_reg });
                 }
                 for r in arg_regs.into_iter().rev() {
                     self.current_mut().free_reg(r);
                 }
                 self.current_mut().free_reg(func_reg);
             }
-            Expr::MethodCall { object, method, args } => {
+            Expr::MethodCall {
+                object,
+                method,
+                args,
+            } => {
                 let func_reg = self.current_mut().alloc_reg();
                 let arg0 = self.current_mut().alloc_reg();
                 self.compile_expr(object, Some(arg0));
@@ -322,10 +371,8 @@ impl Compiler {
                     retc: 1,
                 });
                 if func_reg != dst {
-                    self.current_mut().emit(Instruction::Move {
-                        dst,
-                        src: func_reg,
-                    });
+                    self.current_mut()
+                        .emit(Instruction::Move { dst, src: func_reg });
                 }
                 for r in arg_regs.into_iter().rev() {
                     self.current_mut().free_reg(r);
@@ -335,10 +382,8 @@ impl Compiler {
             }
             Expr::Function { params, body } => {
                 let proto_idx = self.compile_function(None, params, body);
-                self.current_mut().emit(Instruction::Closure {
-                    dst,
-                    proto_idx,
-                });
+                self.current_mut()
+                    .emit(Instruction::Closure { dst, proto_idx });
             }
         }
 

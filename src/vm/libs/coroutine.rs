@@ -13,11 +13,23 @@ pub fn create_coroutine_lib() -> Value {
     let t = Rc::new(RefCell::new(VmTable::new()));
     let mut b = t.borrow_mut();
 
-    b.set_str("create", Value::Native("coroutine.create", coroutine_create));
-    b.set_str("resume", Value::Native("coroutine.resume", coroutine_resume));
+    b.set_str(
+        "create",
+        Value::Native("coroutine.create", coroutine_create),
+    );
+    b.set_str(
+        "resume",
+        Value::Native("coroutine.resume", coroutine_resume),
+    );
     b.set_str("yield", Value::Native("coroutine.yield", coroutine_yield));
-    b.set_str("status", Value::Native("coroutine.status", coroutine_status));
-    b.set_str("running", Value::Native("coroutine.running", coroutine_running));
+    b.set_str(
+        "status",
+        Value::Native("coroutine.status", coroutine_status),
+    );
+    b.set_str(
+        "running",
+        Value::Native("coroutine.running", coroutine_running),
+    );
     b.set_str("wrap", Value::Native("coroutine.wrap", coroutine_wrap));
     b.set_str(
         "isyieldable",

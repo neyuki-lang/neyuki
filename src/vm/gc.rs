@@ -199,7 +199,8 @@ impl GcTracker {
         let mut freed_bytes = 0;
 
         // Step 1: Identify all candidate white tables
-        let mut white_tables: HashMap<*const RefCell<VmTable>, Rc<RefCell<VmTable>>> = HashMap::new();
+        let mut white_tables: HashMap<*const RefCell<VmTable>, Rc<RefCell<VmTable>>> =
+            HashMap::new();
         for (&ptr, (weak_rc, header)) in &self.tables {
             if header.color == GcColor::White0 || header.color == GcColor::White1 {
                 if let Some(rc) = weak_rc.upgrade() {
@@ -449,7 +450,9 @@ mod tests {
         gc.register_table(&root_rc);
         gc.register_table(&child_rc);
 
-        root_rc.borrow_mut().set_str("child", Value::Table(child_rc.clone()));
+        root_rc
+            .borrow_mut()
+            .set_str("child", Value::Table(child_rc.clone()));
         stack.push(Value::Table(root_rc.clone()));
 
         drop(child_rc);
@@ -467,7 +470,9 @@ mod tests {
 
         // Table is held by external Rust code outside VM roots
         let external_table = Rc::new(RefCell::new(VmTable::new()));
-        external_table.borrow_mut().set_str("important", Value::Int(num_bigint::BigInt::from(999)));
+        external_table
+            .borrow_mut()
+            .set_str("important", Value::Int(num_bigint::BigInt::from(999)));
         gc.register_table(&external_table);
 
         // Run collection when table is not in roots
@@ -476,7 +481,12 @@ mod tests {
         // Ensure the external table was NOT gutted or corrupted!
         assert!(external_table.borrow().fields.contains_key("important"));
         assert_eq!(
-            external_table.borrow().fields.get("important").unwrap().to_string(),
+            external_table
+                .borrow()
+                .fields
+                .get("important")
+                .unwrap()
+                .to_string(),
             "999"
         );
     }

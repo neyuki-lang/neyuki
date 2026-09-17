@@ -68,7 +68,10 @@ pub fn run_all_tests() {
         return;
     }
 
-    println!("Running {} integration test file(s) from tests/:", files.len());
+    println!(
+        "Running {} integration test file(s) from tests/:",
+        files.len()
+    );
     let suite_start = Instant::now();
     let mut passed = 0;
     let mut failed = 0;
@@ -119,6 +122,21 @@ mod integration_tests {
                 "Test script '{}' failed: {:?}",
                 path.display(),
                 result.error
+            );
+        }
+    }
+
+    #[test]
+    fn test_cargo_fmt_check() {
+        let output = std::process::Command::new("cargo")
+            .args(["fmt", "--all", "--", "--check"])
+            .output();
+        if let Ok(out) = output {
+            assert!(
+                out.status.success(),
+                "cargo fmt --all -- --check failed:\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
             );
         }
     }

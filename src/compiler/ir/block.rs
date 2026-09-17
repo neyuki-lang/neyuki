@@ -45,4 +45,3 @@ impl IrFunction {
 pub struct IrModule {
     pub main: IrFunction,
 }
-
