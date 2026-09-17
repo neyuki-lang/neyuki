@@ -83,7 +83,7 @@ impl FuncState {
 
     pub(crate) fn add_local(&mut self, name: String, reg: u8) {
         let from_pc = self.proto.instructions.len() as u32;
-        self.proto.push_local(name.clone(), from_pc);
+        self.proto.push_local(name.clone(), reg, from_pc);
         self.locals.push(LocalVar {
             name,
             reg,

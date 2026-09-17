@@ -227,10 +227,9 @@ impl JsonParser {
                             for _ in 0..4 {
                                 hex.push(self.advance().ok_or_else(|| "unclosed unicode escape".to_string())?);
                             }
-                            let cp = u32::from_str_radix(&hex, 16).map_err(|_| "invalid unicode escape")?;
-                            if let Some(ch) = char::from_u32(cp) {
-                                out.push(ch);
-                            }
+                            let cp = u32::from_str_radix(&hex, 16).map_err(|_| "invalid unicode escape".to_string())?;
+                            let ch = char::from_u32(cp).ok_or_else(|| format!("invalid unicode codepoint \\u{:04x}", cp))?;
+                            out.push(ch);
                         }
                         _ => return Err(format!("invalid escape character '\\{}'", esc)),
                     }

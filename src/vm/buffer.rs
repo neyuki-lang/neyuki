@@ -28,15 +28,14 @@ impl VmBuffer {
     }
 
     fn check_bounds(&self, offset: usize, size: usize) -> Result<(), String> {
-        if offset + size > self.data.len() {
-            Err(format!(
+        match offset.checked_add(size) {
+            Some(end) if end <= self.data.len() => Ok(()),
+            _ => Err(format!(
                 "buffer out of bounds: offset {} size {} buffer length {}",
                 offset,
                 size,
                 self.data.len()
-            ))
-        } else {
-            Ok(())
+            )),
         }
     }
 
@@ -167,5 +166,25 @@ impl VmBuffer {
             *b = val;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_buffer_bounds_overflow_rejected() {
+        let mut buf = VmBuffer::new(10);
+        // usize::MAX + 1 wraps in unchecked arithmetic to 0, which would bypass offset + size > len
+        let overflow_offset = usize::MAX;
+        assert!(buf.read_u8(overflow_offset).is_err());
+        assert!(buf.write_u8(overflow_offset, 42).is_err());
+        assert!(buf.read_u16(overflow_offset).is_err());
+        assert!(buf.write_u16(overflow_offset, 1234).is_err());
+        assert!(buf.read_u32(overflow_offset).is_err());
+        assert!(buf.write_u32(overflow_offset, 12345).is_err());
+        assert!(buf.read_f64(overflow_offset).is_err());
+        assert!(buf.write_f64(overflow_offset, 2.5).is_err());
     }
 }

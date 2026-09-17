@@ -41,7 +41,7 @@ impl Int {
         }
     }
 
-    /// The low 64 bits in two's complement, as an unsigned word.
+    // The low 64 bits in two's complement, as an unsigned word.
     pub(crate) fn low_u64(&self) -> u64 {
         match self {
             Int::Small(value) => *value as u64,
@@ -310,10 +310,35 @@ pub(crate) enum Function {
         call: Native,
     },
     User {
+        name: Option<String>,
         params: Vec<Param>,
         body: Vec<Stmt>,
         env: EnvRef,
     },
+}
+
+#[derive(Clone)]
+pub struct RuntimeCallFrame {
+    pub name: Option<String>,
+    pub source: String,
+    pub current_line: usize,
+    pub what: &'static str,
+    pub num_params: usize,
+    pub is_vararg: bool,
+    pub func_val: Option<Value>,
+}
+
+thread_local! {
+    pub static RUNTIME_CALL_STACK: RefCell<Vec<RuntimeCallFrame>> = const { RefCell::new(Vec::new()) };
+}
+
+struct FrameGuard;
+impl Drop for FrameGuard {
+    fn drop(&mut self) {
+        RUNTIME_CALL_STACK.with(|stack| {
+            stack.borrow_mut().pop();
+        });
+    }
 }
 
 pub(crate) struct Env {
@@ -400,6 +425,7 @@ impl Runtime {
             ("error", native("error", builtin_error)),
             ("int", native("int", builtin_int)),
             ("float", native("float", builtin_float)),
+            ("tonumber", native("tonumber", builtin_tonumber)),
             ("__floor", native("__floor", builtin_floor)),
             ("__sqrt", native("__sqrt", builtin_sqrt)),
             ("__ceil", native("__ceil", builtin_ceil)),
@@ -442,6 +468,8 @@ impl Runtime {
                 native("__table_isfrozen", builtin_table_isfrozen),
             ),
             ("try", native("try", builtin_try)),
+            ("pcall", native("pcall", builtin_pcall)),
+            ("xpcall", native("xpcall", builtin_xpcall)),
             ("require", native("require", builtin_require)),
             ("setmetatable", native("setmetatable", builtin_setmetatable)),
             ("getmetatable", native("getmetatable", builtin_getmetatable)),
@@ -473,10 +501,36 @@ impl Runtime {
     }
 
     fn execute(&mut self, program: &[Stmt]) -> Result<Vec<Value>, String> {
-        match self.exec_block(program, self.global.clone())? {
-            Flow::Return(values) => Ok(values),
-            Flow::Normal => Ok(Vec::new()),
-            Flow::Break | Flow::Continue => Err("loop control used outside a loop".to_string()),
+        RUNTIME_CALL_STACK.with(|stack| {
+            stack.borrow_mut().push(RuntimeCallFrame {
+                name: Some("main".to_string()),
+                source: "=[runtime]".to_string(),
+                current_line: 1,
+                what: "main",
+                num_params: 0,
+                is_vararg: true,
+                func_val: None,
+            });
+        });
+        let _guard = FrameGuard;
+        let block_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.exec_block(program, self.global.clone())
+        }));
+        match block_res {
+            Ok(Ok(Flow::Return(values))) => Ok(values),
+            Ok(Ok(Flow::Normal)) => Ok(Vec::new()),
+            Ok(Ok(Flow::Break | Flow::Continue)) => Err("loop control used outside a loop".to_string()),
+            Ok(Err(err)) => Err(err),
+            Err(panic_payload) => {
+                let msg = if let Some(s) = panic_payload.downcast_ref::<String>() {
+                    s.clone()
+                } else if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                    s.to_string()
+                } else {
+                    "unexpected panic during execution".to_string()
+                };
+                Err(format!("runtime panic caught: {}", msg))
+            }
         }
     }
 
@@ -570,6 +624,7 @@ impl Runtime {
                 ..
             } => {
                 let value = Value::Function(Rc::new(Function::User {
+                    name: Some(name.clone()),
                     params: params.clone(),
                     body: body.clone(),
                     env: env.clone(),
@@ -858,6 +913,7 @@ impl Runtime {
                 self.call(function, values).map(collapse_values)
             }
             Expr::Function { params, body } => Ok(Value::Function(Rc::new(Function::User {
+                name: None,
                 params: params.clone(),
                 body: body.clone(),
                 env,
@@ -905,8 +961,27 @@ impl Runtime {
                 Function::Native {
                     name: "require", ..
                 } => self.call_require(args),
-                Function::Native { call, .. } => call(args),
-                Function::User { params, body, env } => {
+                Function::Native { name, call } => {
+                    RUNTIME_CALL_STACK.with(|stack| {
+                        stack.borrow_mut().push(RuntimeCallFrame {
+                            name: Some(name.to_string()),
+                            source: "=[C]".to_string(),
+                            current_line: 0,
+                            what: "C",
+                            num_params: 0,
+                            is_vararg: true,
+                            func_val: Some(Value::Function(function.clone())),
+                        });
+                    });
+                    let _guard = FrameGuard;
+                    call(args)
+                }
+                Function::User {
+                    name,
+                    params,
+                    body,
+                    env,
+                } => {
                     let call_env = child(env);
                     let mut arg_index = 0;
                     for param in params {
@@ -931,6 +1006,20 @@ impl Runtime {
                             arg_index += 1;
                         }
                     }
+                    let num_params = params.iter().filter(|p| !p.variadic).count();
+                    let is_vararg = params.iter().any(|p| p.variadic);
+                    RUNTIME_CALL_STACK.with(|stack| {
+                        stack.borrow_mut().push(RuntimeCallFrame {
+                            name: name.clone(),
+                            source: "=[runtime]".to_string(),
+                            current_line: 1,
+                            what: "Lua",
+                            num_params,
+                            is_vararg,
+                            func_val: Some(Value::Function(function.clone())),
+                        });
+                    });
+                    let _guard = FrameGuard;
                     match self.exec_block(body, call_env)? {
                         Flow::Return(values) => Ok(values),
                         _ => Ok(vec![Value::Nil]),
@@ -1018,8 +1107,11 @@ impl Runtime {
         };
         tbl.fields.insert("create".to_string(), native("coroutine.create", runtime_coroutine_create));
         tbl.fields.insert("resume".to_string(), native("coroutine.resume", runtime_coroutine_resume));
+        tbl.fields.insert("yield".to_string(), native("coroutine.yield", runtime_coroutine_yield));
         tbl.fields.insert("status".to_string(), native("coroutine.status", runtime_coroutine_status));
         tbl.fields.insert("running".to_string(), native("coroutine.running", runtime_coroutine_running));
+        tbl.fields.insert("wrap".to_string(), native("coroutine.wrap", runtime_coroutine_wrap));
+        tbl.fields.insert("isyieldable".to_string(), native("coroutine.isyieldable", runtime_coroutine_isyieldable));
         Value::Table(Rc::new(RefCell::new(tbl)))
     }
 
@@ -1513,14 +1605,28 @@ fn bitwise(left: Value, op: &str, right: Value) -> Result<Value, String> {
         "&" => &a & &b,
         "|" => &a | &b,
         "~" => &a ^ &b,
-        "<<" => a.shl(
-            b.to_usize()
-                .ok_or_else(|| "shift is too large".to_string())?,
-        ),
-        ">>" => a.shr(
-            b.to_usize()
-                .ok_or_else(|| "shift is too large".to_string())?,
-        ),
+        "<<" => {
+            if let Some(shift) = b.to_i64() {
+                if shift < 0 {
+                    a.shr((-shift) as usize)
+                } else {
+                    a.shl(shift as usize)
+                }
+            } else {
+                return Err("shift is too large".to_string());
+            }
+        }
+        ">>" => {
+            if let Some(shift) = b.to_i64() {
+                if shift < 0 {
+                    a.shl((-shift) as usize)
+                } else {
+                    a.shr(shift as usize)
+                }
+            } else {
+                return Err("shift is too large".to_string());
+            }
+        }
         "<<<" | ">>>" => {
             // Logical shifts act on the low 64 bits as an unsigned word, so
             // the result is always in 0..2^64 and shifting by 64+ yields 0.
@@ -1716,6 +1822,92 @@ fn builtin_float(args: Vec<Value>) -> Result<Vec<Value>, String> {
     Ok(vec![Value::Number(number(
         args.first().cloned().unwrap_or(Value::Nil),
     )?)])
+}
+fn builtin_tonumber(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let val = args.first().cloned().unwrap_or(Value::Nil);
+    let base_opt = args.get(1);
+
+    if let Some(base_val) = base_opt
+        && !matches!(base_val, Value::Nil)
+    {
+        let base = match base_val {
+            Value::Integer(i) => i.to_i64().unwrap_or(0),
+            Value::Number(f) => *f as i64,
+            _ => return Err("bad argument #2 to 'tonumber' (base out of range)".to_string()),
+        };
+        if !(2..=36).contains(&base) {
+            return Err("bad argument #2 to 'tonumber' (base out of range)".to_string());
+        }
+        let s = match &val {
+            Value::String(s) => s.as_str(),
+            _ => return Ok(vec![Value::Nil]),
+        };
+        if s.len() > 65_536 {
+            return Ok(vec![Value::Nil]);
+        }
+        let s_trimmed = s.trim();
+        let (sign, s_digits) = if let Some(stripped) = s_trimmed.strip_prefix('-') {
+            (-1, stripped.trim_start())
+        } else if let Some(stripped) = s_trimmed.strip_prefix('+') {
+            (1, stripped.trim_start())
+        } else {
+            (1, s_trimmed)
+        };
+        let s_digits = if base == 16 {
+            if let Some(stripped) = s_digits.strip_prefix("0x").or_else(|| s_digits.strip_prefix("0X")) {
+                stripped
+            } else {
+                s_digits
+            }
+        } else {
+            s_digits
+        };
+        if s_digits.is_empty() {
+            return Ok(vec![Value::Nil]);
+        }
+        return match BigInt::parse_bytes(s_digits.as_bytes(), base as u32) {
+            Some(bi) => {
+                let bi = if sign < 0 { -bi } else { bi };
+                Ok(vec![Value::Integer(Int::from_bigint(bi))])
+            }
+            None => Ok(vec![Value::Nil]),
+        };
+    }
+
+    match val {
+        Value::Integer(i) => Ok(vec![Value::Integer(i)]),
+        Value::Number(f) => Ok(vec![Value::Number(f)]),
+        Value::String(s) => {
+            if s.len() > 65_536 {
+                return Ok(vec![Value::Nil]);
+            }
+            let s_trimmed = s.trim();
+            let (sign, s_rest) = if let Some(stripped) = s_trimmed.strip_prefix('-') {
+                (-1, stripped.trim_start())
+            } else if let Some(stripped) = s_trimmed.strip_prefix('+') {
+                (1, stripped.trim_start())
+            } else {
+                (1, s_trimmed)
+            };
+            if let Some(stripped_hex) = s_rest.strip_prefix("0x").or_else(|| s_rest.strip_prefix("0X"))
+                && !stripped_hex.is_empty()
+                && let Some(bi) = BigInt::parse_bytes(stripped_hex.as_bytes(), 16)
+            {
+                let bi = if sign < 0 { -bi } else { bi };
+                return Ok(vec![Value::Integer(Int::from_bigint(bi))]);
+            }
+            if let Ok(i) = s_trimmed.parse::<i64>() {
+                Ok(vec![Value::Integer(Int::from(i))])
+            } else if let Ok(bi) = std::str::FromStr::from_str(s_trimmed) {
+                Ok(vec![Value::Integer(Int::from_bigint(bi))])
+            } else if let Ok(f) = s_trimmed.parse::<f64>() {
+                Ok(vec![Value::Number(f)])
+            } else {
+                Ok(vec![Value::Nil])
+            }
+        }
+        _ => Ok(vec![Value::Nil]),
+    }
 }
 fn builtin_floor(args: Vec<Value>) -> Result<Vec<Value>, String> {
     let value = args.first().cloned().unwrap_or(Value::Nil);
@@ -2092,10 +2284,62 @@ fn builtin_try(args: Vec<Value>) -> Result<Vec<Value>, String> {
             }
             Err(error) => Ok(vec![Value::Bool(false), Value::String(error)]),
         },
-        Function::User { .. } => Ok(vec![
-            Value::Bool(false),
-            Value::String("user function try is unavailable in this base runtime".to_string()),
-        ]),
+        Function::User { .. } => {
+            let rt = Runtime::new();
+            match rt.call(Value::Function(function.clone()), args[1..].to_vec()) {
+                Ok(mut values) => {
+                    values.insert(0, Value::Bool(true));
+                    Ok(values)
+                }
+                Err(error) => Ok(vec![Value::Bool(false), Value::String(error)]),
+            }
+        }
+    }
+}
+fn builtin_pcall(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    builtin_try(args)
+}
+fn builtin_xpcall(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let Some(Value::Function(function)) = args.first() else {
+        return Err("xpcall expects a function as 1st argument".to_string());
+    };
+    let err_handler = args.get(1).cloned().unwrap_or(Value::Nil);
+    let call_args = if args.len() > 2 { args[2..].to_vec() } else { Vec::new() };
+
+    let res = match &**function {
+        Function::Native { call, .. } => call(call_args),
+        Function::User { .. } => {
+            let rt = Runtime::new();
+            rt.call(Value::Function(function.clone()), call_args)
+        }
+    };
+
+    match res {
+        Ok(mut values) => {
+            values.insert(0, Value::Bool(true));
+            Ok(values)
+        }
+        Err(error) => {
+            if let Value::Function(handler_fn) = err_handler {
+                let h_res = match &*handler_fn {
+                    Function::Native { call, .. } => call(vec![Value::String(error.clone())]),
+                    Function::User { .. } => {
+                        let rt = Runtime::new();
+                        rt.call(Value::Function(handler_fn.clone()), vec![Value::String(error.clone())])
+                    }
+                };
+                match h_res {
+                    Ok(vals) => {
+                        let mut out = vec![Value::Bool(false)];
+                        out.extend(vals);
+                        Ok(out)
+                    }
+                    Err(h_err) => Ok(vec![Value::Bool(false), Value::String(h_err)]),
+                }
+            } else {
+                Ok(vec![Value::Bool(false), Value::String(error)])
+            }
+        }
     }
 }
 fn builtin_require(_args: Vec<Value>) -> Result<Vec<Value>, String> {
@@ -2126,6 +2370,9 @@ fn builtin_os_getenv(args: Vec<Value>) -> Result<Vec<Value>, String> {
     let Some(Value::String(var)) = args.first() else {
         return Err("os.getenv expects a string variable name".to_string());
     };
+    if !crate::vm::libs::os::is_env_var_allowed(var) {
+        return Ok(vec![Value::Nil]);
+    }
     match std::env::var(var) {
         Ok(val) => Ok(vec![Value::String(val)]),
         Err(_) => Ok(vec![Value::Nil]),
@@ -2290,98 +2537,481 @@ fn runtime_utf8_offset(args: Vec<Value>) -> Result<Vec<Value>, String> {
 }
 
 fn runtime_debug_traceback(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let msg = match args.first() {
-        Some(Value::String(s)) => format!("{}\n", s),
-        _ => String::new(),
+    let mut out = String::new();
+    if let Some(msg) = args.first()
+        && !matches!(msg, Value::Nil) {
+            out.push_str(&msg.to_string());
+            out.push('\n');
+    }
+    out.push_str("stack traceback:\n");
+    let level_offset = match args.get(1) {
+        Some(Value::Integer(i)) => i.to_usize().unwrap_or(1),
+        Some(Value::Number(f)) => *f as usize,
+        _ => 1,
     };
-    Ok(vec![Value::String(format!("{}stack traceback:\n\t[tree-walker runtime]", msg))])
+
+    RUNTIME_CALL_STACK.with(|stack| {
+        let s = stack.borrow();
+        let total = s.len();
+        for (i, frame) in s.iter().rev().enumerate() {
+            if i < level_offset.saturating_sub(1) {
+                continue;
+            }
+            let fn_name = frame.name.as_deref().unwrap_or("<anonymous>");
+            let frame_idx = total.saturating_sub(i);
+            if frame.what == "main" {
+                out.push_str(&format!("  [frame {}] in main chunk\n", frame_idx));
+            } else if frame.what == "C" {
+                out.push_str(&format!("  [frame {}] [C]: in function '{}'\n", frame_idx, fn_name));
+            } else {
+                out.push_str(&format!(
+                    "  [frame {}] function '{}' at line {}\n",
+                    frame_idx, fn_name, frame.current_line
+                ));
+            }
+        }
+    });
+    Ok(vec![Value::String(out)])
 }
 
-fn runtime_debug_getinfo(_args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let mut tbl = Table {
-        array: Vec::new(),
-        fields: HashMap::new(),
-        const_fields: HashSet::new(),
-        frozen: false,
-        metatable: None,
+fn runtime_debug_getinfo(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let arg0 = args.first();
+    let tbl = match arg0 {
+        Some(Value::Integer(i)) => {
+            let level = i.to_usize().unwrap_or(0);
+            get_runtime_frame_info(level)
+        }
+        Some(Value::Number(f)) => {
+            let level = *f as usize;
+            get_runtime_frame_info(level)
+        }
+        Some(Value::Function(func)) => {
+            let mut t = Table {
+                array: Vec::new(),
+                fields: HashMap::new(),
+                const_fields: HashSet::new(),
+                frozen: false,
+                metatable: None,
+            };
+            match &**func {
+                Function::Native { name, .. } => {
+                    t.fields.insert("name".to_string(), Value::String(name.to_string()));
+                    t.fields.insert("what".to_string(), Value::String("C".to_string()));
+                    t.fields.insert("source".to_string(), Value::String("=[C]".to_string()));
+                    t.fields.insert("currentline".to_string(), Value::Integer(Int::from(-1i64)));
+                    t.fields.insert("numparams".to_string(), Value::Integer(Int::Small(0)));
+                    t.fields.insert("isvararg".to_string(), Value::Bool(true));
+                    t.fields.insert("func".to_string(), Value::Function(func.clone()));
+                }
+                Function::User { name, params, .. } => {
+                    let fn_name = name.clone().unwrap_or_else(|| "<anonymous>".to_string());
+                    t.fields.insert("name".to_string(), Value::String(fn_name));
+                    t.fields.insert("what".to_string(), Value::String("Lua".to_string()));
+                    t.fields.insert("source".to_string(), Value::String("=[runtime]".to_string()));
+                    t.fields.insert("currentline".to_string(), Value::Integer(Int::Small(1)));
+                    let numparams = params.iter().filter(|p| !p.variadic).count();
+                    let isvararg = params.iter().any(|p| p.variadic);
+                    t.fields.insert("numparams".to_string(), Value::Integer(Int::from(numparams as i64)));
+                    t.fields.insert("isvararg".to_string(), Value::Bool(isvararg));
+                    t.fields.insert("func".to_string(), Value::Function(func.clone()));
+                }
+            }
+            Some(t)
+        }
+        None => get_runtime_frame_info(1),
+        _ => None,
     };
-    tbl.fields.insert("source".to_string(), Value::String("=[runtime]".to_string()));
-    tbl.fields.insert("what".to_string(), Value::String("main".to_string()));
-    tbl.fields.insert("currentline".to_string(), Value::Integer(Int::Small(1)));
-    Ok(vec![Value::Table(Rc::new(RefCell::new(tbl)))])
+
+    match tbl {
+        Some(t) => Ok(vec![Value::Table(Rc::new(RefCell::new(t)))]),
+        None => Ok(vec![Value::Nil]),
+    }
+}
+
+fn get_runtime_frame_info(level: usize) -> Option<Table> {
+    RUNTIME_CALL_STACK.with(|stack| {
+        let s = stack.borrow();
+        if level >= s.len() {
+            return None;
+        }
+        let idx = s.len() - 1 - level;
+        let frame = &s[idx];
+        let mut t = Table {
+            array: Vec::new(),
+            fields: HashMap::new(),
+            const_fields: HashSet::new(),
+            frozen: false,
+            metatable: None,
+        };
+        let name = frame.name.clone().unwrap_or_else(|| "<anonymous>".to_string());
+        t.fields.insert("name".to_string(), Value::String(name));
+        t.fields.insert("what".to_string(), Value::String(frame.what.to_string()));
+        t.fields.insert("source".to_string(), Value::String(frame.source.clone()));
+        t.fields.insert("currentline".to_string(), Value::Integer(Int::from(frame.current_line as i64)));
+        t.fields.insert("numparams".to_string(), Value::Integer(Int::from(frame.num_params as i64)));
+        t.fields.insert("isvararg".to_string(), Value::Bool(frame.is_vararg));
+        if let Some(func) = &frame.func_val {
+            t.fields.insert("func".to_string(), func.clone());
+        }
+        Some(t)
+    })
+}
+
+struct RuntimeCoroutine {
+    vm: crate::vm::machine::VM,
+    co_id: usize,
+    status: Rc<RefCell<String>>,
+}
+
+thread_local! {
+    static COROUTINE_REGISTRY: RefCell<HashMap<usize, RuntimeCoroutine>> = RefCell::new(HashMap::new());
+    static NEXT_COROUTINE_ID: std::cell::Cell<usize> = const { std::cell::Cell::new(1) };
 }
 
 fn runtime_coroutine_create(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let Some(f) = args.first().cloned() else {
+    let Some(Value::Function(func)) = args.first().cloned() else {
         return Err("coroutine.create expects a function".to_string());
     };
+
+    let id = NEXT_COROUTINE_ID.with(|n| {
+        let i = n.get();
+        n.set(i + 1);
+        i
+    });
+
+    let (proto, env_opt) = match &*func {
+        Function::User { name, params, body, env } => {
+            let proto = crate::compiler::try_compile_function_to_proto(name.clone(), params, body)?;
+            (proto, Some(env.clone()))
+        }
+        Function::Native { name, .. } => {
+            return Err(format!("coroutine.create cannot wrap native function '{}'", name));
+        }
+    };
+
+    let mut vm = crate::vm::machine::VM::new();
+    if let Some(env) = env_opt {
+        let mut curr_env = Some(env);
+        let mut all_vars = Vec::new();
+        while let Some(e) = curr_env {
+            for (k, v) in &e.borrow().values {
+                all_vars.push((k.clone(), v.clone()));
+            }
+            curr_env = e.borrow().parent.clone();
+        }
+        all_vars.reverse();
+        for (k, v) in all_vars {
+            if let Ok(vm_v) = runtime_to_vm_val(&v, 0) {
+                vm.globals.insert(k, vm_v);
+            }
+        }
+    }
+
+    let closure = crate::vm::value::Value::Closure(Rc::new(crate::vm::value::VmClosure {
+        proto,
+        upvalues: Vec::new(),
+    }));
+    let co_id = vm.next_co_id;
+    vm.next_co_id += 1;
+    let co_state = crate::vm::machine::CoroutineState {
+        stack: Vec::new(),
+        frames: Vec::new(),
+        status: "suspended".to_string(),
+        func: closure,
+        yield_callee: 0,
+        yield_retc: 0,
+        yield_values: Vec::new(),
+    };
+    vm.coroutines.insert(co_id, Rc::new(RefCell::new(co_state)));
+
+    let status = Rc::new(RefCell::new("suspended".to_string()));
+    let handle = RuntimeCoroutine {
+        vm,
+        co_id,
+        status,
+    };
+
+    COROUTINE_REGISTRY.with(|reg| {
+        reg.borrow_mut().insert(id, handle);
+    });
+
     let mut tbl = Table {
-        array: vec![f],
+        array: vec![Value::Function(func)],
         fields: HashMap::new(),
         const_fields: HashSet::new(),
         frozen: false,
         metatable: None,
     };
+    tbl.fields.insert("__type".to_string(), Value::String("thread".to_string()));
+    tbl.fields.insert("_id".to_string(), Value::Integer(Int::from(id as i64)));
     tbl.fields.insert("status".to_string(), Value::String("suspended".to_string()));
+
     Ok(vec![Value::Table(Rc::new(RefCell::new(tbl)))])
 }
 
 fn runtime_coroutine_resume(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let Some(Value::Table(t)) = args.first() else {
+    let Some(Value::Table(t)) = args.first().cloned() else {
         return Err("coroutine.resume expects a thread".to_string());
     };
-    let mut borrowed = t.borrow_mut();
-    let current_status = borrowed.fields.get("status").and_then(|v| match v {
-        Value::String(s) => Some(s.as_str()),
-        _ => None,
-    }).unwrap_or("dead");
+
+    let id = match t.borrow().fields.get("_id") {
+        Some(Value::Integer(i)) => i.to_usize().unwrap_or(0),
+        _ => 0,
+    };
+
+    if id == 0 {
+        return Err("coroutine.resume expects a valid thread".to_string());
+    }
+
+    let current_status = COROUTINE_REGISTRY.with(|reg| {
+        reg.borrow().get(&id).map(|h| h.status.borrow().clone())
+    })
+    .unwrap_or_else(|| "dead".to_string());
+
     if current_status == "dead" {
-        return Ok(vec![Value::Bool(false), Value::String("cannot resume dead coroutine".to_string())]);
+        return Ok(vec![
+            Value::Bool(false),
+            Value::String("cannot resume dead coroutine".to_string()),
+        ]);
     }
-    let f = borrowed.array.first().cloned().unwrap_or(Value::Nil);
-    borrowed.fields.insert("status".to_string(), Value::String("dead".to_string()));
-    drop(borrowed);
-    match f {
-        Value::Function(func) => {
-            let call_args = args[1..].to_vec();
-            match &*func {
-                Function::Native { call, .. } => {
-                    let mut res = call(call_args)?;
-                    res.insert(0, Value::Bool(true));
-                    Ok(res)
+    if current_status == "running" {
+        return Ok(vec![
+            Value::Bool(false),
+            Value::String("cannot resume running coroutine".to_string()),
+        ]);
+    }
+
+    let mut vm_args = vec![crate::vm::value::Value::Table(Rc::new(RefCell::new({
+        let mut tbl = crate::vm::value::VmTable::new();
+        let co_id = COROUTINE_REGISTRY.with(|reg| reg.borrow().get(&id).map(|h| h.co_id).unwrap_or(0));
+        tbl.set_str("_id", crate::vm::value::Value::Int(num_bigint::BigInt::from(co_id)));
+        tbl.set_str("status", crate::vm::value::Value::String("suspended".to_string()));
+        tbl
+    })))];
+
+    for a in &args[1..] {
+        vm_args.push(runtime_to_vm_val(a, 0)?);
+    }
+
+    let res = COROUTINE_REGISTRY.with(|reg| -> Result<Vec<crate::vm::value::Value>, String> {
+        let mut b = reg.borrow_mut();
+        let coro = b.get_mut(&id).ok_or_else(|| "coroutine not found in registry".to_string())?;
+        *coro.status.borrow_mut() = "running".to_string();
+        crate::vm::libs::coroutine::coroutine_resume(&mut coro.vm, &vm_args)
+    });
+
+    match res {
+        Ok(vm_vals) => {
+            let is_ok = matches!(vm_vals.first(), Some(crate::vm::value::Value::Bool(true)));
+            let new_status = if is_ok {
+                COROUTINE_REGISTRY.with(|reg| {
+                    let b = reg.borrow();
+                    b.get(&id)
+                        .and_then(|h| h.vm.coroutines.get(&h.co_id))
+                        .map(|c| c.borrow().status.clone())
+                        .unwrap_or_else(|| "dead".to_string())
+                })
+            } else {
+                "dead".to_string()
+            };
+
+            COROUTINE_REGISTRY.with(|reg| {
+                if let Some(h) = reg.borrow().get(&id) {
+                    *h.status.borrow_mut() = new_status.clone();
                 }
-                Function::User { params, body, env } => {
-                    let call_env = child(env);
-                    for (i, p) in params.iter().enumerate() {
-                        call_env.borrow_mut().values.insert(p.name.clone(), call_args.get(i).cloned().unwrap_or(Value::Nil));
-                    }
-                    let rt = Runtime {
-                        global: call_env.clone(),
-                        call_depth: std::cell::Cell::new(0),
-                    };
-                    let res = match rt.exec_block(body, call_env)? {
-                        Flow::Return(vals) => vals,
-                        _ => vec![Value::Nil],
-                    };
-                    let mut out = vec![Value::Bool(true)];
-                    out.extend(res);
-                    Ok(out)
+                if new_status == "dead" {
+                    reg.borrow_mut().remove(&id);
                 }
+            });
+            t.borrow_mut().fields.insert("status".to_string(), Value::String(new_status));
+
+            let mut out = Vec::new();
+            for v in vm_vals {
+                out.push(vm_to_runtime_val(&v, 0)?);
             }
+            Ok(out)
         }
-        _ => Err("cannot resume non-function coroutine".to_string()),
+        Err(err) => {
+            COROUTINE_REGISTRY.with(|reg| {
+                if let Some(h) = reg.borrow().get(&id) {
+                    *h.status.borrow_mut() = "dead".to_string();
+                }
+                reg.borrow_mut().remove(&id);
+            });
+            t.borrow_mut().fields.insert("status".to_string(), Value::String("dead".to_string()));
+            Ok(vec![Value::Bool(false), Value::String(err)])
+        }
     }
+}
+
+fn runtime_coroutine_yield(_args: Vec<Value>) -> Result<Vec<Value>, String> {
+    Err("attempt to yield from outside a coroutine".to_string())
 }
 
 fn runtime_coroutine_status(args: Vec<Value>) -> Result<Vec<Value>, String> {
     let Some(Value::Table(t)) = args.first() else {
         return Err("coroutine.status expects a thread".to_string());
     };
+    let id = match t.borrow().fields.get("_id") {
+        Some(Value::Integer(i)) => i.to_usize().unwrap_or(0),
+        _ => 0,
+    };
+    if id > 0
+        && let Some(st) = COROUTINE_REGISTRY.with(|reg| reg.borrow().get(&id).map(|h| h.status.borrow().clone())) {
+            return Ok(vec![Value::String(st)]);
+    }
     let st = t.borrow().fields.get("status").cloned().unwrap_or(Value::String("dead".to_string()));
     Ok(vec![st])
 }
 
 fn runtime_coroutine_running(_args: Vec<Value>) -> Result<Vec<Value>, String> {
-    Ok(vec![Value::Nil])
+    Ok(vec![Value::Nil, Value::Bool(true)])
 }
+
+fn runtime_coroutine_isyieldable(_args: Vec<Value>) -> Result<Vec<Value>, String> {
+    Ok(vec![Value::Bool(false)])
+}
+
+fn runtime_coroutine_wrap(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let create_res = runtime_coroutine_create(args)?;
+    let co_table = create_res.into_iter().next().unwrap();
+
+    let mut wrapper = Table {
+        array: Vec::new(),
+        fields: HashMap::new(),
+        const_fields: HashSet::new(),
+        frozen: false,
+        metatable: None,
+    };
+    wrapper.fields.insert("_co".to_string(), co_table);
+
+    let mut mt = Table {
+        array: Vec::new(),
+        fields: HashMap::new(),
+        const_fields: HashSet::new(),
+        frozen: false,
+        metatable: None,
+    };
+    mt.fields.insert("__call".to_string(), native("wrapped_coroutine_call", runtime_wrapped_coroutine_call));
+    wrapper.metatable = Some(Rc::new(RefCell::new(mt)));
+
+    Ok(vec![Value::Table(Rc::new(RefCell::new(wrapper)))])
+}
+
+fn runtime_wrapped_coroutine_call(args: Vec<Value>) -> Result<Vec<Value>, String> {
+    let Some(Value::Table(wrap_tbl)) = args.first() else {
+        return Err("coroutine wrapper called without self".to_string());
+    };
+    let co_table = wrap_tbl.borrow().fields.get("_co").cloned().unwrap_or(Value::Nil);
+    if matches!(co_table, Value::Nil) {
+        return Err("invalid coroutine wrapper".to_string());
+    }
+    let mut resume_args = vec![co_table];
+    resume_args.extend_from_slice(&args[1..]);
+    let res = runtime_coroutine_resume(resume_args)?;
+    if let Some(Value::Bool(true)) = res.first() {
+        Ok(res[1..].to_vec())
+    } else {
+        let err_msg = res.get(1).map(|v| v.to_string()).unwrap_or_else(|| "error in coroutine".to_string());
+        Err(err_msg)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_runtime_debug_traceback_and_getinfo() {
+        let code = "local debug = require(\"@neyuki/debug\")\n\
+local string = require(\"@neyuki/string\")\n\
+local captured_tb = \"\"\n\
+local captured_info = nil\n\
+function inner()\n\
+    captured_tb = debug.traceback(\"my_error\")\n\
+    captured_info = debug.getinfo(1)\n\
+end\n\
+function outer()\n\
+    inner()\n\
+end\n\
+outer()\n\
+assert(string.find(captured_tb, \"my_error\") ~= nil)\n\
+assert(string.find(captured_tb, \"inner\") ~= nil)\n\
+assert(string.find(captured_tb, \"outer\") ~= nil)\n\
+assert(captured_info.name == \"inner\")\n\
+assert(captured_info.what == \"Lua\")\n\
+assert(captured_info.numparams == 0)";
+        let res = run_source(code);
+        assert!(res.is_ok(), "failed with error: {:?}", res.err());
+    }
+
+    #[test]
+    fn test_runtime_coroutine_yield_and_resume() {
+        let code = "local coroutine = require(\"@neyuki/coroutine\")\n\
+local co = coroutine.create(function(start)\n\
+    local a = coroutine.yield(start + 10)\n\
+    local b = coroutine.yield(a * 2)\n\
+    return b + 5\n\
+end)\n\
+assert(coroutine.status(co) == \"suspended\")\n\
+local ok1, r1 = coroutine.resume(co, 5)\n\
+assert(ok1 == true and r1 == 15)\n\
+assert(coroutine.status(co) == \"suspended\")\n\
+local ok2, r2 = coroutine.resume(co, 7)\n\
+assert(ok2 == true and r2 == 14)\n\
+assert(coroutine.status(co) == \"suspended\")\n\
+local ok3, r3 = coroutine.resume(co, 20)\n\
+assert(ok3 == true and r3 == 25)\n\
+assert(coroutine.status(co) == \"dead\")";
+        let res = run_source(code);
+        assert!(res.is_ok(), "failed with error: {:?}", res.err());
+    }
+
+    #[test]
+    fn test_runtime_coroutine_wrap() {
+        let code = "local coroutine = require(\"@neyuki/coroutine\")\n\
+local fn = coroutine.wrap(function(x)\n\
+    local y = coroutine.yield(x * 3)\n\
+    return y + 10\n\
+end)\n\
+local r1 = fn(4)\n\
+assert(r1 == 12)\n\
+local r2 = fn(5)\n\
+assert(r2 == 15)";
+        let res = run_source(code);
+        assert!(res.is_ok(), "failed with error: {:?}", res.err());
+    }
+
+    #[test]
+    fn test_runtime_try_user_function() {
+        let code = "local function work(a, b)\n\
+  return a * b\n\
+end\n\
+local ok, val = try(work, 6, 7)\n\
+assert(ok == true)\n\
+assert(val == 42)\n\
+local ok2, err2 = try(function() error(\"failure\") end)\n\
+assert(ok2 == false)\n\
+assert(err2 == \"failure\")";
+        let res = run_source(code);
+        assert!(res.is_ok(), "failed with error: {:?}", res.err());
+    }
+
+    #[test]
+    fn test_runtime_tonumber_and_pcall() {
+        let code = "assert(tonumber(\"1010\", 2) == 10)\n\
+assert(tonumber(\"ff\", 16) == 255)\n\
+assert(tonumber(\"0xFF\") == 255)\n\
+assert(tonumber(\"  99  \") == 99)\n\
+local ok, res = pcall(function(x) return x + 1 end, 41)\n\
+assert(ok == true)\n\
+assert(res == 42)\n\
+local ok2, err2 = xpcall(function() error(\"err\") end, function(e) return \"caught: \" .. e end)\n\
+assert(ok2 == false)\n\
+assert(err2 == \"caught: err\")";
+        let res = run_source(code);
+        assert!(res.is_ok(), "failed with error: {:?}", res.err());
+    }
+}
+
 

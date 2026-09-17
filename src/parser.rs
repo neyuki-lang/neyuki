@@ -20,7 +20,7 @@ impl Parser {
         }
     }
 
-    pub fn parse_program(&mut self) -> Vec<Stmt> {
+    pub fn parse_program(&mut self) -> Result<Vec<Stmt>, String> {
         let mut program = Vec::new();
         while !self.is_eof() {
             if self.check_keyword("end")
@@ -36,13 +36,13 @@ impl Parser {
                 continue;
             }
 
-            program.push(self.parse_statement());
+            program.push(self.parse_statement()?);
             self.consume_semicolon_if_any();
         }
-        program
+        Ok(program)
     }
 
-    fn parse_statement(&mut self) -> Stmt {
+    fn parse_statement(&mut self) -> Result<Stmt, String> {
         if self.check_keyword("local")
             || self.check_keyword("const")
             || self.check_keyword("global")
@@ -72,61 +72,61 @@ impl Parser {
                 && !self.check_keyword("elseif")
                 && !self.check_keyword("until")
             {
-                let mut values = vec![self.parse_expr()];
+                let mut values = vec![self.parse_expr()?];
                 while self.match_symbol(",") {
-                    values.push(self.parse_expr());
+                    values.push(self.parse_expr()?);
                 }
                 values
             } else {
                 Vec::new()
             };
-            return Stmt::Return(expr);
+            return Ok(Stmt::Return(expr));
         }
         if self.check_keyword("break") {
             self.pos += 1;
-            return Stmt::Break;
+            return Ok(Stmt::Break);
         }
         if self.check_keyword("continue") {
             self.pos += 1;
-            return Stmt::Continue;
+            return Ok(Stmt::Continue);
         }
 
-        let expr = self.parse_expr();
+        let expr = self.parse_expr()?;
         if self.match_symbol("++") {
-            return Stmt::Increment {
+            return Ok(Stmt::Increment {
                 target: expr,
                 amount: 1,
-            };
+            });
         }
         if self.match_symbol("--") {
-            return Stmt::Increment {
+            return Ok(Stmt::Increment {
                 target: expr,
                 amount: -1,
-            };
+            });
         }
         if self.match_symbol("=") {
-            let value = self.parse_expr();
-            return Stmt::Assign {
+            let value = self.parse_expr()?;
+            return Ok(Stmt::Assign {
                 target: expr,
                 value,
                 is_const: false,
-            };
+            });
         }
         if self.check_symbol(",") {
             let mut targets = vec![expr];
             while self.match_symbol(",") {
-                targets.push(self.parse_expr());
+                targets.push(self.parse_expr()?);
             }
-            self.expect_symbol("=");
-            let mut values = vec![self.parse_expr()];
+            self.expect_symbol("=")?;
+            let mut values = vec![self.parse_expr()?];
             while self.match_symbol(",") {
-                values.push(self.parse_expr());
+                values.push(self.parse_expr()?);
             }
-            return Stmt::AssignMany { targets, values };
+            return Ok(Stmt::AssignMany { targets, values });
         }
         if let Some(op) = self.match_compound_assignment() {
-            let right = self.parse_expr();
-            return Stmt::Assign {
+            let right = self.parse_expr()?;
+            return Ok(Stmt::Assign {
                 target: expr.clone(),
                 value: Expr::Binary {
                     left: Box::new(expr),
@@ -134,13 +134,13 @@ impl Parser {
                     right: Box::new(right),
                 },
                 is_const: false,
-            };
+            });
         }
         self.consume_bracket_attributes();
-        Stmt::Expr(expr)
+        Ok(Stmt::Expr(expr))
     }
 
-    fn parse_binding(&mut self) -> Stmt {
+    fn parse_binding(&mut self) -> Result<Stmt, String> {
         let mut is_const = false;
         while self.check_keyword("local")
             || self.check_keyword("const")
@@ -154,13 +154,13 @@ impl Parser {
             return self.parse_function(is_const);
         }
 
-        let mut name = self.expect_name();
+        let mut name = self.expect_name()?;
         while self.match_symbol(".") {
             name.push('.');
-            name.push_str(&self.expect_name());
+            name.push_str(&self.expect_name()?);
         }
         if name.contains('.') {
-            self.expect_symbol("=");
+            self.expect_symbol("=")?;
             let mut target = Expr::Variable(name.split('.').next().unwrap().to_string());
             for field in name.split('.').skip(1) {
                 target = Expr::Member {
@@ -168,27 +168,27 @@ impl Parser {
                     field: field.to_string(),
                 };
             }
-            return Stmt::Assign {
+            return Ok(Stmt::Assign {
                 target,
-                value: self.parse_expr(),
+                value: self.parse_expr()?,
                 is_const,
-            };
+            });
         }
         if self.check_symbol(",") {
             let mut names = vec![name];
             while self.match_symbol(",") {
-                names.push(self.expect_name());
+                names.push(self.expect_name()?);
             }
-            self.expect_symbol("=");
-            let mut initializers = vec![self.parse_expr()];
+            self.expect_symbol("=")?;
+            let mut initializers = vec![self.parse_expr()?];
             while self.match_symbol(",") {
-                initializers.push(self.parse_expr());
+                initializers.push(self.parse_expr()?);
             }
-            return Stmt::LocalMany {
+            return Ok(Stmt::LocalMany {
                 names,
                 is_const,
                 initializers,
-            };
+            });
         }
         let type_name = if self.match_symbol(":") {
             Some(self.read_type_annotation())
@@ -197,27 +197,27 @@ impl Parser {
         };
 
         let initializer = if self.match_symbol("=") {
-            Some(self.parse_expr())
+            Some(self.parse_expr()?)
         } else {
             None
         };
 
-        Stmt::Local {
+        Ok(Stmt::Local {
             name,
             is_const,
             type_name,
             initializer,
-        }
+        })
     }
 
-    fn parse_function(&mut self, is_const: bool) -> Stmt {
-        self.expect_keyword("function");
+    fn parse_function(&mut self, is_const: bool) -> Result<Stmt, String> {
+        self.expect_keyword("function")?;
 
         let name = if self.peek().kind == "name" {
-            let mut name = self.expect_name();
+            let mut name = self.expect_name()?;
             while self.match_symbol(".") {
                 name.push('.');
-                name.push_str(&self.expect_name());
+                name.push_str(&self.expect_name()?);
             }
             Some(name)
         } else {
@@ -225,7 +225,7 @@ impl Parser {
         };
 
         let params = if self.match_symbol("(") {
-            self.parse_param_list()
+            self.parse_param_list()?
         } else {
             Vec::new()
         };
@@ -236,107 +236,107 @@ impl Parser {
             None
         };
 
-        let body = self.parse_block_until("end");
-        self.expect_keyword("end");
-        Stmt::Function {
+        let body = self.parse_block_until("end")?;
+        self.expect_keyword("end")?;
+        Ok(Stmt::Function {
             name,
             is_const,
             params,
             return_type,
             body,
-        }
+        })
     }
 
-    fn parse_if(&mut self) -> Stmt {
-        self.expect_keyword("if");
-        let condition = self.parse_expr();
-        self.expect_keyword("then");
+    fn parse_if(&mut self) -> Result<Stmt, String> {
+        self.expect_keyword("if")?;
+        let condition = self.parse_expr()?;
+        self.expect_keyword("then")?;
 
-        let then_branch = self.parse_block_until_any(&["else", "elseif", "end"]);
+        let then_branch = self.parse_block_until_any(&["else", "elseif", "end"])?;
         let mut else_if_branches = Vec::new();
         let mut else_branch = None;
 
         while self.check_keyword("elseif") {
-            self.expect_keyword("elseif");
-            let next_condition = self.parse_expr();
-            self.expect_keyword("then");
-            let next_branch = self.parse_block_until_any(&["else", "elseif", "end"]);
+            self.expect_keyword("elseif")?;
+            let next_condition = self.parse_expr()?;
+            self.expect_keyword("then")?;
+            let next_branch = self.parse_block_until_any(&["else", "elseif", "end"])?;
             else_if_branches.push((next_condition, next_branch));
         }
 
         if self.check_keyword("else") {
-            self.expect_keyword("else");
-            else_branch = Some(self.parse_block_until("end"));
+            self.expect_keyword("else")?;
+            else_branch = Some(self.parse_block_until("end")?);
         }
 
-        self.expect_keyword("end");
+        self.expect_keyword("end")?;
 
-        Stmt::If {
+        Ok(Stmt::If {
             condition,
             then_branch,
             else_if_branches,
             else_branch,
-        }
+        })
     }
 
-    fn parse_for(&mut self) -> Stmt {
-        self.expect_keyword("for");
-        let first_name = self.expect_name();
+    fn parse_for(&mut self) -> Result<Stmt, String> {
+        self.expect_keyword("for")?;
+        let first_name = self.expect_name()?;
         if self.match_symbol("=") {
-            let start = self.parse_expr();
-            self.expect_symbol(",");
-            let end = self.parse_expr();
+            let start = self.parse_expr()?;
+            self.expect_symbol(",")?;
+            let end = self.parse_expr()?;
             let step = if self.match_symbol(",") {
-                Some(self.parse_expr())
+                Some(self.parse_expr()?)
             } else {
                 None
             };
-            self.expect_keyword("do");
-            let body = self.parse_block_until("end");
-            self.expect_keyword("end");
-            return Stmt::NumericFor {
+            self.expect_keyword("do")?;
+            let body = self.parse_block_until("end")?;
+            self.expect_keyword("end")?;
+            return Ok(Stmt::NumericFor {
                 var: first_name,
                 start,
                 end,
                 step,
                 body,
-            };
+            });
         }
 
         let mut vars = vec![first_name];
         if self.match_symbol(",") {
-            vars.push(self.expect_name());
+            vars.push(self.expect_name()?);
         }
-        self.expect_keyword("in");
-        let source = self.parse_expr();
-        self.expect_keyword("do");
-        let body = self.parse_block_until("end");
-        self.expect_keyword("end");
-        Stmt::For { vars, source, body }
+        self.expect_keyword("in")?;
+        let source = self.parse_expr()?;
+        self.expect_keyword("do")?;
+        let body = self.parse_block_until("end")?;
+        self.expect_keyword("end")?;
+        Ok(Stmt::For { vars, source, body })
     }
 
-    fn parse_while(&mut self) -> Stmt {
-        self.expect_keyword("while");
-        let condition = self.parse_expr();
-        self.expect_keyword("do");
-        let body = self.parse_block_until("end");
-        self.expect_keyword("end");
-        Stmt::While { condition, body }
+    fn parse_while(&mut self) -> Result<Stmt, String> {
+        self.expect_keyword("while")?;
+        let condition = self.parse_expr()?;
+        self.expect_keyword("do")?;
+        let body = self.parse_block_until("end")?;
+        self.expect_keyword("end")?;
+        Ok(Stmt::While { condition, body })
     }
 
-    fn parse_repeat(&mut self) -> Stmt {
-        self.expect_keyword("repeat");
-        let body = self.parse_block_until("until");
-        self.expect_keyword("until");
-        let condition = self.parse_expr();
-        Stmt::Repeat { body, condition }
+    fn parse_repeat(&mut self) -> Result<Stmt, String> {
+        self.expect_keyword("repeat")?;
+        let body = self.parse_block_until("until")?;
+        self.expect_keyword("until")?;
+        let condition = self.parse_expr()?;
+        Ok(Stmt::Repeat { body, condition })
     }
 
-    fn parse_param_list(&mut self) -> Vec<Param> {
+    fn parse_param_list(&mut self) -> Result<Vec<Param>, String> {
         let mut params = Vec::new();
         if self.check_symbol(")") {
-            self.expect_symbol(")");
-            return params;
+            self.expect_symbol(")")?;
+            return Ok(params);
         }
 
         loop {
@@ -351,10 +351,10 @@ impl Parser {
                     type_name,
                     variadic: true,
                 });
-                self.expect_symbol(")");
+                self.expect_symbol(")")?;
                 break;
             }
-            let name = self.expect_name();
+            let name = self.expect_name()?;
             let type_name = if self.match_symbol(":") {
                 Some(self.read_type_annotation())
             } else {
@@ -369,17 +369,17 @@ impl Parser {
             if self.match_symbol(",") {
                 continue;
             }
-            self.expect_symbol(")");
+            self.expect_symbol(")")?;
             break;
         }
-        params
+        Ok(params)
     }
 
-    fn parse_block_until(&mut self, end_kw: &str) -> Vec<Stmt> {
+    fn parse_block_until(&mut self, end_kw: &str) -> Result<Vec<Stmt>, String> {
         self.parse_block_until_any(&[end_kw])
     }
 
-    fn parse_block_until_any(&mut self, end_words: &[&str]) -> Vec<Stmt> {
+    fn parse_block_until_any(&mut self, end_words: &[&str]) -> Result<Vec<Stmt>, String> {
         let mut block = Vec::new();
         while !self.is_eof() {
             if self.check_symbol(";") {
@@ -389,17 +389,17 @@ impl Parser {
             if end_words.iter().any(|word| self.check_keyword(word)) {
                 break;
             }
-            block.push(self.parse_statement());
+            block.push(self.parse_statement()?);
         }
-        block
+        Ok(block)
     }
 
-    fn parse_expr(&mut self) -> Expr {
+    fn parse_expr(&mut self) -> Result<Expr, String> {
         self.parse_precedence(0)
     }
 
-    fn parse_precedence(&mut self, min_prec: u8) -> Expr {
-        let mut left = self.parse_prefix();
+    fn parse_precedence(&mut self, min_prec: u8) -> Result<Expr, String> {
+        let mut left = self.parse_prefix()?;
 
         loop {
             if self.is_eof() {
@@ -414,7 +414,7 @@ impl Parser {
             }
             self.pos += 1;
             let next_min = prec + 1;
-            let right = self.parse_precedence(next_min);
+            let right = self.parse_precedence(next_min)?;
             let op = if op == "~=" { "!=".to_string() } else { op };
             left = Expr::Binary {
                 left: Box::new(left),
@@ -423,13 +423,16 @@ impl Parser {
             };
         }
 
-        left
+        Ok(left)
     }
 
-    fn parse_prefix(&mut self) -> Expr {
-        const MAX_PARSE_DEPTH: usize = 500;
+    fn parse_prefix(&mut self) -> Result<Expr, String> {
+        const MAX_PARSE_DEPTH: usize = 120;
         if self.depth >= MAX_PARSE_DEPTH {
-            panic!("parse recursion depth limit (500) exceeded");
+            return Err(format!(
+                "[line {}] parse recursion depth limit (120) exceeded",
+                self.peek().line
+            ));
         }
         self.depth += 1;
         let res = self.parse_prefix_inner();
@@ -437,23 +440,23 @@ impl Parser {
         res
     }
 
-    fn parse_prefix_inner(&mut self) -> Expr {
+    fn parse_prefix_inner(&mut self) -> Result<Expr, String> {
         if self.check_keyword("function") {
-            self.expect_keyword("function");
-            self.expect_symbol("(");
-            let params = self.parse_param_list();
+            self.expect_keyword("function")?;
+            self.expect_symbol("(")?;
+            let params = self.parse_param_list()?;
             if self.match_symbol(":") {
                 self.read_type_annotation();
             }
-            let body = self.parse_block_until("end");
-            self.expect_keyword("end");
-            return Expr::Function { params, body };
+            let body = self.parse_block_until("end")?;
+            self.expect_keyword("end")?;
+            return Ok(Expr::Function { params, body });
         }
 
         if self.check_symbol("(") {
-            self.expect_symbol("(");
-            let expr = self.parse_expr();
-            self.expect_symbol(")");
+            self.expect_symbol("(")?;
+            let expr = self.parse_expr()?;
+            self.expect_symbol(")")?;
             return self.parse_postfix(expr);
         }
 
@@ -463,36 +466,36 @@ impl Parser {
 
         if self.check_keyword("not") {
             self.pos += 1;
-            return Expr::Unary {
+            return Ok(Expr::Unary {
                 op: "not".to_string(),
-                expr: Box::new(self.parse_prefix()),
-            };
+                expr: Box::new(self.parse_prefix()?),
+            });
         }
 
         if self.check_symbol("-") {
             self.pos += 1;
-            return Expr::Unary {
+            return Ok(Expr::Unary {
                 op: "-".to_string(),
-                expr: Box::new(self.parse_prefix()),
-            };
+                expr: Box::new(self.parse_prefix()?),
+            });
         }
         if self.check_symbol("#") {
             self.pos += 1;
-            return Expr::Unary {
+            return Ok(Expr::Unary {
                 op: "#".to_string(),
-                expr: Box::new(self.parse_prefix()),
-            };
+                expr: Box::new(self.parse_prefix()?),
+            });
         }
         if self.check_symbol("~") {
             self.pos += 1;
-            return Expr::Unary {
+            return Ok(Expr::Unary {
                 op: "~".to_string(),
-                expr: Box::new(self.parse_prefix()),
-            };
+                expr: Box::new(self.parse_prefix()?),
+            });
         }
 
         if self.match_symbol("...") {
-            return Expr::Vararg;
+            return Ok(Expr::Vararg);
         }
 
         let token = self.peek().clone();
@@ -507,41 +510,45 @@ impl Parser {
             }
             "string" => {
                 self.pos += 1;
-                Expr::Str(token.value)
+                Ok(Expr::Str(token.value))
             }
             "interp" => {
                 self.pos += 1;
-                Expr::Interp(parse_interp_parts(&token.value))
+                let parts = parse_interp_parts(&token.value)?;
+                Ok(Expr::Interp(parts))
             }
             "number" => {
                 self.pos += 1;
-                Expr::Literal(token.value)
+                Ok(Expr::Literal(token.value))
             }
-            _ => panic!("unexpected token in expression: {:?}", token),
+            _ => Err(format!(
+                "[line {}] unexpected token in expression: {:?}",
+                token.line, token.value
+            )),
         }
     }
 
     /// Applies any chain of `.field`, `(args)`, `:method(args)` and `[index]`
     /// suffixes to an already parsed expression.
-    fn parse_postfix(&mut self, mut expr: Expr) -> Expr {
+    fn parse_postfix(&mut self, mut expr: Expr) -> Result<Expr, String> {
         loop {
             if self.match_symbol(".") {
-                let field = self.expect_name();
+                let field = self.expect_name()?;
                 expr = Expr::Member {
                     object: Box::new(expr),
                     field,
                 };
             } else if self.match_symbol("(") {
-                let args = self.parse_call_args();
+                let args = self.parse_call_args()?;
                 expr = Expr::Call {
                     callee: Box::new(expr),
                     args,
                 };
             } else if self.check_method_call() {
                 self.pos += 1;
-                let method = self.expect_name();
-                self.expect_symbol("(");
-                let args = self.parse_call_args();
+                let method = self.expect_name()?;
+                self.expect_symbol("(")?;
+                let args = self.parse_call_args()?;
                 expr = Expr::MethodCall {
                     object: Box::new(expr),
                     method,
@@ -552,11 +559,11 @@ impl Parser {
                     while !self.is_eof() && !self.check_symbol("]") {
                         self.pos += 1;
                     }
-                    self.expect_symbol("]");
+                    self.expect_symbol("]")?;
                     continue;
                 }
-                let field = self.parse_expr();
-                self.expect_symbol("]");
+                let field = self.parse_expr()?;
+                self.expect_symbol("]")?;
                 expr = Expr::Index {
                     object: Box::new(expr),
                     index: Box::new(field),
@@ -565,11 +572,11 @@ impl Parser {
                 break;
             }
         }
-        expr
+        Ok(expr)
     }
 
-    fn parse_table(&mut self) -> Expr {
-        self.expect_symbol("{");
+    fn parse_table(&mut self) -> Result<Expr, String> {
+        self.expect_symbol("{")?;
         let mut entries = Vec::new();
         if !self.check_symbol("}") {
             loop {
@@ -579,9 +586,9 @@ impl Parser {
                         .get(self.pos + 1)
                         .is_some_and(|next| next.kind == "symbol" && next.value == "=")
                 {
-                    let key = self.expect_name();
-                    self.expect_symbol("=");
-                    let value = self.parse_expr();
+                    let key = self.expect_name()?;
+                    self.expect_symbol("=")?;
+                    let value = self.parse_expr()?;
                     entries.push(TableEntry {
                         key: Some(key),
                         value,
@@ -596,19 +603,17 @@ impl Parser {
                         .get(self.pos + 2)
                         .is_some_and(|next| next.kind == "symbol" && next.value == "]")
                 {
-                    // `["content-type"] = value`: a string key that is not a
-                    // valid name.
-                    self.expect_symbol("[");
+                    self.expect_symbol("[")?;
                     let key = self.advance_token().value;
-                    self.expect_symbol("]");
-                    self.expect_symbol("=");
-                    let value = self.parse_expr();
+                    self.expect_symbol("]")?;
+                    self.expect_symbol("=")?;
+                    let value = self.parse_expr()?;
                     entries.push(TableEntry {
                         key: Some(key),
                         value,
                     });
                 } else {
-                    let value = self.parse_expr();
+                    let value = self.parse_expr()?;
                     entries.push(TableEntry { key: None, value });
                 }
 
@@ -617,8 +622,8 @@ impl Parser {
                 }
             }
         }
-        self.expect_symbol("}");
-        Expr::Table(entries)
+        self.expect_symbol("}")?;
+        Ok(Expr::Table(entries))
     }
 
     fn read_type_annotation(&mut self) -> String {
@@ -632,8 +637,6 @@ impl Parser {
             if token.kind == "eof" {
                 break;
             }
-            // An annotation ends at a line break unless a bracket is still open,
-            // so the statement on the next line is not swallowed into the type.
             if braces == 0
                 && brackets == 0
                 && parens == 0
@@ -704,7 +707,7 @@ impl Parser {
                 }
                 self.pos += 1;
             }
-            self.match_symbol("]");
+            let _ = self.match_symbol("]");
         }
     }
 
@@ -712,8 +715,6 @@ impl Parser {
         while self.match_symbol(";") {}
     }
 
-    /// `object:name(` starts a method call; a bare `:` elsewhere is a type
-    /// annotation and is left alone.
     fn check_method_call(&self) -> bool {
         self.check_symbol(":")
             && self
@@ -726,23 +727,20 @@ impl Parser {
                 .is_some_and(|t| t.kind == "symbol" && t.value == "(")
     }
 
-    /// Parses call arguments after the opening `(` up to and including `)`.
-    fn parse_call_args(&mut self) -> Vec<Expr> {
+    fn parse_call_args(&mut self) -> Result<Vec<Expr>, String> {
         let mut args = Vec::new();
         if !self.check_symbol(")") {
             loop {
-                args.push(self.parse_expr());
+                args.push(self.parse_expr()?);
                 if !self.match_symbol(",") {
                     break;
                 }
             }
         }
-        self.expect_symbol(")");
-        args
+        self.expect_symbol(")")?;
+        Ok(args)
     }
 
-    /// Consumes an `op=` token and returns the binary operator it applies, so
-    /// `a op= b` can be desugared to `a = a op b`.
     fn match_compound_assignment(&mut self) -> Option<String> {
         const OPERATORS: [&str; 15] = [
             "+=", "-=", "*=", "/=", "//=", "%=", "^=", "..=", "<<=", ">>=", "<<<=", ">>>=", "&=",
@@ -766,15 +764,27 @@ impl Parser {
         }
     }
 
-    fn expect_symbol(&mut self, value: &str) {
+    fn expect_symbol(&mut self, value: &str) -> Result<(), String> {
         if !self.match_symbol(value) {
-            panic!("expected symbol {:?}", value);
+            Err(format!(
+                "[line {}] expected symbol {:?}",
+                self.peek().line,
+                value
+            ))
+        } else {
+            Ok(())
         }
     }
 
-    fn expect_keyword(&mut self, value: &str) {
+    fn expect_keyword(&mut self, value: &str) -> Result<(), String> {
         if !self.match_keyword(value) {
-            panic!("expected keyword {:?}", value);
+            Err(format!(
+                "[line {}] expected keyword {:?}",
+                self.peek().line,
+                value
+            ))
+        } else {
+            Ok(())
         }
     }
 
@@ -791,13 +801,16 @@ impl Parser {
         self.peek().kind == "keyword" && self.peek().value == value
     }
 
-    fn expect_name(&mut self) -> String {
+    fn expect_name(&mut self) -> Result<String, String> {
         let token = self.peek().clone();
         if token.kind == "name" {
             self.pos += 1;
-            token.value
+            Ok(token.value)
         } else {
-            panic!("expected name, got {:?}", token)
+            Err(format!(
+                "[line {}] expected name, got {:?}",
+                token.line, token.value
+            ))
         }
     }
 
@@ -840,10 +853,8 @@ impl Parser {
 }
 
 /// Splits a lexed interpolation token (e.g. `"x = {a + b}!"`) into literal
-/// and expression parts once, at parse time, so evaluating the same
-/// interpolated string repeatedly (e.g. inside a loop) never re-lexes or
-/// re-parses the embedded expressions.
-fn parse_interp_parts(value: &str) -> Vec<InterpPart> {
+/// and expression parts once, at parse time, returning a Result instead of panicking.
+fn parse_interp_parts(value: &str) -> Result<Vec<InterpPart>, String> {
     let mut parts = Vec::new();
     let mut rest = value;
     while let Some(start) = rest.find('{') {
@@ -854,27 +865,30 @@ fn parse_interp_parts(value: &str) -> Vec<InterpPart> {
         let end = match after_start.find('}') {
             Some(e) => e,
             None => {
-                panic!("syntax error: unfinished string interpolation in {:?}", value);
+                return Err(format!(
+                    "syntax error: unfinished string interpolation in {:?}",
+                    value
+                ));
             }
         };
         let expression = &after_start[..end];
         let mut parser = Parser::new(expression);
-        let statements = parser.parse_program();
+        let statements = parser.parse_program()?;
         if statements.len() != 1 {
-            panic!(
+            return Err(format!(
                 "syntax error: string interpolation must contain exactly one expression: {:?}",
                 expression
-            );
+            ));
         }
         match statements.into_iter().next().unwrap() {
             Stmt::Expr(expr) => {
                 parts.push(InterpPart::Expr(expr));
             }
             _ => {
-                panic!(
+                return Err(format!(
                     "syntax error: string interpolation must contain an expression: {:?}",
                     expression
-                );
+                ));
             }
         }
         rest = &after_start[end + 1..];
@@ -882,7 +896,7 @@ fn parse_interp_parts(value: &str) -> Vec<InterpPart> {
     if !rest.is_empty() {
         parts.push(InterpPart::Literal(rest.to_string()));
     }
-    parts
+    Ok(parts)
 }
 
 #[cfg(test)]
@@ -892,7 +906,7 @@ mod tests {
     #[test]
     fn parses_local_assignment_and_call() {
         let mut parser = Parser::new("local msg = \"hello\"\nprint(msg)");
-        let program = parser.parse_program();
+        let program = parser.parse_program().expect("failed to parse");
 
         assert_eq!(
             program,
@@ -916,7 +930,7 @@ mod tests {
         let mut parser = Parser::new(
             "local small: int = 2\nconst function divide(a: int, b: int): int\n    return a // b\nend",
         );
-        let program = parser.parse_program();
+        let program = parser.parse_program().expect("failed to parse");
 
         assert_eq!(
             program[0],
@@ -934,7 +948,7 @@ mod tests {
     #[test]
     fn parses_dotted_const_binding_as_assignment() {
         let mut parser = Parser::new("const math.e = 1");
-        let program = parser.parse_program();
+        let program = parser.parse_program().expect("failed to parse");
 
         assert_eq!(
             program,
@@ -952,7 +966,7 @@ mod tests {
     #[test]
     fn parses_immediately_invoked_function_expression() {
         let mut parser = Parser::new("local value = (function() return 1 end)()");
-        let program = parser.parse_program();
+        let program = parser.parse_program().expect("failed to parse");
 
         assert!(matches!(
             program.first(),
@@ -966,10 +980,9 @@ mod tests {
     #[test]
     fn parses_compound_and_multiple_assignment() {
         let mut parser = Parser::new(
-            "n += 2
-a, b = b, a",
+            "n += 2\na, b = b, a",
         );
-        let program = parser.parse_program();
+        let program = parser.parse_program().expect("failed to parse");
 
         assert_eq!(
             program[0],
@@ -1003,7 +1016,7 @@ a, b = b, a",
         let mut parser = Parser::new(
             "function math.random(min: number, max: number): number\n    return 1\nend",
         );
-        let program = parser.parse_program();
+        let program = parser.parse_program().expect("failed to parse");
 
         assert_eq!(
             program[0],
@@ -1033,7 +1046,7 @@ a, b = b, a",
         let mut parser = Parser::new(
             "function collect(first: number, ...: number): number\n    local total = first\n    total++\n    total--\n    return total\nend",
         );
-        let program = parser.parse_program();
+        let program = parser.parse_program().expect("failed to parse");
 
         let Stmt::Function { params, body, .. } = &program[0] else {
             panic!("expected function");
@@ -1053,7 +1066,7 @@ a, b = b, a",
     #[test]
     fn parses_numeric_for_loop() {
         let mut parser = Parser::new("for i = 1, 10, 2 do\n    print(i)\nend");
-        let program = parser.parse_program();
+        let program = parser.parse_program().expect("failed to parse");
 
         assert!(matches!(
             &program[0],
@@ -1069,7 +1082,7 @@ a, b = b, a",
     #[test]
     fn parses_anonymous_function_expression() {
         let mut parser = Parser::new("table.sort(numbers, function(a, b) return a < b end)");
-        let program = parser.parse_program();
+        let program = parser.parse_program().expect("failed to parse");
 
         assert!(matches!(
             &program[0],
@@ -1077,5 +1090,30 @@ a, b = b, a",
                 if matches!(args.get(1), Some(Expr::Function { params, body })
                     if params.len() == 2 && body.len() == 1)
         ));
+    }
+
+    #[test]
+    fn test_parser_returns_err_on_depth_limit() {
+        // Deeply nested parentheses exceeding 120 should return Err, not panic
+        let mut expr = "1".to_string();
+        for _ in 0..130 {
+            expr = format!("({})", expr);
+        }
+        let mut parser = Parser::new(&expr);
+        let res = parser.parse_program();
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("parse recursion depth limit"));
+    }
+
+    #[test]
+    fn test_parser_returns_err_on_syntax_errors() {
+        let mut p1 = Parser::new("local x =");
+        assert!(p1.parse_program().is_err());
+
+        let mut p2 = Parser::new("if x then");
+        assert!(p2.parse_program().is_err());
+
+        let mut p3 = Parser::new("for i in do end");
+        assert!(p3.parse_program().is_err());
     }
 }

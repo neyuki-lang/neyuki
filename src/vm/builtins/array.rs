@@ -15,6 +15,10 @@ pub fn builtin_array_create(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, S
         Some(Value::Float(f)) => *f as usize,
         _ => 0,
     };
+    const MAX_ARRAY_SIZE: usize = 1_000_000;
+    if count > MAX_ARRAY_SIZE {
+        return Err(format!("array size exceeds maximum limit ({})", MAX_ARRAY_SIZE));
+    }
     let init_val = args.get(1).cloned().unwrap_or(Value::Nil);
 
     let rc = Rc::new(RefCell::new(VmTable::new()));

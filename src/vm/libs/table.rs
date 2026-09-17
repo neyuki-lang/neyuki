@@ -190,18 +190,55 @@ fn table_clone(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     Ok(vec![Value::Table(rc)])
 }
 
-fn table_sort(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let tbl_rc = get_table(args.first().ok_or_else(|| "table.sort expects table".to_string())?)?;
-    let mut tbl = tbl_rc.borrow_mut();
-    if tbl.frozen {
+fn table_sort(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let tbl_rc = get_table(args.first().ok_or_else(|| "table.sort expects table".to_string())?)?.clone();
+    if tbl_rc.borrow().frozen {
         return Err("cannot sort frozen table".to_string());
     }
-    tbl.array.sort_by(|a, b| match (a, b) {
-        (Value::Int(ia), Value::Int(ib)) => ia.cmp(ib),
-        (Value::String(sa), Value::String(sb)) => sa.cmp(sb),
-        (Value::Float(fa), Value::Float(fb)) => fa.partial_cmp(fb).unwrap_or(std::cmp::Ordering::Equal),
-        _ => a.to_string().cmp(&b.to_string()),
-    });
+
+    let comp = args.get(1).cloned();
+    if let Some(comp_fn) = comp
+        && !matches!(comp_fn, Value::Nil) {
+            let mut items = std::mem::take(&mut tbl_rc.borrow_mut().array);
+            let mut sort_err = None;
+            for i in 1..items.len() {
+                let mut j = i;
+                while j > 0 {
+                    let a = &items[j - 1];
+                    let b = &items[j];
+                    match vm.call_function(comp_fn.clone(), &[b.clone(), a.clone()]) {
+                        Ok(res) => {
+                            let b_less_than_a = res.first().map(|v| v.is_truthy()).unwrap_or(false);
+                            if b_less_than_a {
+                                items.swap(j - 1, j);
+                                j -= 1;
+                            } else {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            sort_err = Some(e);
+                            break;
+                        }
+                    }
+                }
+                if sort_err.is_some() {
+                    break;
+                }
+            }
+            tbl_rc.borrow_mut().array = items;
+            if let Some(err) = sort_err {
+                return Err(err);
+            }
+        } else {
+            let mut tbl = tbl_rc.borrow_mut();
+            tbl.array.sort_by(|a, b| match (a, b) {
+                (Value::Int(ia), Value::Int(ib)) => ia.cmp(ib),
+                (Value::String(sa), Value::String(sb)) => sa.cmp(sb),
+                (Value::Float(fa), Value::Float(fb)) => fa.partial_cmp(fb).unwrap_or(std::cmp::Ordering::Equal),
+                _ => a.to_string().cmp(&b.to_string()),
+            });
+        }
     Ok(vec![])
 }
 

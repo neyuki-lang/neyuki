@@ -97,6 +97,10 @@ fn crypto_hash(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         Some(_) => return Err("s must be a string".to_string()),
         None => return Err("s must be provided".to_string()),
     };
+    const MAX_HASH_INPUT: usize = 10 * 1024 * 1024; // 10MB
+    if s.len() > MAX_HASH_INPUT {
+        return Err("input string exceeds maximum hash limit (10MB)".to_string());
+    }
     let algorithm = match args.get(1) {
         Some(Value::String(a)) => a.as_str(),
         Some(_) => return Err("algorithm must be a string".to_string()),

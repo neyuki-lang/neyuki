@@ -18,10 +18,18 @@ fn get_buf(val: &Value) -> Result<&Rc<RefCell<VmBuffer>>, String> {
 
 fn to_usize(val: &Value, name: &str) -> Result<usize, String> {
     match val {
-        Value::Int(i) => i.to_usize().ok_or_else(|| format!("{} is out of bounds", name)),
-        Value::Float(f) => {
-            if *f < 0.0 {
+        Value::Int(i) => {
+            if i.sign() == num_bigint::Sign::Minus {
                 Err(format!("{} cannot be negative", name))
+            } else {
+                i.to_usize().ok_or_else(|| format!("{} is out of bounds", name))
+            }
+        }
+        Value::Float(f) => {
+            if *f < 0.0 || f.is_nan() || f.is_infinite() {
+                Err(format!("{} cannot be negative, NaN or infinite", name))
+            } else if *f > usize::MAX as f64 {
+                Err(format!("{} is out of bounds", name))
             } else {
                 Ok(*f as usize)
             }

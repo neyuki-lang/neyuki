@@ -414,6 +414,7 @@ fn write_proto(buf: &mut Vec<u8>, proto: &Proto) {
     write_u32(buf, proto.local_names.len() as u32);
     for info in &proto.local_names {
         write_string(buf, &info.name);
+        write_u8(buf, info.reg);
         write_u32(buf, info.from_pc);
         write_u32(buf, info.to_pc);
     }
@@ -446,7 +447,8 @@ mod tests {
         proto.emit(Instruction::LoadK { dst: 0, k: k0 }, 10);
         proto.emit(Instruction::LoadK { dst: 1, k: k1 }, 11);
         proto.emit(Instruction::Add { dst: 2, a: 0, b: 1 }, 12);
-        proto.emit(Instruction::Return { base: 2, count: 1 }, 13);
+        proto.push_local("my_local".to_string(), 2, 10);
+        proto.close_local("my_local", 13);
 
         let bytes = serialize(&proto);
         let decoded = deserialize(&bytes).expect("deserialize failed");
@@ -457,6 +459,7 @@ mod tests {
         assert_eq!(decoded.constants, proto.constants);
         assert_eq!(decoded.instructions, proto.instructions);
         assert_eq!(decoded.lines, proto.lines);
+        assert_eq!(decoded.local_names, proto.local_names);
     }
 
     #[test]

@@ -15,11 +15,25 @@ use crate::vm::libs::{
 };
 use crate::vm::value::{NativeFn, Value, VmClosure, VmTable};
 
+pub struct CoroutineState {
+    pub stack: Vec<Value>,
+    pub frames: Vec<CallFrame>,
+    pub status: String,
+    pub func: Value,
+    pub yield_callee: u8,
+    pub yield_retc: u8,
+    pub yield_values: Vec<Value>,
+}
+
 pub struct VM {
     pub stack: Vec<Value>,
     pub frames: Vec<CallFrame>,
     pub globals: HashMap<String, Value>,
     pub gc: GcTracker,
+    pub coroutines: HashMap<usize, Rc<RefCell<CoroutineState>>>,
+    pub next_co_id: usize,
+    pub current_co: Option<usize>,
+    pub is_yielding: bool,
 }
 
 impl VM {
@@ -29,6 +43,10 @@ impl VM {
             frames: Vec::with_capacity(64),
             globals: HashMap::new(),
             gc: GcTracker::new(),
+            coroutines: HashMap::new(),
+            next_co_id: 1,
+            current_co: None,
+            is_yielding: false,
         };
         vm.register_builtins();
         vm
@@ -68,7 +86,22 @@ impl VM {
         self.stack.resize(max_reg + 1, Value::Nil);
 
         self.frames.push(CallFrame::new(closure, 0));
-        self.run()
+        let run_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.run()
+        }));
+        match run_res {
+            Ok(res) => res,
+            Err(panic_payload) => {
+                let msg = if let Some(s) = panic_payload.downcast_ref::<String>() {
+                    s.clone()
+                } else if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                    s.to_string()
+                } else {
+                    "unexpected panic during VM execution".to_string()
+                };
+                Err(format!("VM runtime panic caught: {}", msg))
+            }
+        }
     }
 
     fn get_reg(&self, reg: u8) -> Value {
@@ -116,11 +149,19 @@ impl VM {
                 for (i, arg) in args.iter().enumerate() {
                     self.stack[base + i] = arg.clone();
                 }
-                self.frames.push(CallFrame::new(c.clone(), base));
+                let num_params = c.proto.num_params as usize;
+                let varargs = if args.len() > num_params {
+                    args[num_params..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                self.frames.push(CallFrame::with_varargs(c.clone(), base, varargs));
                 match self.run_to_depth(depth) {
                     Ok(res) => Ok(vec![res]),
                     Err(err) => {
-                        self.frames.truncate(depth);
+                        if !self.is_yielding {
+                            self.frames.truncate(depth);
+                        }
                         Err(err)
                     }
                 }
@@ -648,16 +689,35 @@ impl VM {
                             if needed >= self.stack.len() {
                                 self.stack.resize(needed + 1, Value::Nil);
                             }
-                            let new_frame = CallFrame::new(closure, new_base);
+                            let num_params = closure.proto.num_params as usize;
+                            let varargs = if argc as usize > num_params {
+                                self.stack[args_start + num_params..args_end].to_vec()
+                            } else {
+                                Vec::new()
+                            };
+                            let new_frame = CallFrame::with_varargs(closure, new_base, varargs);
                             self.frames.push(new_frame);
                         }
                         Value::Native(_, func) => {
                             let args = self.stack[args_start..args_end].to_vec();
-                            let results = func(self, &args)?;
-                            let count = if retc == 0 { 1 } else { retc as usize };
-                            for i in 0..count {
-                                let val = results.get(i).cloned().unwrap_or(Value::Nil);
-                                self.set_reg(callee + i as u8, val);
+                            match func(self, &args) {
+                                Ok(results) => {
+                                    let count = if retc == 0 { 1 } else { retc as usize };
+                                    for i in 0..count {
+                                        let val = results.get(i).cloned().unwrap_or(Value::Nil);
+                                        self.set_reg(callee + i as u8, val);
+                                    }
+                                }
+                                Err(err) if self.is_yielding => {
+                                    if let Some(co_id) = self.current_co
+                                        && let Some(co_rc) = self.coroutines.get(&co_id) {
+                                            let mut cs = co_rc.borrow_mut();
+                                            cs.yield_callee = callee;
+                                            cs.yield_retc = retc;
+                                    }
+                                    return Err(err);
+                                }
+                                Err(err) => return Err(err),
                             }
                         }
                         Value::Table(ref t) => {
@@ -699,8 +759,13 @@ impl VM {
                         self.stack[idx] = val;
                     }
                 }
-                Instruction::Vararg { dst, count: _ } => {
-                    self.set_reg(dst, Value::Nil);
+                Instruction::Vararg { dst, count } => {
+                    let varargs = self.frames.last().unwrap().varargs.clone();
+                    let cnt = if count == 0 { varargs.len() } else { count as usize };
+                    for i in 0..cnt {
+                        let val = varargs.get(i).cloned().unwrap_or(Value::Nil);
+                        self.set_reg(dst + i as u8, val);
+                    }
                 }
             }
         }
@@ -710,6 +775,13 @@ impl VM {
 
 
     fn table_get(&mut self, table: &Value, key: &Value) -> Result<Value, String> {
+        self.table_get_depth(table, key, 0)
+    }
+
+    fn table_get_depth(&mut self, table: &Value, key: &Value, depth: usize) -> Result<Value, String> {
+        if depth > 100 {
+            return Err("loop in gettable / __index chain".to_string());
+        }
         match table {
             Value::Table(t) => {
                 let direct_val = {
@@ -735,7 +807,7 @@ impl VM {
                     let index_handler = mt.borrow().fields.get("__index").cloned().unwrap_or(Value::Nil);
                     match index_handler {
                         Value::Table(_) => {
-                            return self.table_get(&index_handler, key);
+                            return self.table_get_depth(&index_handler, key, depth + 1);
                         }
                         Value::Native(_, _) | Value::Closure(_) => {
                             let res = self.call_function(index_handler, &[table.clone(), key.clone()])?;
@@ -762,6 +834,13 @@ impl VM {
     }
 
     fn table_set(&mut self, table: &Value, key: Value, val: Value) -> Result<(), String> {
+        self.table_set_depth(table, key, val, 0)
+    }
+
+    fn table_set_depth(&mut self, table: &Value, key: Value, val: Value, depth: usize) -> Result<(), String> {
+        if depth > 100 {
+            return Err("loop in settable / __newindex chain".to_string());
+        }
         self.gc.write_barrier(table, &val);
         match table {
             Value::Table(t) => {
@@ -784,7 +863,7 @@ impl VM {
                         let newindex_handler = mt.borrow().fields.get("__newindex").cloned().unwrap_or(Value::Nil);
                         match newindex_handler {
                             Value::Table(_) => {
-                                return self.table_set(&newindex_handler, key, val);
+                                return self.table_set_depth(&newindex_handler, key, val, depth + 1);
                             }
                             Value::Native(_, _) | Value::Closure(_) => {
                                 self.call_function(newindex_handler, &[table.clone(), key, val])?;
@@ -844,7 +923,7 @@ mod tests {
 
     fn run_code(src: &str) -> Value {
         let mut parser = Parser::new(src);
-        let stmts = parser.parse_program();
+        let stmts = parser.parse_program().expect("syntax error");
         let proto = compile_to_proto(&stmts);
         let mut vm = VM::new();
         vm.execute(proto).expect("execution error")
@@ -1088,6 +1167,123 @@ mod tests {
         let res = run_code(code);
         // sha256("hello world") = b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9
         assert_eq!(res.to_string(), "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9");
+    }
+
+    #[test]
+    fn test_vm_coroutine_real_yield_resume() {
+        let code = "local co = require(\"@neyuki/coroutine\")\n\
+local f = function(x)\n\
+  local y = co.yield(x + 10)\n\
+  return y * 2\n\
+end\n\
+local t = co.create(f)\n\
+assert(co.status(t) == \"suspended\")\n\
+local ok1, val1 = co.resume(t, 5)\n\
+assert(ok1 == true)\n\
+assert(val1 == 15)\n\
+assert(co.status(t) == \"suspended\")\n\
+local ok2, val2 = co.resume(t, 20)\n\
+assert(ok2 == true)\n\
+assert(val2 == 40)\n\
+assert(co.status(t) == \"dead\")\n\
+return val2";
+        let res = run_code(code);
+        assert_eq!(res.to_string(), "40");
+    }
+
+    #[test]
+    fn test_vm_debug_getinfo_and_traceback() {
+        let code = "local d = require(\"@neyuki/debug\")\n\
+local info = d.getinfo(d.traceback)\n\
+assert(info.what == \"C\")\n\
+assert(info.name == \"debug.traceback\")\n\
+local tb = d.traceback(\"error message\")\n\
+assert(string.len(tb) > 10)\n\
+return 1";
+        let res = run_code(code);
+        assert_eq!(res.to_string(), "1");
+    }
+
+    #[test]
+    fn test_vm_varargs() {
+        let code = "local function sum(first, ...)\n\
+  local second = ...\n\
+  return first + second\n\
+end\n\
+return sum(10, 25, 99)";
+        let res = run_code(code);
+        assert_eq!(res.to_string(), "35");
+    }
+
+    #[test]
+    fn test_vm_xpcall_with_args_and_custom_handler() {
+        let code = "local function failing(a, b)\n\
+  error(tostring(a + b))\n\
+end\n\
+local function handler(err)\n\
+  return \"caught: \" .. tostring(err)\n\
+end\n\
+local ok, msg = xpcall(failing, handler, 20, 30)\n\
+assert(ok == false)\n\
+assert(msg == \"caught: 50\")\n\
+return msg";
+        let res = run_code(code);
+        assert_eq!(res.to_string(), "caught: 50");
+    }
+
+    #[test]
+    fn test_vm_table_sort_custom_comparator() {
+        let code = "local t = { 3, 1, 4, 1, 5, 9 }\n\
+table.sort(t, function(a, b) return a > b end)\n\
+assert(t[1] == 9)\n\
+assert(t[2] == 5)\n\
+assert(t[6] == 1)\n\
+return t[1]";
+        let res = run_code(code);
+        assert_eq!(res.to_string(), "9");
+    }
+
+    #[test]
+    fn test_vm_string_format() {
+        let code = "local s = string.format(\"hello %s, number %d, hex %x\", \"world\", 42, 255)\n\
+return s";
+        let res = run_code(code);
+        assert_eq!(res.to_string(), "hello world, number 42, hex ff");
+    }
+
+    #[test]
+    fn test_vm_string_sub_utf8_safe() {
+        let code = "local s = \"xin chào thế giới\"\n\
+local sub1 = string.sub(s, 1, 6)\n\
+return sub1";
+        let res = run_code(code);
+        assert!(!res.to_string().is_empty());
+    }
+
+    #[test]
+    fn test_vm_tonumber_bases() {
+        let code = "assert(tonumber(\"1010\", 2) == 10)\n\
+assert(tonumber(\"ff\", 16) == 255)\n\
+assert(tonumber(\"0xFF\") == 255)\n\
+assert(tonumber(\"  42  \") == 42)\n\
+assert(tonumber(\"-0x10\") == -16)\n\
+assert(tonumber(\"z\", 36) == 35)\n\
+return tonumber(\"1010\", 2)";
+        let res = run_code(code);
+        assert_eq!(res.to_string(), "10");
+    }
+
+    #[test]
+    fn test_vm_coroutine_no_magic_yield_collision() {
+        let code = "local co = coroutine.create(function()\n\
+    error(\"__NEYUKI_COROUTINE_YIELD__\")\n\
+end)\n\
+local ok, err = coroutine.resume(co)\n\
+assert(ok == false)\n\
+assert(coroutine.status(co) == \"dead\")\n\
+return coroutine.status(co)";
+        let res = run_code(code);
+        assert_eq!(res.to_string(), "dead");
     }
 }
 

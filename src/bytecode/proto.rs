@@ -19,10 +19,11 @@ pub struct UpvalueDesc {
     pub index: u8,
 }
 
-// Debug info: maps a local variable name to its active instruction range
+// Debug info: maps a local variable name to its allocated register and active instruction range
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LocalVarInfo {
     pub name: String,
+    pub reg: u8,
     pub from_pc: u32,
     pub to_pc: u32,
 }
@@ -79,8 +80,8 @@ impl Proto {
     }
 
     // Register a local variable in debug info
-    pub fn push_local(&mut self, name: String, from_pc: u32) {
-        self.local_names.push(LocalVarInfo { name, from_pc, to_pc: u32::MAX });
+    pub fn push_local(&mut self, name: String, reg: u8, from_pc: u32) {
+        self.local_names.push(LocalVarInfo { name, reg, from_pc, to_pc: u32::MAX });
     }
 
     // Close a local variable's scope at the current pc

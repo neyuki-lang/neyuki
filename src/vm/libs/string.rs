@@ -201,6 +201,86 @@ fn string_find(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     }
 }
 
+fn string_format(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let fmt = to_string_arg(args.first().ok_or_else(|| "string.format expects format string".to_string())?)?;
+    let mut out = String::new();
+    let mut arg_idx = 1;
+    let bytes = fmt.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            i += 1;
+            if i >= bytes.len() {
+                return Err("incomplete format specifier".to_string());
+            }
+            if bytes[i] == b'%' {
+                out.push('%');
+                i += 1;
+                continue;
+            }
+            let val = args.get(arg_idx).ok_or_else(|| "not enough arguments to string.format".to_string())?;
+            arg_idx += 1;
+            match bytes[i] {
+                b's' => out.push_str(&val.to_string()),
+                b'd' | b'i' => {
+                    let num = match val {
+                        Value::Int(n) => n.to_string(),
+                        Value::Float(f) => (*f as i64).to_string(),
+                        Value::String(s) => s.clone(),
+                        _ => return Err("format specifier expects number".to_string()),
+                    };
+                    out.push_str(&num);
+                }
+                b'f' => {
+                    let num = match val {
+                        Value::Float(f) => format!("{:.6}", f),
+                        Value::Int(n) => format!("{:.6}", n.to_f64().unwrap_or(0.0)),
+                        _ => return Err("format specifier expects number".to_string()),
+                    };
+                    out.push_str(&num);
+                }
+                b'x' => {
+                    let num = match val {
+                        Value::Int(n) => format!("{:x}", n),
+                        Value::Float(f) => format!("{:x}", *f as i64),
+                        _ => return Err("format specifier expects integer".to_string()),
+                    };
+                    out.push_str(&num);
+                }
+                b'X' => {
+                    let num = match val {
+                        Value::Int(n) => format!("{:X}", n),
+                        Value::Float(f) => format!("{:X}", *f as i64),
+                        _ => return Err("format specifier expects integer".to_string()),
+                    };
+                    out.push_str(&num);
+                }
+                b'c' => {
+                    let ch = match val {
+                        Value::Int(n) => n.to_u32().and_then(char::from_u32).unwrap_or('?'),
+                        Value::Float(f) => char::from_u32(*f as u32).unwrap_or('?'),
+                        _ => return Err("format specifier expects integer codepoint".to_string()),
+                    };
+                    out.push(ch);
+                }
+                b'q' => {
+                    out.push('"');
+                    out.push_str(&val.to_string().replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n"));
+                    out.push('"');
+                }
+                other => {
+                    return Err(format!("unsupported format specifier '%{}'", other as char));
+                }
+            }
+            i += 1;
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    Ok(vec![Value::String(out)])
+}
+
 pub fn create_string_lib() -> Value {
     let mut table = VmTable::new();
     table.set_str("len", Value::Native("string.len", string_len));
@@ -213,6 +293,7 @@ pub fn create_string_lib() -> Value {
     table.set_str("char", Value::Native("string.char", string_char));
     table.set_str("split", Value::Native("string.split", string_split));
     table.set_str("find", Value::Native("string.find", string_find));
+    table.set_str("format", Value::Native("string.format", string_format));
     table.frozen = true;
     Value::Table(Rc::new(RefCell::new(table)))
 }

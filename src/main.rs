@@ -5,6 +5,10 @@ pub mod ast;
 mod bytecode;
 mod compiler;
 pub mod diagnostics;
+#[path = "../bench/mod.rs"]
+mod bench;
+#[path = "../fuzz/mod.rs"]
+mod fuzz;
 mod fs_lib;
 mod http_lib;
 mod io_lib;
@@ -76,6 +80,10 @@ fn main() {
         }
     } else if action == "test" {
         tests::run_all_tests();
+    } else if action == "fuzz" {
+        fuzz::run_all_fuzz_tests();
+    } else if action == "bench" {
+        bench::run_all_benchmarks();
     } else {
         eprintln!("Unknown action: {}", action);
         process::exit(1);

@@ -53,15 +53,82 @@ pub fn builtin_tostring(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, Strin
 
 pub fn builtin_tonumber(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let val = args.first().unwrap_or(&Value::Nil);
+    let base_opt = args.get(1);
+
+    if let Some(base_val) = base_opt
+        && !matches!(base_val, Value::Nil)
+    {
+        let base = match base_val {
+            Value::Int(i) => i.to_i64().unwrap_or(0),
+            Value::Float(f) => *f as i64,
+            _ => return Err("bad argument #2 to 'tonumber' (base out of range)".to_string()),
+        };
+        if !(2..=36).contains(&base) {
+            return Err("bad argument #2 to 'tonumber' (base out of range)".to_string());
+        }
+        let s = match val {
+            Value::String(s) => s.as_str(),
+            _ => return Ok(vec![Value::Nil]),
+        };
+        if s.len() > 65_536 {
+            return Ok(vec![Value::Nil]);
+        }
+        let s_trimmed = s.trim();
+        let (sign, s_digits) = if let Some(stripped) = s_trimmed.strip_prefix('-') {
+            (-1, stripped.trim_start())
+        } else if let Some(stripped) = s_trimmed.strip_prefix('+') {
+            (1, stripped.trim_start())
+        } else {
+            (1, s_trimmed)
+        };
+        let s_digits = if base == 16 {
+            if let Some(stripped) = s_digits.strip_prefix("0x").or_else(|| s_digits.strip_prefix("0X")) {
+                stripped
+            } else {
+                s_digits
+            }
+        } else {
+            s_digits
+        };
+        if s_digits.is_empty() {
+            return Ok(vec![Value::Nil]);
+        }
+        return match BigInt::parse_bytes(s_digits.as_bytes(), base as u32) {
+            Some(bi) => {
+                let bi = if sign < 0 { -bi } else { bi };
+                Ok(vec![Value::Int(bi)])
+            }
+            None => Ok(vec![Value::Nil]),
+        };
+    }
+
     match val {
         Value::Int(i) => Ok(vec![Value::Int(i.clone())]),
         Value::Float(f) => Ok(vec![Value::Float(*f)]),
         Value::String(s) => {
-            if let Ok(i) = s.parse::<i64>() {
+            if s.len() > 65_536 {
+                return Ok(vec![Value::Nil]);
+            }
+            let s_trimmed = s.trim();
+            let (sign, s_rest) = if let Some(stripped) = s_trimmed.strip_prefix('-') {
+                (-1, stripped.trim_start())
+            } else if let Some(stripped) = s_trimmed.strip_prefix('+') {
+                (1, stripped.trim_start())
+            } else {
+                (1, s_trimmed)
+            };
+            if let Some(stripped_hex) = s_rest.strip_prefix("0x").or_else(|| s_rest.strip_prefix("0X"))
+                && !stripped_hex.is_empty()
+                && let Some(bi) = BigInt::parse_bytes(stripped_hex.as_bytes(), 16)
+            {
+                let bi = if sign < 0 { -bi } else { bi };
+                return Ok(vec![Value::Int(bi)]);
+            }
+            if let Ok(i) = s_trimmed.parse::<i64>() {
                 Ok(vec![Value::Int(BigInt::from(i))])
-            } else if let Ok(bi) = BigInt::from_str(s) {
+            } else if let Ok(bi) = BigInt::from_str(s_trimmed) {
                 Ok(vec![Value::Int(bi)])
-            } else if let Ok(f) = s.parse::<f64>() {
+            } else if let Ok(f) = s_trimmed.parse::<f64>() {
                 Ok(vec![Value::Float(f)])
             } else {
                 Ok(vec![Value::Nil])
@@ -77,6 +144,9 @@ pub fn builtin_int(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         Value::Int(i) => Ok(vec![Value::Int(i.clone())]),
         Value::Float(f) => Ok(vec![Value::Int(BigInt::from_f64(f.trunc()).unwrap_or_default())]),
         Value::String(s) => {
+            if s.len() > 65_536 {
+                return Err("integer string exceeds maximum length limit (65536 bytes)".to_string());
+            }
             let bi = BigInt::parse_bytes(s.as_bytes(), 10).ok_or_else(|| "invalid integer string".to_string())?;
             Ok(vec![Value::Int(bi)])
         }
@@ -116,18 +186,21 @@ pub fn builtin_pcall(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> 
 pub fn builtin_xpcall(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let func = args.first().ok_or_else(|| "xpcall expects at least 2 arguments".to_string())?;
     let err_handler = args.get(1).ok_or_else(|| "xpcall expects at least 2 arguments".to_string())?;
-    let pcall_res = builtin_pcall(vm, std::slice::from_ref(func))?;
-    if pcall_res[0] == Value::Bool(true) {
-        Ok(pcall_res)
-    } else {
-        let err_msg = pcall_res.get(1).cloned().unwrap_or(Value::Nil);
-        match err_handler {
-            Value::Native(_, f) => {
-                let h_res = f(vm, &[err_msg])?;
-                let ret = h_res.into_iter().next().unwrap_or(Value::Nil);
-                Ok(vec![Value::Bool(false), ret])
+    let call_args = if args.len() > 2 { &args[2..] } else { &[] };
+    match vm.call_function(func.clone(), call_args) {
+        Ok(mut res) => {
+            res.insert(0, Value::Bool(true));
+            Ok(res)
+        }
+        Err(err) => {
+            let err_val = Value::String(err);
+            match vm.call_function(err_handler.clone(), std::slice::from_ref(&err_val)) {
+                Ok(h_res) => {
+                    let ret = h_res.into_iter().next().unwrap_or(err_val);
+                    Ok(vec![Value::Bool(false), ret])
+                }
+                Err(h_err) => Ok(vec![Value::Bool(false), Value::String(format!("error in error handling: {}", h_err))]),
             }
-            _ => Ok(vec![Value::Bool(false), err_msg]),
         }
     }
 }
@@ -158,7 +231,7 @@ pub fn builtin_require(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String
             };
             if let Ok(src) = std::fs::read_to_string(&path) {
                 let stmts = crate::compiler::compile_source(&src)?;
-                let proto = crate::compiler::compile_to_proto(&stmts);
+                let proto = crate::compiler::try_compile_to_proto(&stmts)?;
                 let val = vm.execute(proto)?;
                 return Ok(vec![val]);
             }

@@ -439,9 +439,10 @@ fn read_proto(bytes: &[u8], cursor: &mut usize) -> Result<Proto, String> {
     let mut local_names = Vec::with_capacity(num_locals);
     for _ in 0..num_locals {
         let name = read_string(bytes, cursor)?;
+        let reg = read_u8(bytes, cursor)?;
         let from_pc = read_u32(bytes, cursor)?;
         let to_pc = read_u32(bytes, cursor)?;
-        local_names.push(crate::bytecode::proto::LocalVarInfo { name, from_pc, to_pc });
+        local_names.push(crate::bytecode::proto::LocalVarInfo { name, reg, from_pc, to_pc });
     }
 
     Ok(Proto {
