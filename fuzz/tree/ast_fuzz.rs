@@ -16,7 +16,11 @@ pub fn fuzz_nested_parentheses() {
         }
         let res = compile_source(&expr);
         if depth >= 120 {
-            assert!(res.is_err(), "depth {} should be rejected by depth limit", depth);
+            assert!(
+                res.is_err(),
+                "depth {} should be rejected by depth limit",
+                depth
+            );
         } else {
             assert!(res.is_ok(), "depth {} should parse successfully", depth);
         }
@@ -38,7 +42,11 @@ pub fn fuzz_operator_chains() {
             expr.push_str(&format!(" {} {}", op, i));
         }
         let res = compile_source(&format!("local x = {}", expr));
-        assert!(res.is_ok(), "long operator chain with {} ops should compile cleanly", count);
+        assert!(
+            res.is_ok(),
+            "long operator chain with {} ops should compile cleanly",
+            count
+        );
     }
 }
 
@@ -55,7 +63,11 @@ pub fn fuzz_malformed_interpolations() {
 
     for input in &bad_inputs {
         let res = compile_source(input);
-        assert!(res.is_err(), "malformed interpolation '{}' must fail compilation", input);
+        assert!(
+            res.is_err(),
+            "malformed interpolation '{}' must fail compilation",
+            input
+        );
     }
 }
 
@@ -79,7 +91,11 @@ pub fn fuzz_unbalanced_delimiters() {
     for snippet in &unbalanced {
         let mut parser = Parser::new(snippet);
         let res = parser.parse_program();
-        assert!(res.is_err(), "unbalanced code '{}' must return Err, never panic", snippet);
+        assert!(
+            res.is_err(),
+            "unbalanced code '{}' must return Err, never panic",
+            snippet
+        );
     }
 }
 

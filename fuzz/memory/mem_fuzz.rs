@@ -87,7 +87,10 @@ pub fn fuzz_gc_cyclic_stress() {
 
     let empty_globals = std::collections::HashMap::new();
     let freed = gc.collect_garbage(&root_refs, &empty_globals);
-    assert!(freed > 0, "GC sweep must break unreachable cyclic table clusters");
+    assert!(
+        freed > 0,
+        "GC sweep must break unreachable cyclic table clusters"
+    );
 }
 
 pub fn fuzz_vm_recursion_protection() {
@@ -101,7 +104,10 @@ pub fn fuzz_vm_recursion_protection() {
     let proto = crate::compiler::compile_to_proto(&stmts);
     let mut vm = VM::new();
     let res = vm.execute(proto);
-    assert!(res.is_err(), "mutual infinite recursion must fail safely without stack overflow");
+    assert!(
+        res.is_err(),
+        "mutual infinite recursion must fail safely without stack overflow"
+    );
     assert!(res.unwrap_err().contains("call stack overflow"));
 }
 

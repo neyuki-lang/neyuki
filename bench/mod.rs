@@ -1,14 +1,14 @@
-// Comprehensive Benchmark Suite
+// Comprehensive Benchmark Suite for Neyuki Programming Language.
 // Benchmarks all core subsystems: Lexer, Parser, Compiler, VM Arithmetic,
 // Tables, Strings, Coroutines, Garbage Collector, Crypto, Buffer, and JSON.
 
 #![allow(dead_code)]
 
-use std::time::{Duration, Instant};
 use crate::compiler::{compile_source, compile_to_proto};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::vm::machine::VM;
+use std::time::{Duration, Instant};
 
 pub struct BenchResult {
     pub name: &'static str,
@@ -313,11 +313,22 @@ pub fn bench_json() -> BenchResult {
 
 // Run the full benchmark suite and display formatted results
 pub fn run_all_benchmarks() {
-    println!("=========================================================================================");
-    println!("                               NEYUKI BENCHMARK SUITE                                    ");
-    println!("=========================================================================================");
-    println!("{:<32} | {:>14} | {:>11} | {:>16} | {:>12}", "Benchmark Name", "Iterations", "Total Time", "Latency (avg)", "Throughput");
-    println!("---------------------------------+----------------+-------------+------------------+-------------");
+    println!(
+        "========================================================================================="
+    );
+    println!(
+        "                               NEYUKI BENCHMARK SUITE                                    "
+    );
+    println!(
+        "========================================================================================="
+    );
+    println!(
+        "{:<32} | {:>14} | {:>11} | {:>16} | {:>12}",
+        "Benchmark Name", "Iterations", "Total Time", "Latency (avg)", "Throughput"
+    );
+    println!(
+        "---------------------------------+----------------+-------------+------------------+-------------"
+    );
 
     let results = [
         bench_lexer(),
@@ -338,7 +349,9 @@ pub fn run_all_benchmarks() {
         res.display();
     }
 
-    println!("=========================================================================================");
+    println!(
+        "========================================================================================="
+    );
     println!("All benchmarks completed successfully.");
 }
 

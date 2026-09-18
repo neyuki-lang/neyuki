@@ -27,9 +27,17 @@ pub fn fuzz_json_parser_and_nesting() {
         }
         let res = decode_from_str(&json);
         if depth > 256 {
-            assert!(res.is_err(), "JSON nesting depth {} must be rejected by depth limit", depth);
+            assert!(
+                res.is_err(),
+                "JSON nesting depth {} must be rejected by depth limit",
+                depth
+            );
         } else {
-            assert!(res.is_ok(), "JSON nesting depth {} should decode cleanly", depth);
+            assert!(
+                res.is_ok(),
+                "JSON nesting depth {} should decode cleanly",
+                depth
+            );
         }
     }
 
@@ -42,7 +50,7 @@ pub fn fuzz_json_parser_and_nesting() {
         "]",
         "{ \"key\": }",
         "{ \"key\": 123, }", // trailing comma
-        "[1, 2, 3, ]",        // trailing comma
+        "[1, 2, 3, ]",       // trailing comma
         "\"unclosed string",
         "\"escaped quote \\\"",
         "{\"a\": {\"b\": [1, 2, {\"c\": 3}}",
@@ -159,10 +167,7 @@ pub fn fuzz_number_parsing_and_radix() {
 
     // 2. Length cap check on tonumber (string > 65,536 bytes)
     let huge_str = "1".repeat(70_000);
-    let cap_script = format!(
-        "assert(tonumber(\"{}\") == nil)",
-        huge_str
-    );
+    let cap_script = format!("assert(tonumber(\"{}\") == nil)", huge_str);
     assert!(execute_source(&cap_script).is_ok());
 }
 
@@ -200,9 +205,16 @@ pub fn fuzz_crypto_sha256_boundaries() {
 }
 
 pub fn fuzz_os_getenv_sandbox_leakage() {
-    let allowed_vars = ["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR", "TMP", "TEMP", "PWD"];
+    let allowed_vars = [
+        "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR",
+        "TMP", "TEMP", "PWD",
+    ];
     for var in &allowed_vars {
-        assert!(is_env_var_allowed(var), "allowlisted var '{}' must be allowed", var);
+        assert!(
+            is_env_var_allowed(var),
+            "allowlisted var '{}' must be allowed",
+            var
+        );
     }
 
     let forbidden_vars = [
@@ -223,7 +235,11 @@ pub fn fuzz_os_getenv_sandbox_leakage() {
     ];
 
     for var in &forbidden_vars {
-        assert!(!is_env_var_allowed(var), "forbidden var '{}' must be denied by sandbox", var);
+        assert!(
+            !is_env_var_allowed(var),
+            "forbidden var '{}' must be denied by sandbox",
+            var
+        );
     }
 }
 

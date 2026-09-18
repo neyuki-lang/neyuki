@@ -191,7 +191,10 @@ pub fn fuzz_instruction_boundary_and_stack() {
         "local f = {}; f()",
     ];
     for snippet in &non_callables {
-        assert!(execute_source(snippet).is_err(), "calling non-callable must fail cleanly");
+        assert!(
+            execute_source(snippet).is_err(),
+            "calling non-callable must fail cleanly"
+        );
     }
 
     // 2. Varargs passing and unpacking
