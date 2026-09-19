@@ -1152,7 +1152,7 @@ mod tests {
 
     fn run_code(src: &str) -> Value {
         let mut parser = Parser::new(src);
-        let stmts = parser.parse_program().expect("syntax error");
+        let (stmts, _pool) = parser.parse_program().expect("syntax error");
         let proto = compile_to_proto(&stmts);
         let mut vm = VM::new();
         vm.execute(proto).expect("execution error")
