@@ -124,22 +124,59 @@ function table.remove(t: {any}, i: int?): any
     return removedValue
 end
 
-function table.sort(t: {any}, cmp: (a: any, b: any) -> bool?): nil
+function table.sort(t: {any}, cmp: ((a: any, b: any) -> bool)?): nil
     if (t == nil) then error("t must be provided") end
     if (type(t) != "table") then error("t must be a table") end
-    if (cmp == nil) then error("cmp must be provided") end
+
+    local default_cmp = function(a, b) return a < b end
+    local compare = cmp ?? default_cmp
 
     local len = table.length(t)
-    for i = 1, len - 1 do
-        for j = i + 1, len do
-            if (not cmp(t[i], t[j])) then
-                local temp = t[i]
-                t[i] = t[j]
-                t[j] = temp
+    if len <= 1 then return nil end
+
+    local function qsort(low: number, high: number)
+        if low < high then
+            local pivot = t[high]
+            local i = low - 1
+            for j = low, high - 1 do
+                if compare(t[j], pivot) then
+                    i = i + 1
+                    local temp = t[i]
+                    t[i] = t[j]
+                    t[j] = temp
+                end
+            end
+            local temp = t[i + 1]
+            t[i + 1] = t[high]
+            t[high] = temp
+            local pi = i + 1
+            qsort(low, pi - 1)
+            qsort(pi + 1, high)
+        end
+    end
+
+    qsort(1, len)
+    return nil
+end
+
+function table.move(a1: {any}, f: number, e: number, t: number, a2: {any}?): {any}
+    if (a1 == nil) then error("a1 must be provided") end
+    if (type(a1) != "table") then error("a1 must be a table") end
+    local dest = a2 ?? a1
+    if (type(dest) != "table") then error("a2 must be a table") end
+    if (e >= f) then
+        local d = t - f
+        if (t > f and t <= e) then
+            for i = e, f, -1 do
+                dest[i + d] = a1[i]
+            end
+        else
+            for i = f, e do
+                dest[i + d] = a1[i]
             end
         end
     end
-    return nil
+    return dest
 end
 
 return table.freeze(table)

@@ -1,0 +1,110 @@
+local os = require("@neyuki/os")
+local json = require("@neyuki/json")
+local utf8 = require("@neyuki/utf8")
+local debug = require("@neyuki/debug")
+local coroutine = require("@neyuki/coroutine")
+local table = require("@neyuki/table")
+local math = require("@neyuki/math")
+local fs = require("@neyuki/fs")
+
+-- 1. Test os module on tree-walker
+local c = os.clock()
+assert(type(c) == "number", "os.clock should return a number")
+
+local t = os.time()
+assert(type(t) == "number", "os.time should return a number")
+
+local env_var = os.getenv("NON_EXISTENT_VAR_xyz_123")
+assert(env_var == nil, "os.getenv for nonexistent variable should return nil")
+
+-- 2. Test json module
+local encoded = json.encode({a = 1, b = "hello"})
+assert(type(encoded) == "string", "json.encode should return string")
+local decoded = json.decode(encoded)
+assert(decoded.a == 1, "json.decode should decode numbers")
+assert(decoded.b == "hello", "json.decode should decode strings")
+
+-- 3. Test utf8 module
+local ustr = utf8.char(65, 66, 67)
+assert(ustr == "ABC", "utf8.char should return ABC")
+assert(utf8.len(ustr) == 3, "utf8.len should return 3")
+
+-- 4. Test debug module
+local tb = debug.traceback("test err")
+assert(type(tb) == "string", "debug.traceback should return string")
+
+-- 5. Test coroutine module
+local co = coroutine.create(function(x)
+    return x * 2
+end)
+assert(coroutine.status(co) == "suspended", "new coroutine should be suspended")
+local ok, res = coroutine.resume(co, 21)
+assert(ok == true and res == 42, "coroutine.resume should succeed with 42")
+
+-- 6. Test table.sort without cmp and with cmp
+local arr = {5, 2, 8, 1, 9, 3}
+table.sort(arr)
+assert(arr[1] == 1, "arr[1] should be 1")
+assert(arr[2] == 2, "arr[2] should be 2")
+assert(arr[3] == 3, "arr[3] should be 3")
+assert(arr[4] == 5, "arr[4] should be 5")
+assert(arr[5] == 8, "arr[5] should be 8")
+assert(arr[6] == 9, "arr[6] should be 9")
+
+-- Custom descending comparator
+table.sort(arr, function(a, b) return a > b end)
+assert(arr[1] == 9, "descending arr[1] should be 9")
+assert(arr[6] == 1, "descending arr[6] should be 1")
+
+-- Test table.move
+local src = {10, 20, 30}
+local dst = {1, 2, 3, 4, 5}
+table.move(src, 1, 3, 2, dst)
+assert(dst[1] == 1, "dst[1] should be 1")
+assert(dst[2] == 10, "dst[2] should be 10")
+assert(dst[3] == 20, "dst[3] should be 20")
+assert(dst[4] == 30, "dst[4] should be 30")
+assert(dst[5] == 5, "dst[5] should be 5")
+
+-- 7. Test math.random overloads
+local r0 = math.random()
+assert(type(r0) == "number", "math.random() should return a float")
+assert(r0 >= 0 and r0 < 1, "math.random() should be in [0, 1)")
+
+local r1 = math.random(10)
+assert(type(r1) == "number", "math.random(10) should return a number")
+assert(r1 >= 1 and r1 <= 10, "math.random(10) should be in [1, 10]")
+
+local r2 = math.random(50, 60)
+assert(r2 >= 50 and r2 <= 60, "math.random(50, 60) should be in [50, 60]")
+
+-- 8. Test fs:write with multiple calls in mode "w"
+local test_dir = ".tmp_fs_test"
+local test_file = test_dir .. "/test_append.txt"
+if fs.exists(test_file) then fs.remove(test_file) end
+if fs.exists(test_dir) then fs.remove(test_dir) end
+fs.mkdir(test_dir)
+
+local f = fs.open(test_file, "w")
+f:write("line1\n")
+f:write("line2\n")
+f:close()
+
+local f_read = fs.open(test_file, "r")
+local content = f_read:read()
+f_read:close()
+assert(content == "line1\nline2\n", "multiple write calls in mode 'w' should append")
+
+-- Clean up
+fs.remove(test_file)
+fs.remove(test_dir)
+
+-- 9. Test bit module
+local bit = require("@neyuki/bit")
+assert(bit.band(240, 15) == 0, "bit.band(240, 15) == 0")
+assert(bit.bor(240, 15) == 255, "bit.bor(240, 15) == 255")
+assert(bit.bxor(170, 85) == 255, "bit.bxor(170, 85) == 255")
+assert(bit.lshift(1, 4) == 16, "bit.lshift(1, 4) == 16")
+assert(bit.rshift(16, 4) == 1, "bit.rshift(16, 4) == 1")
+
+print("[pass] stdlib fixes verification passed")

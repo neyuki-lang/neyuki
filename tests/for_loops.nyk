@@ -1,0 +1,29 @@
+-- For loops and SetList tests
+
+-- 1. Numeric for loop with default step (1)
+local sum = 0
+for i = 1, 10 do
+    sum = sum + i
+end
+assert(sum == 55, "numeric for loop 1..10")
+
+-- 2. Numeric for loop with custom positive step
+local even_sum = 0
+for i = 2, 10, 2 do
+    even_sum = even_sum + i
+end
+assert(even_sum == 30, "numeric for loop step 2")
+
+-- 3. Numeric for loop with negative step
+local countdown = 0
+for i = 10, 1, -1 do
+    countdown = countdown + i
+end
+assert(countdown == 55, "numeric for loop step -1")
+
+-- 4. Table array constructor (SetList)
+local arr = { 10, 20, 30, 40, 50, 60, 70, 80 }
+assert(#arr == 8, "array length")
+assert(arr[1] == 10 and arr[8] == 80, "array element access")
+
+print("[pass] for loops and setlist")

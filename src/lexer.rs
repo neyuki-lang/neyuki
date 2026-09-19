@@ -36,6 +36,19 @@ mod tests {
         assert_eq!(tokens[3].kind, "string");
         assert_eq!(tokens[3].value, "hello\nworld");
     }
+
+    #[test]
+    fn tracks_line_and_column() {
+        let mut lexer = Lexer::new("local x = 42\nif");
+        let tokens = lexer.tokenize();
+        assert_eq!(tokens[0].line, 1);
+        assert_eq!(tokens[0].col, 1); // "local" starts at col 1
+        assert_eq!(tokens[1].col, 7); // "x" starts at col 7
+        assert_eq!(tokens[2].col, 9); // "=" at col 9
+        assert_eq!(tokens[3].col, 11); // "42" at col 11
+        assert_eq!(tokens[4].line, 2);
+        assert_eq!(tokens[4].col, 1); // "if" starts at col 1 of line 2
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,12 +56,14 @@ pub struct Token {
     pub kind: &'static str,
     pub value: String,
     pub line: usize,
+    pub col: usize,
 }
 
 pub struct Lexer {
     src: String,
     pos: usize,
     line: usize,
+    col: usize,
     len: usize,
 }
 
@@ -58,6 +73,7 @@ impl Lexer {
             src: source.to_owned(),
             pos: 0,
             line: 1,
+            col: 1,
             len: source.len(),
         }
     }
@@ -70,6 +86,7 @@ impl Lexer {
                 break;
             }
 
+            let start_col = self.col;
             let ch = self.peek();
             if ch.is_ascii_alphabetic() || ch == '_' {
                 let value = self.read_name();
@@ -82,6 +99,7 @@ impl Lexer {
                     kind,
                     value,
                     line: self.line,
+                    col: start_col,
                 });
             } else if ch.is_ascii_digit()
                 || (ch == '.' && self.peek_next().is_some_and(|c| c.is_ascii_digit()))
@@ -91,6 +109,7 @@ impl Lexer {
                     kind: "number",
                     value,
                     line: self.line,
+                    col: start_col,
                 });
             } else if ch == '"' || ch == '\'' {
                 let value = self.read_string(ch);
@@ -98,6 +117,7 @@ impl Lexer {
                     kind: "string",
                     value,
                     line: self.line,
+                    col: start_col,
                 });
             } else if ch == '[' && self.peek_next().is_some_and(|c| c == '[' || c == '=') {
                 let value = self.read_long_bracket();
@@ -105,6 +125,7 @@ impl Lexer {
                     kind: "string",
                     value,
                     line: self.line,
+                    col: start_col,
                 });
             } else if ch == '`' {
                 let value = self.read_interpolated_string();
@@ -112,6 +133,7 @@ impl Lexer {
                     kind: "interp",
                     value,
                     line: self.line,
+                    col: start_col,
                 });
             } else {
                 let value = self.read_symbol();
@@ -122,6 +144,7 @@ impl Lexer {
                     kind: "symbol",
                     value,
                     line: self.line,
+                    col: start_col,
                 });
             }
         }
@@ -130,6 +153,7 @@ impl Lexer {
             kind: "eof",
             value: String::new(),
             line: self.line,
+            col: self.col,
         });
 
         tokens
@@ -154,6 +178,9 @@ impl Lexer {
         self.pos += ch.len_utf8();
         if ch == '\n' {
             self.line += 1;
+            self.col = 1;
+        } else {
+            self.col += 1;
         }
         ch
     }
@@ -170,8 +197,12 @@ impl Lexer {
                     self.advance();
                     if self.peek() == '[' {
                         let saved = self.pos;
+                        let saved_line = self.line;
+                        let saved_col = self.col;
                         if self.read_long_bracket_opt().is_none() {
                             self.pos = saved;
+                            self.line = saved_line;
+                            self.col = saved_col;
                             while !self.at_end() && self.peek() != '\n' {
                                 self.advance();
                             }
@@ -346,11 +377,14 @@ impl Lexer {
         };
         let content = self.src[content_start..index].to_owned();
         self.pos = index + closer.len();
+        self.col += closer.len();
         content
     }
 
     fn read_long_bracket_opt(&mut self) -> Option<String> {
         let start = self.pos;
+        let start_line = self.line;
+        let start_col = self.col;
         if self.peek() != '[' {
             return None;
         }
@@ -363,6 +397,8 @@ impl Lexer {
         }
         if self.peek() != '[' {
             self.pos = start;
+            self.line = start_line;
+            self.col = start_col;
             return None;
         }
         self.advance();
@@ -387,9 +423,12 @@ impl Lexer {
         if let Some(index) = found {
             let content = self.src[content_start..index].to_owned();
             self.pos = index + closer.len();
+            self.col += closer.len();
             Some(content)
         } else {
             self.pos = start;
+            self.line = start_line;
+            self.col = start_col;
             None
         }
     }
@@ -434,15 +473,16 @@ impl Lexer {
     fn read_symbol(&mut self) -> String {
         let start = self.pos;
         let candidates = [
-            "<<<=", ">>>=", "??=", "<<<", ">>>", "<<=", ">>=", "==", "!=", "<=", ">=", "??", "..=", "//=", "::", "->", "...",
-            "..", "+=", "-=", "*=", "/=", "%=", "^=", "<<", ">>", "//", "++", "--", "&=", "|=",
-            "&", "|", "~", "^", "?", ";", ":", ",", ".", "=", "+", "-", "*", "/", "%", "#", "<",
-            ">", "(", ")", "{", "}", "[", "]",
+            "<<<=", ">>>=", "??=", "<<<", ">>>", "<<=", ">>=", "==", "!=", "~=", "<=", ">=", "??",
+            "..=", "//=", "::", "->", "...", "..", "+=", "-=", "*=", "/=", "%=", "^=", "<<", ">>",
+            "//", "++", "--", "&=", "|=", "&", "|", "~", "^", "?", ";", ":", ",", ".", "=", "+",
+            "-", "*", "/", "%", "#", "<", ">", "(", ")", "{", "}", "[", "]",
         ];
 
         for candidate in candidates {
             if self.src[start..].starts_with(candidate) {
                 self.pos += candidate.len();
+                self.col += candidate.len();
                 return candidate.to_owned();
             }
         }

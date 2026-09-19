@@ -22,11 +22,19 @@ math.pi = 3.14159265358979323846
 math.sqrt2 = math.sqrt(2)
 math.tau = 2*math.pi
 
-function math.random(min: number, max: number): number
-    checkNumber(min, "min")
-    checkNumber(max, "max")
-    if (min > max) then error("min must be less than or equal to max") end
-    return __random_int(min, max)
+function math.random(min: number?, max: number?): number
+    if (min == nil and max == nil) then
+        return __random_float()
+    elseif (max == nil) then
+        checkNumber(min, "m")
+        if (min < 1) then error("m must be greater than or equal to 1") end
+        return __random_int(1, min)
+    else
+        checkNumber(min, "min")
+        checkNumber(max, "max")
+        if (min > max) then error("min must be less than or equal to max") end
+        return __random_int(min, max)
+    end
 end
 
 function getNumberTable(...: number|{}): {number}

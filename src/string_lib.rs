@@ -171,13 +171,23 @@ fn builtin_rep(args: Vec<Value>) -> Result<Vec<Value>, String> {
     if n <= 0 {
         return Ok(vec![Value::String(String::new())]);
     }
+    const MAX_REP_COUNT: i64 = 10_000_000;
+    if n > MAX_REP_COUNT {
+        return Err(format!(
+            "count exceeds maximum limit ({}) in 'string.rep'",
+            MAX_REP_COUNT
+        ));
+    }
+    if s.is_empty() && sep.is_empty() {
+        return Ok(vec![Value::String(String::new())]);
+    }
     let total = (s.len() + sep.len()).saturating_mul(n as usize);
-    if total > i32::MAX as usize {
+    if total > i32::MAX as usize || total > 100 * 1024 * 1024 {
         return Err("resulting string is too large".to_string());
     }
     let mut out = String::with_capacity(total);
     for index in 0..n {
-        if index > 0 {
+        if index > 0 && !sep.is_empty() {
             out.push_str(&sep);
         }
         out.push_str(&s);

@@ -1,0 +1,36 @@
+-- test 1: bitwise and, or, xor
+local a = 0b1100
+local b = 0b1010
+assert((a & b) == 0b1000, "expected 12 & 10 == 8")
+assert((a | b) == 0b1110, "expected 12 | 10 == 14")
+assert((a ~ b) == 0b0110, "expected 12 ~ 10 == 6")
+assert((0xFF & 0x0F) == 0x0F, "hex bitwise and")
+assert((0xF0 | 0x0F) == 0xFF, "hex bitwise or")
+assert((0xAA ~ 0x55) == 0xFF, "hex bitwise xor")
+
+-- test 2: bitwise not (unary ~)
+assert(~0 == -1, "expected ~0 == -1")
+assert(~1 == -2, "expected ~1 == -2")
+assert(~(-1) == 0, "expected ~(-1) == 0")
+assert(~(-2) == 1, "expected ~(-2) == 1")
+assert(~~42 == 42, "double bitwise not")
+
+-- test 3: bitwise shifts
+assert((1 << 4) == 16, "shift left 1 << 4 == 16")
+assert((16 >> 2) == 4, "shift right 16 >> 2 == 4")
+assert((16 << -2) == 4, "negative left shift acts as right shift")
+assert((4 >> -2) == 16, "negative right shift acts as left shift")
+
+-- test 4: bitwise precedence
+-- & binds tighter than |
+assert((1 | 2 & 2) == 3, "precedence: 1 | (2 & 2) == 3")
+-- ~ (binary xor) binds tighter than |
+assert((1 | 2 ~ 3) == 1, "precedence: 1 | (2 ~ 3) == 1")
+-- unary ~ binds tightest
+assert((~1 & 1) == 0, "precedence: (~1) & 1 == 0")
+
+-- test 5: floats truncation in bitwise
+assert((12.7 & 10.2) == 8, "float truncation in bitwise and")
+assert(~1.9 == -2, "float truncation in bitwise not")
+
+print("[pass] bitwise operators (and, or, xor, not, shifts) verified")

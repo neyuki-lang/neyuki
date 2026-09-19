@@ -1,0 +1,39 @@
+local bit = {}
+
+function bit.band(...: number): number
+    local res = -1
+    for _, v in {...} do
+        res = res & v
+    end
+    return res
+end
+
+function bit.bor(...: number): number
+    local res = 0
+    for _, v in {...} do
+        res = res | v
+    end
+    return res
+end
+
+function bit.bxor(...: number): number
+    local res = 0
+    for _, v in {...} do
+        res = res ~ v
+    end
+    return res
+end
+
+function bit.bnot(a: number): number
+    return ~a
+end
+
+function bit.lshift(a: number, b: number): number
+    return a << b
+end
+
+function bit.rshift(a: number, b: number): number
+    return a >> b
+end
+
+return bit
