@@ -1,7 +1,6 @@
 // Garbage collection builtin function: collectgarbage.
 
-use num_bigint::BigInt;
-use num_traits::{ToPrimitive, Zero};
+use num_traits::ToPrimitive;
 
 use crate::vm::machine::VM;
 use crate::vm::value::Value;
@@ -14,7 +13,7 @@ pub fn builtin_collectgarbage(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>,
     match opt.as_str() {
         "collect" => {
             vm.gc.collect_garbage(&vm.stack, &vm.globals);
-            Ok(vec![Value::Int(BigInt::zero())])
+            Ok(vec![Value::Int(0)])
         }
         "stop" => {
             vm.gc.stop();

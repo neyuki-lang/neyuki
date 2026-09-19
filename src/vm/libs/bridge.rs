@@ -26,9 +26,10 @@ fn to_runtime(value: &Value, depth: usize) -> Result<crate::runtime::Value, Stri
     Ok(match value {
         Value::Nil => crate::runtime::Value::Nil,
         Value::Bool(b) => crate::runtime::Value::Bool(*b),
-        Value::Int(i) => crate::runtime::Value::Integer(Int::from_bigint(i.clone())),
+        Value::Int(i) => crate::runtime::Value::Integer(Int::Small(*i)),
+        Value::BigInt(i) => crate::runtime::Value::Integer(Int::from_bigint((**i).clone())),
         Value::Float(f) => crate::runtime::Value::Number(*f),
-        Value::String(s) => crate::runtime::Value::String(s.clone()),
+        Value::String(s) => crate::runtime::Value::String(s.to_string()),
         Value::Table(t) => {
             let source = t.borrow();
             let mut table = Table {
@@ -44,7 +45,7 @@ fn to_runtime(value: &Value, depth: usize) -> Result<crate::runtime::Value, Stri
             for (key, item) in &source.fields {
                 table
                     .fields
-                    .insert(key.clone(), to_runtime(item, depth + 1)?);
+                    .insert(key.to_string(), to_runtime(item, depth + 1)?);
             }
             crate::runtime::Value::Table(Rc::new(RefCell::new(table)))
         }
@@ -65,18 +66,21 @@ fn from_runtime(value: &crate::runtime::Value, depth: usize) -> Result<Value, St
         crate::runtime::Value::Nil => Value::Nil,
         crate::runtime::Value::Bool(b) => Value::Bool(*b),
         crate::runtime::Value::Number(n) => Value::Float(*n),
-        crate::runtime::Value::Integer(i) => Value::Int(i.to_bigint()),
-        crate::runtime::Value::String(s) => Value::String(s.clone()),
+        crate::runtime::Value::Integer(i) => match i {
+            Int::Small(v) => Value::Int(*v),
+            Int::Big(b) => Value::from_bigint((**b).clone()),
+        },
+        crate::runtime::Value::String(s) => Value::str(s),
         crate::runtime::Value::Table(t) => {
             let source = t.borrow();
-            let mut table = VmTable::new();
+            let mut table = VmTable::with_capacity(source.array.len(), source.fields.len());
             for item in &source.array {
                 table.array.push(from_runtime(item, depth + 1)?);
             }
             for (key, item) in &source.fields {
                 table
                     .fields
-                    .insert(key.clone(), from_runtime(item, depth + 1)?);
+                    .insert(Rc::from(key.as_str()), from_runtime(item, depth + 1)?);
             }
             Value::Table(Rc::new(RefCell::new(table)))
         }
@@ -146,7 +150,10 @@ macro_rules! register {
         $({
             let (name, _) = $slice[$index];
             $vm.globals
-                .insert(name.to_string(), Value::Native(name, $wrapper::<$index>));
+                .insert(
+                    Rc::from(name),
+                    Value::Native($crate::native_def!($slice[$index].0, $wrapper::<$index>)),
+                );
         })*
     }};
 }

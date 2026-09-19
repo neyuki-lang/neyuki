@@ -19,11 +19,17 @@ fn get_buf(val: &Value) -> Result<&Rc<RefCell<VmBuffer>>, String> {
 fn to_usize(val: &Value, name: &str) -> Result<usize, String> {
     match val {
         Value::Int(i) => {
-            if i.sign() == num_bigint::Sign::Minus {
+            if *i < 0 {
                 Err(format!("{} cannot be negative", name))
             } else {
-                i.to_usize()
-                    .ok_or_else(|| format!("{} is out of bounds", name))
+                usize::try_from(*i).map_err(|_| format!("{} is out of bounds", name))
+            }
+        }
+        Value::BigInt(b) => {
+            if num_traits::Signed::is_negative(&**b) {
+                Err(format!("{} cannot be negative", name))
+            } else {
+                Err(format!("{} is out of bounds", name))
             }
         }
         Value::Float(f) => {
@@ -84,7 +90,7 @@ fn buf_tostring(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
             .ok_or_else(|| "buffer.tostring expects buffer".to_string())?,
     )?;
     let s = String::from_utf8_lossy(&buf_rc.borrow().data).to_string();
-    Ok(vec![Value::String(s)])
+    Ok(vec![Value::string(s)])
 }
 
 fn buf_len(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
@@ -93,7 +99,7 @@ fn buf_len(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
             .ok_or_else(|| "buffer.len expects buffer".to_string())?,
     )?;
     let len = buf_rc.borrow().len();
-    Ok(vec![Value::Int(BigInt::from(len))])
+    Ok(vec![Value::from_bigint(BigInt::from(len))])
 }
 
 fn buf_readu8(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
@@ -107,7 +113,7 @@ fn buf_readu8(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         "offset",
     )?;
     let val = buf_rc.borrow().read_u8(offset)?;
-    Ok(vec![Value::Int(BigInt::from(val))])
+    Ok(vec![Value::from_bigint(BigInt::from(val))])
 }
 
 fn buf_writeu8(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
@@ -140,7 +146,7 @@ fn buf_readi8(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         "offset",
     )?;
     let val = buf_rc.borrow().read_i8(offset)?;
-    Ok(vec![Value::Int(BigInt::from(val))])
+    Ok(vec![Value::from_bigint(BigInt::from(val))])
 }
 
 fn buf_writei8(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
@@ -173,7 +179,7 @@ fn buf_readu16(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         "offset",
     )?;
     let val = buf_rc.borrow().read_u16(offset)?;
-    Ok(vec![Value::Int(BigInt::from(val))])
+    Ok(vec![Value::from_bigint(BigInt::from(val))])
 }
 
 fn buf_writeu16(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
@@ -206,7 +212,7 @@ fn buf_readi16(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         "offset",
     )?;
     let val = buf_rc.borrow().read_i16(offset)?;
-    Ok(vec![Value::Int(BigInt::from(val))])
+    Ok(vec![Value::from_bigint(BigInt::from(val))])
 }
 
 fn buf_writei16(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
@@ -239,7 +245,7 @@ fn buf_readu32(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         "offset",
     )?;
     let val = buf_rc.borrow().read_u32(offset)?;
-    Ok(vec![Value::Int(BigInt::from(val))])
+    Ok(vec![Value::from_bigint(BigInt::from(val))])
 }
 
 fn buf_writeu32(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
@@ -272,7 +278,7 @@ fn buf_readi32(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         "offset",
     )?;
     let val = buf_rc.borrow().read_i32(offset)?;
-    Ok(vec![Value::Int(BigInt::from(val))])
+    Ok(vec![Value::from_bigint(BigInt::from(val))])
 }
 
 fn buf_writei32(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
@@ -382,7 +388,7 @@ fn buf_readstring(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         "count",
     )?;
     let s = buf_rc.borrow().read_string(offset, count)?;
-    Ok(vec![Value::String(s)])
+    Ok(vec![Value::string(s)])
 }
 
 fn buf_writestring(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
@@ -462,39 +468,39 @@ fn buf_fill(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 
 pub fn create_buffer_lib() -> Value {
     let mut table = VmTable::new();
-    table.set_str("create", Value::Native("buffer.create", buf_create));
+    table.set_str("create", crate::native!("buffer.create", buf_create));
     table.set_str(
         "fromstring",
-        Value::Native("buffer.fromstring", buf_fromstring),
+        crate::native!("buffer.fromstring", buf_fromstring),
     );
-    table.set_str("tostring", Value::Native("buffer.tostring", buf_tostring));
-    table.set_str("len", Value::Native("buffer.len", buf_len));
-    table.set_str("readu8", Value::Native("buffer.readu8", buf_readu8));
-    table.set_str("writeu8", Value::Native("buffer.writeu8", buf_writeu8));
-    table.set_str("readi8", Value::Native("buffer.readi8", buf_readi8));
-    table.set_str("writei8", Value::Native("buffer.writei8", buf_writei8));
-    table.set_str("readu16", Value::Native("buffer.readu16", buf_readu16));
-    table.set_str("writeu16", Value::Native("buffer.writeu16", buf_writeu16));
-    table.set_str("readi16", Value::Native("buffer.readi16", buf_readi16));
-    table.set_str("writei16", Value::Native("buffer.writei16", buf_writei16));
-    table.set_str("readu32", Value::Native("buffer.readu32", buf_readu32));
-    table.set_str("writeu32", Value::Native("buffer.writeu32", buf_writeu32));
-    table.set_str("readi32", Value::Native("buffer.readi32", buf_readi32));
-    table.set_str("writei32", Value::Native("buffer.writei32", buf_writei32));
-    table.set_str("readf32", Value::Native("buffer.readf32", buf_readf32));
-    table.set_str("writef32", Value::Native("buffer.writef32", buf_writef32));
-    table.set_str("readf64", Value::Native("buffer.readf64", buf_readf64));
-    table.set_str("writef64", Value::Native("buffer.writef64", buf_writef64));
+    table.set_str("tostring", crate::native!("buffer.tostring", buf_tostring));
+    table.set_str("len", crate::native!("buffer.len", buf_len));
+    table.set_str("readu8", crate::native!("buffer.readu8", buf_readu8));
+    table.set_str("writeu8", crate::native!("buffer.writeu8", buf_writeu8));
+    table.set_str("readi8", crate::native!("buffer.readi8", buf_readi8));
+    table.set_str("writei8", crate::native!("buffer.writei8", buf_writei8));
+    table.set_str("readu16", crate::native!("buffer.readu16", buf_readu16));
+    table.set_str("writeu16", crate::native!("buffer.writeu16", buf_writeu16));
+    table.set_str("readi16", crate::native!("buffer.readi16", buf_readi16));
+    table.set_str("writei16", crate::native!("buffer.writei16", buf_writei16));
+    table.set_str("readu32", crate::native!("buffer.readu32", buf_readu32));
+    table.set_str("writeu32", crate::native!("buffer.writeu32", buf_writeu32));
+    table.set_str("readi32", crate::native!("buffer.readi32", buf_readi32));
+    table.set_str("writei32", crate::native!("buffer.writei32", buf_writei32));
+    table.set_str("readf32", crate::native!("buffer.readf32", buf_readf32));
+    table.set_str("writef32", crate::native!("buffer.writef32", buf_writef32));
+    table.set_str("readf64", crate::native!("buffer.readf64", buf_readf64));
+    table.set_str("writef64", crate::native!("buffer.writef64", buf_writef64));
     table.set_str(
         "readstring",
-        Value::Native("buffer.readstring", buf_readstring),
+        crate::native!("buffer.readstring", buf_readstring),
     );
     table.set_str(
         "writestring",
-        Value::Native("buffer.writestring", buf_writestring),
+        crate::native!("buffer.writestring", buf_writestring),
     );
-    table.set_str("copy", Value::Native("buffer.copy", buf_copy));
-    table.set_str("fill", Value::Native("buffer.fill", buf_fill));
+    table.set_str("copy", crate::native!("buffer.copy", buf_copy));
+    table.set_str("fill", crate::native!("buffer.fill", buf_fill));
     table.frozen = true;
     Value::Table(Rc::new(RefCell::new(table)))
 }

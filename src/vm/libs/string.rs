@@ -10,8 +10,9 @@ use crate::vm::value::{Value, VmTable};
 
 fn to_string_arg(val: &Value) -> Result<String, String> {
     match val {
-        Value::String(s) => Ok(s.clone()),
+        Value::String(s) => Ok(s.to_string()),
         Value::Int(i) => Ok(i.to_string()),
+        Value::BigInt(i) => Ok(i.to_string()),
         Value::Float(f) => Ok(f.to_string()),
         _ => Err("string library expects string argument".to_string()),
     }
@@ -32,7 +33,7 @@ fn string_len(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         args.first()
             .ok_or_else(|| "string.len expects 1 argument".to_string())?,
     )?;
-    Ok(vec![Value::Int(BigInt::from(s.len()))])
+    Ok(vec![Value::from_usize(s.len())])
 }
 
 fn string_lower(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
@@ -40,7 +41,7 @@ fn string_lower(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         args.first()
             .ok_or_else(|| "string.lower expects 1 argument".to_string())?,
     )?;
-    Ok(vec![Value::String(s.to_lowercase())])
+    Ok(vec![Value::String((s.to_lowercase()).into())])
 }
 
 fn string_upper(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
@@ -48,7 +49,7 @@ fn string_upper(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         args.first()
             .ok_or_else(|| "string.upper expects 1 argument".to_string())?,
     )?;
-    Ok(vec![Value::String(s.to_uppercase())])
+    Ok(vec![Value::String((s.to_uppercase()).into())])
 }
 
 fn string_reverse(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
@@ -56,7 +57,7 @@ fn string_reverse(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         args.first()
             .ok_or_else(|| "string.reverse expects 1 argument".to_string())?,
     )?;
-    Ok(vec![Value::String(s.chars().rev().collect())])
+    Ok(vec![Value::string(s.chars().rev().collect::<String>())])
 }
 
 fn string_rep(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
@@ -70,7 +71,7 @@ fn string_rep(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         "n",
     )?;
     if n <= 0 {
-        return Ok(vec![Value::String(String::new())]);
+        return Ok(vec![Value::String((String::new()).into())]);
     }
     const MAX_REP_COUNT: isize = 10_000_000;
     if n > MAX_REP_COUNT {
@@ -85,7 +86,7 @@ fn string_rep(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         String::new()
     };
     if s.is_empty() && sep.is_empty() {
-        return Ok(vec![Value::String(String::new())]);
+        return Ok(vec![Value::String((String::new()).into())]);
     }
     let unit = s.len() + sep.len();
     let total = unit.saturating_mul(n as usize);
@@ -99,7 +100,7 @@ fn string_rep(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         }
         out.push_str(&s);
     }
-    Ok(vec![Value::String(out)])
+    Ok(vec![Value::string(out)])
 }
 
 fn string_sub(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
@@ -136,9 +137,9 @@ fn string_sub(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     };
 
     if start >= end || start >= s.len() {
-        Ok(vec![Value::String(String::new())])
+        Ok(vec![Value::String((String::new()).into())])
     } else {
-        Ok(vec![Value::String(s[start..end].to_string())])
+        Ok(vec![Value::string(s[start..end].to_string())])
     }
 }
 
@@ -179,7 +180,7 @@ fn string_byte(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let mut res = Vec::new();
     if start < end && start < bytes.len() {
         for b in &bytes[start..end] {
-            res.push(Value::Int(BigInt::from(*b)));
+            res.push(Value::from_bigint(BigInt::from(*b)));
         }
     }
     Ok(res)
@@ -195,7 +196,7 @@ fn string_char(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         bytes.push(b as u8);
     }
     let s = String::from_utf8(bytes).map_err(|e| format!("invalid utf-8: {}", e))?;
-    Ok(vec![Value::String(s)])
+    Ok(vec![Value::string(s)])
 }
 
 fn string_split(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
@@ -210,10 +211,10 @@ fn string_split(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     };
 
     let parts: Vec<Value> = if sep.is_empty() {
-        s.chars().map(|c| Value::String(c.to_string())).collect()
+        s.chars().map(|c| Value::string(c.to_string())).collect()
     } else {
         s.split(&sep)
-            .map(|p| Value::String(p.to_string()))
+            .map(|p| Value::string(p.to_string()))
             .collect()
     };
 
@@ -238,8 +239,8 @@ fn string_find(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         let start = pos + 1;
         let end = pos + pattern.len();
         Ok(vec![
-            Value::Int(BigInt::from(start)),
-            Value::Int(BigInt::from(end)),
+            Value::from_bigint(BigInt::from(start)),
+            Value::from_bigint(BigInt::from(end)),
         ])
     } else {
         Ok(vec![Value::Nil])
@@ -275,8 +276,9 @@ fn string_format(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
                 b'd' | b'i' => {
                     let num = match val {
                         Value::Int(n) => n.to_string(),
+                        Value::BigInt(n) => n.to_string(),
                         Value::Float(f) => (*f as i64).to_string(),
-                        Value::String(s) => s.clone(),
+                        Value::String(s) => s.to_string(),
                         _ => return Err("format specifier expects number".to_string()),
                     };
                     out.push_str(&num);
@@ -333,22 +335,22 @@ fn string_format(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
             i += 1;
         }
     }
-    Ok(vec![Value::String(out)])
+    Ok(vec![Value::string(out)])
 }
 
 pub fn create_string_lib() -> Value {
     let mut table = VmTable::new();
-    table.set_str("len", Value::Native("string.len", string_len));
-    table.set_str("lower", Value::Native("string.lower", string_lower));
-    table.set_str("upper", Value::Native("string.upper", string_upper));
-    table.set_str("reverse", Value::Native("string.reverse", string_reverse));
-    table.set_str("rep", Value::Native("string.rep", string_rep));
-    table.set_str("sub", Value::Native("string.sub", string_sub));
-    table.set_str("byte", Value::Native("string.byte", string_byte));
-    table.set_str("char", Value::Native("string.char", string_char));
-    table.set_str("split", Value::Native("string.split", string_split));
-    table.set_str("find", Value::Native("string.find", string_find));
-    table.set_str("format", Value::Native("string.format", string_format));
+    table.set_str("len", crate::native!("string.len", string_len));
+    table.set_str("lower", crate::native!("string.lower", string_lower));
+    table.set_str("upper", crate::native!("string.upper", string_upper));
+    table.set_str("reverse", crate::native!("string.reverse", string_reverse));
+    table.set_str("rep", crate::native!("string.rep", string_rep));
+    table.set_str("sub", crate::native!("string.sub", string_sub));
+    table.set_str("byte", crate::native!("string.byte", string_byte));
+    table.set_str("char", crate::native!("string.char", string_char));
+    table.set_str("split", crate::native!("string.split", string_split));
+    table.set_str("find", crate::native!("string.find", string_find));
+    table.set_str("format", crate::native!("string.format", string_format));
     table.frozen = true;
     Value::Table(Rc::new(RefCell::new(table)))
 }

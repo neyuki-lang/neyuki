@@ -10,9 +10,12 @@ pub enum UpvalSource {
     ParentLocal(IrVar),
     /// An upvalue of the immediately enclosing function.
     ParentUpvalue,
-    /// A variable further out. The enclosing function has to capture it first,
-    /// which happens when this function is attached to it.
-    Pending(IrVar),
+    /// A variable further out: `levels_up` functions above the immediately
+    /// enclosing one (1 is the grandparent). Variable numbers are only unique
+    /// within a function, so the level is part of the identity. The enclosing
+    /// function has to capture it first, which happens when this function is
+    /// attached to it.
+    Pending { var: IrVar, levels_up: usize },
 }
 use crate::parser::Param;
 
@@ -82,9 +85,19 @@ impl ControlFlowGraph {
 
     pub fn to_flat_instructions(&self) -> Vec<IrInst> {
         let mut out = Vec::new();
-        for block in &self.blocks {
+        for (i, block) in self.blocks.iter().enumerate() {
             out.push(IrInst::Label(block.label));
-            for inst in &block.instructions {
+            let next_label = self.blocks.get(i + 1).map(|b| b.label);
+            let n = block.instructions.len();
+            for (j, inst) in block.instructions.iter().enumerate() {
+                // A jump to the block laid out right after this one is a
+                // plain fall-through.
+                if j + 1 == n
+                    && let IrInst::Jump(target) = inst
+                    && Some(*target) == next_label
+                {
+                    continue;
+                }
                 if !matches!(inst, IrInst::Label(_)) {
                     out.push(inst.clone());
                 }

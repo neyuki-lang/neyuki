@@ -2560,8 +2560,8 @@ fn runtime_to_vm_val(val: &Value, depth: usize) -> Result<crate::vm::value::Valu
         Value::Nil => Ok(crate::vm::value::Value::Nil),
         Value::Bool(b) => Ok(crate::vm::value::Value::Bool(*b)),
         Value::Number(f) => Ok(crate::vm::value::Value::Float(*f)),
-        Value::Integer(i) => Ok(crate::vm::value::Value::Int(i.to_bigint())),
-        Value::String(s) => Ok(crate::vm::value::Value::String(s.clone())),
+        Value::Integer(i) => Ok(crate::vm::value::Value::from_bigint(i.to_bigint())),
+        Value::String(s) => Ok(crate::vm::value::Value::String((s.clone()).into())),
         Value::Table(t) => {
             let borrowed = t.borrow();
             let mut tbl = crate::vm::value::VmTable::new();
@@ -2570,7 +2570,7 @@ fn runtime_to_vm_val(val: &Value, depth: usize) -> Result<crate::vm::value::Valu
             }
             for (k, item) in &borrowed.fields {
                 tbl.fields
-                    .insert(k.clone(), runtime_to_vm_val(item, depth + 1)?);
+                    .insert(Rc::from(k.as_str()), runtime_to_vm_val(item, depth + 1)?);
             }
             Ok(crate::vm::value::Value::Table(Rc::new(RefCell::new(tbl))))
         }
@@ -2586,8 +2586,9 @@ fn vm_to_runtime_val(val: &crate::vm::value::Value, depth: usize) -> Result<Valu
         crate::vm::value::Value::Nil => Ok(Value::Nil),
         crate::vm::value::Value::Bool(b) => Ok(Value::Bool(*b)),
         crate::vm::value::Value::Float(f) => Ok(Value::Number(*f)),
-        crate::vm::value::Value::Int(i) => Ok(Value::Integer(Int::from_bigint(i.clone()))),
-        crate::vm::value::Value::String(s) => Ok(Value::String(s.clone())),
+        crate::vm::value::Value::Int(i) => Ok(Value::Integer(Int::Small(*i))),
+        crate::vm::value::Value::BigInt(i) => Ok(Value::Integer(Int::from_bigint((**i).clone()))),
+        crate::vm::value::Value::String(s) => Ok(Value::String(s.to_string())),
         crate::vm::value::Value::Table(t) => {
             let borrowed = t.borrow();
             let mut array = Vec::new();
@@ -2596,7 +2597,7 @@ fn vm_to_runtime_val(val: &crate::vm::value::Value, depth: usize) -> Result<Valu
             }
             let mut fields = HashMap::new();
             for (k, item) in &borrowed.fields {
-                fields.insert(k.clone(), vm_to_runtime_val(item, depth + 1)?);
+                fields.insert(k.to_string(), vm_to_runtime_val(item, depth + 1)?);
             }
             let tbl = Table {
                 array,
@@ -2924,13 +2925,13 @@ fn runtime_coroutine_create(args: Vec<Value>) -> Result<Vec<Value>, String> {
         all_vars.reverse();
         for (k, v) in all_vars {
             if let Ok(vm_v) = runtime_to_vm_val(&v, 0) {
-                vm.globals.insert(k, vm_v);
+                vm.globals.insert(Rc::from(k.as_str()), vm_v);
             }
         }
     }
 
     let closure = crate::vm::value::Value::Closure(Rc::new(crate::vm::value::VmClosure {
-        proto,
+        proto: Rc::new(proto),
         upvalues: Vec::new(),
     }));
     let co_id = vm.next_co_id;
@@ -2943,7 +2944,7 @@ fn runtime_coroutine_create(args: Vec<Value>) -> Result<Vec<Value>, String> {
         yield_callee: 0,
         yield_retc: 0,
         yield_values: Vec::new(),
-        open_upvalues: std::collections::HashMap::new(),
+        open_upvalues: Vec::new(),
     };
     vm.coroutines.insert(co_id, Rc::new(RefCell::new(co_state)));
 
@@ -3008,12 +3009,9 @@ fn runtime_coroutine_resume(args: Vec<Value>) -> Result<Vec<Value>, String> {
             COROUTINE_REGISTRY.with(|reg| reg.borrow().get(&id).map(|h| h.co_id).unwrap_or(0));
         tbl.set_str(
             "_id",
-            crate::vm::value::Value::Int(num_bigint::BigInt::from(co_id)),
+            crate::vm::value::Value::from_bigint(num_bigint::BigInt::from(co_id)),
         );
-        tbl.set_str(
-            "status",
-            crate::vm::value::Value::String("suspended".to_string()),
-        );
+        tbl.set_str("status", crate::vm::value::Value::str("suspended"));
         tbl
     })))];
 

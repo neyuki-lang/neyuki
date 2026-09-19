@@ -85,7 +85,7 @@ pub fn fuzz_gc_cyclic_stress() {
         }
     }
 
-    let empty_globals = std::collections::HashMap::new();
+    let empty_globals = crate::vm::hash::new_map();
     let freed = gc.collect_garbage(&root_refs, &empty_globals);
     assert!(
         freed > 0,

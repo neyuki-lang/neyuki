@@ -20,7 +20,7 @@ fn os_time(_vm: &mut VM, _args: &[Value]) -> Result<Vec<Value>, String> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
-    Ok(vec![Value::Int(BigInt::from(now.as_secs()))])
+    Ok(vec![Value::from_bigint(BigInt::from(now.as_secs()))])
 }
 
 fn os_difftime(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
@@ -64,18 +64,18 @@ fn os_getenv(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     if !is_env_var_allowed(varname) {
         return Ok(vec![Value::Nil]);
     }
-    match std::env::var(varname) {
-        Ok(v) => Ok(vec![Value::String(v)]),
+    match std::env::var(&**varname) {
+        Ok(v) => Ok(vec![Value::string(v)]),
         Err(_) => Ok(vec![Value::Nil]),
     }
 }
 
 pub fn create_os_lib() -> Value {
     let mut table = VmTable::new();
-    table.set_str("clock", Value::Native("os.clock", os_clock));
-    table.set_str("time", Value::Native("os.time", os_time));
-    table.set_str("difftime", Value::Native("os.difftime", os_difftime));
-    table.set_str("getenv", Value::Native("os.getenv", os_getenv));
+    table.set_str("clock", crate::native!("os.clock", os_clock));
+    table.set_str("time", crate::native!("os.time", os_time));
+    table.set_str("difftime", crate::native!("os.difftime", os_difftime));
+    table.set_str("getenv", crate::native!("os.getenv", os_getenv));
     table.frozen = true;
     Value::Table(Rc::new(RefCell::new(table)))
 }

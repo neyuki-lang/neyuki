@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::compiler::ir::block::{BasicBlock, ControlFlowGraph};
-use crate::compiler::ir::inst::IrInst;
+use crate::compiler::ir::inst::{IrInst, SpreadSink};
 use crate::compiler::ir::types::IrLabel;
 
 pub fn build_cfg(instructions: &[IrInst]) -> ControlFlowGraph {
@@ -85,7 +85,11 @@ pub fn build_cfg(instructions: &[IrInst]) -> ControlFlowGraph {
         label_map.insert(b.label, i);
     }
 
-    // 3. Connect successors and predecessors
+    // 3. Connect successors and predecessors. A block that falls through to
+    // the next one also gets an explicit `Jump` to it: the optimizer deletes
+    // and merges blocks freely, and an edge that only exists as "whatever
+    // comes next" would be lost the moment the layout changes. Flattening
+    // drops the jump again when the target does end up next.
     let num_blocks = blocks.len();
     for i in 0..num_blocks {
         let terminator = blocks[i].terminator().cloned();
@@ -102,33 +106,35 @@ pub fn build_cfg(instructions: &[IrInst]) -> ControlFlowGraph {
             }
         };
 
+        let mut falls_through = false;
         match terminator {
             Some(IrInst::Jump(target)) => {
                 add_succ(target);
             }
             Some(IrInst::JumpIfFalse { target, .. }) => {
                 add_succ(target);
-                if let Some(next) = next_label {
-                    add_succ(next);
-                }
+                falls_through = true;
             }
             Some(IrInst::ForPrep { jump, .. })
             | Some(IrInst::ForLoop { jump, .. })
             | Some(IrInst::TForLoop { jump, .. }) => {
                 add_succ(jump);
-                if let Some(next) = next_label {
-                    add_succ(next);
-                }
+                falls_through = true;
             }
-            Some(IrInst::Return(_)) => {
+            Some(IrInst::Return(_))
+            | Some(IrInst::Spread {
+                sink: SpreadSink::Return,
+                ..
+            }) => {
                 // Exit block, no successors
             }
             _ => {
-                // Fallthrough to next block
-                if let Some(next) = next_label {
-                    add_succ(next);
-                }
+                falls_through = true;
             }
+        }
+        if falls_through && let Some(next) = next_label {
+            add_succ(next);
+            blocks[i].instructions.push(IrInst::Jump(next));
         }
 
         blocks[i].successors = succs;

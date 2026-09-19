@@ -12,14 +12,17 @@ pub fn create_utf8_lib() -> Value {
     let t = Rc::new(RefCell::new(VmTable::new()));
     let mut b = t.borrow_mut();
 
-    b.set_str("char", Value::Native("utf8.char", utf8_char));
-    b.set_str("codepoint", Value::Native("utf8.codepoint", utf8_codepoint));
-    b.set_str("len", Value::Native("utf8.len", utf8_len));
-    b.set_str("offset", Value::Native("utf8.offset", utf8_offset));
-    b.set_str("codes", Value::Native("utf8.codes", utf8_codes));
+    b.set_str("char", crate::native!("utf8.char", utf8_char));
+    b.set_str(
+        "codepoint",
+        crate::native!("utf8.codepoint", utf8_codepoint),
+    );
+    b.set_str("len", crate::native!("utf8.len", utf8_len));
+    b.set_str("offset", crate::native!("utf8.offset", utf8_offset));
+    b.set_str("codes", crate::native!("utf8.codes", utf8_codes));
     b.set_str(
         "charpattern",
-        Value::String("[\u{0000}-\u{007F}\u{00C2}-\u{00FD}][\u{0080}-\u{00BF}]*".to_string()),
+        Value::str("[\u{0000}-\u{007F}\u{00C2}-\u{00FD}][\u{0080}-\u{00BF}]*"),
     );
     drop(b);
 
@@ -62,12 +65,12 @@ fn utf8_char(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
             ));
         }
     }
-    Ok(vec![Value::String(out)])
+    Ok(vec![Value::string(out)])
 }
 
 fn utf8_codepoint(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let s = match args.first() {
-        Some(Value::String(s)) => s.as_str(),
+        Some(Value::String(s)) => &**s,
         _ => return Err("bad argument #1 to 'utf8.codepoint' (string expected)".to_string()),
     };
 
@@ -106,7 +109,7 @@ fn utf8_codepoint(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 
     let mut results = Vec::new();
     for ch in slice.chars() {
-        results.push(Value::Int(BigInt::from(ch as u32)));
+        results.push(Value::from_bigint(BigInt::from(ch as u32)));
     }
 
     Ok(results)
@@ -114,7 +117,7 @@ fn utf8_codepoint(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 
 fn utf8_len(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let s = match args.first() {
-        Some(Value::String(s)) => s.as_str(),
+        Some(Value::String(s)) => &**s,
         _ => return Err("bad argument #1 to 'utf8.len' (string expected)".to_string()),
     };
 
@@ -143,24 +146,29 @@ fn utf8_len(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     };
 
     if start_byte > end_byte || start_byte > s.len() {
-        return Ok(vec![Value::Int(BigInt::from(0))]);
+        return Ok(vec![Value::from_bigint(BigInt::from(0))]);
     }
 
     let bytes = s.as_bytes();
     let slice = &bytes[start_byte..end_byte.min(bytes.len())];
 
     match std::str::from_utf8(slice) {
-        Ok(valid_str) => Ok(vec![Value::Int(BigInt::from(valid_str.chars().count()))]),
+        Ok(valid_str) => Ok(vec![Value::from_bigint(BigInt::from(
+            valid_str.chars().count(),
+        ))]),
         Err(err) => {
             let error_pos = start_byte + err.valid_up_to() + 1;
-            Ok(vec![Value::Nil, Value::Int(BigInt::from(error_pos))])
+            Ok(vec![
+                Value::Nil,
+                Value::from_bigint(BigInt::from(error_pos)),
+            ])
         }
     }
 }
 
 fn utf8_offset(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let s = match args.first() {
-        Some(Value::String(s)) => s.as_str(),
+        Some(Value::String(s)) => &**s,
         _ => return Err("bad argument #1 to 'utf8.offset' (string expected)".to_string()),
     };
 
@@ -202,7 +210,7 @@ fn utf8_offset(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         while pos > 0 && !s.is_char_boundary(pos) {
             pos -= 1;
         }
-        return Ok(vec![Value::Int(BigInt::from(pos + 1))]);
+        return Ok(vec![Value::from_bigint(BigInt::from(pos + 1))]);
     }
 
     let mut count = 0isize;
@@ -210,7 +218,7 @@ fn utf8_offset(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         for (idx, _) in s[start_byte..].char_indices() {
             count += 1;
             if count == n {
-                return Ok(vec![Value::Int(BigInt::from(start_byte + idx + 1))]);
+                return Ok(vec![Value::from_bigint(BigInt::from(start_byte + idx + 1))]);
             }
         }
     } else {
@@ -222,11 +230,53 @@ fn utf8_offset(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         }
         if (target as usize) <= indices.len() {
             let pos = indices[indices.len() - target as usize];
-            return Ok(vec![Value::Int(BigInt::from(pos + 1))]);
+            return Ok(vec![Value::from_bigint(BigInt::from(pos + 1))]);
         }
     }
 
     Ok(vec![Value::Nil])
+}
+
+/// One step of the `utf8.codes` iterator: the state table carries the
+/// string and the byte position of the next character.
+fn utf8_iter(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let state = match args.first() {
+        Some(Value::Table(t)) => t.clone(),
+        _ => return Ok(vec![Value::Nil]),
+    };
+
+    let (str_val, pos_val) = {
+        let b = state.borrow();
+        (b.get_str("string"), b.get_str("pos"))
+    };
+
+    let s = match str_val {
+        Value::String(s) => s,
+        _ => return Ok(vec![Value::Nil]),
+    };
+
+    let pos = match pos_val {
+        Value::Int(i) => i.to_usize().unwrap_or(1),
+        _ => 1,
+    };
+
+    let start_byte = pos.saturating_sub(1);
+    if start_byte >= s.len() {
+        return Ok(vec![Value::Nil]);
+    }
+
+    if let Some(ch) = s[start_byte..].chars().next() {
+        let next_pos = pos + ch.len_utf8();
+        state
+            .borrow_mut()
+            .set_str("pos", Value::from_bigint(BigInt::from(next_pos)));
+        Ok(vec![
+            Value::from_bigint(BigInt::from(pos)),
+            Value::from_bigint(BigInt::from(ch as u32)),
+        ])
+    } else {
+        Ok(vec![Value::Nil])
+    }
 }
 
 fn utf8_codes(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
@@ -238,47 +288,10 @@ fn utf8_codes(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     // Return a stateful table iterator or closure
     let tbl = Rc::new(RefCell::new(VmTable::new()));
     tbl.borrow_mut().set_str("string", Value::String(s));
-    tbl.borrow_mut().set_str("pos", Value::Int(BigInt::from(1)));
+    tbl.borrow_mut()
+        .set_str("pos", Value::from_bigint(BigInt::from(1)));
 
-    let iter_fn = Value::Native("utf8_iter", |_, args| {
-        let state = match args.first() {
-            Some(Value::Table(t)) => t.clone(),
-            _ => return Ok(vec![Value::Nil]),
-        };
-
-        let (str_val, pos_val) = {
-            let b = state.borrow();
-            (b.get_str("string"), b.get_str("pos"))
-        };
-
-        let s = match str_val {
-            Value::String(s) => s,
-            _ => return Ok(vec![Value::Nil]),
-        };
-
-        let pos = match pos_val {
-            Value::Int(i) => i.to_usize().unwrap_or(1),
-            _ => 1,
-        };
-
-        let start_byte = pos.saturating_sub(1);
-        if start_byte >= s.len() {
-            return Ok(vec![Value::Nil]);
-        }
-
-        if let Some(ch) = s[start_byte..].chars().next() {
-            let next_pos = pos + ch.len_utf8();
-            state
-                .borrow_mut()
-                .set_str("pos", Value::Int(BigInt::from(next_pos)));
-            Ok(vec![
-                Value::Int(BigInt::from(pos)),
-                Value::Int(BigInt::from(ch as u32)),
-            ])
-        } else {
-            Ok(vec![Value::Nil])
-        }
-    });
+    let iter_fn = crate::native!("utf8_iter", utf8_iter);
 
     Ok(vec![iter_fn, Value::Table(tbl)])
 }

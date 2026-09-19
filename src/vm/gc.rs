@@ -6,7 +6,11 @@ use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 
 use crate::vm::buffer::VmBuffer;
+use crate::vm::hash::FxHashMap;
 use crate::vm::value::{Value, VmTable};
+
+/// The VM's global table, passed in as a GC root.
+pub type Globals = FxHashMap<Rc<str>, Value>;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GcColor {
@@ -109,7 +113,13 @@ impl GcTracker {
         );
     }
 
+    #[inline]
     pub fn write_barrier(&mut self, table: &Value, val: &Value) {
+        // Only a table can be white, so storing anything else needs no
+        // bookkeeping; this keeps the common case free of map lookups.
+        if !matches!(val, Value::Table(_)) {
+            return;
+        }
         let is_white = self.is_value_white(val);
         if let Value::Table(t_rc) = table {
             let t_ptr = Rc::as_ptr(t_rc);
@@ -153,15 +163,20 @@ impl GcTracker {
                 }
             }
             Value::Closure(c) => {
+                // An open upvalue's value is a register on the stack, which
+                // is already a root; only closed ones hold a value themselves.
                 for upval in &c.upvalues {
-                    self.mark_value(&upval.borrow());
+                    if !upval.is_open() {
+                        let v = upval.closed.borrow();
+                        self.mark_value(&v);
+                    }
                 }
             }
             _ => {}
         }
     }
 
-    pub fn mark_roots(&mut self, stack: &[Value], globals: &HashMap<String, Value>) {
+    pub fn mark_roots(&mut self, stack: &[Value], globals: &Globals) {
         self.gray_stack.clear();
         for val in stack {
             self.mark_value(val);
@@ -310,7 +325,7 @@ impl GcTracker {
         self.threshold = (self.bytes_allocated * self.pause_multiplier / 100).max(1024 * 1024);
     }
 
-    pub fn collect_garbage(&mut self, stack: &[Value], globals: &HashMap<String, Value>) -> usize {
+    pub fn collect_garbage(&mut self, stack: &[Value], globals: &Globals) -> usize {
         if self.state == GCState::Pause {
             self.mark_roots(stack, globals);
         }
@@ -323,12 +338,7 @@ impl GcTracker {
         self.last_freed
     }
 
-    pub fn step(
-        &mut self,
-        _step_size: usize,
-        stack: &[Value],
-        globals: &HashMap<String, Value>,
-    ) -> bool {
+    pub fn step(&mut self, _step_size: usize, stack: &[Value], globals: &Globals) -> bool {
         if self.bytes_allocated >= self.threshold {
             self.collect_garbage(stack, globals);
             true
@@ -375,7 +385,7 @@ mod tests {
     fn test_gc_self_reference() {
         let mut gc = GcTracker::new();
         let stack = Vec::new();
-        let globals = HashMap::new();
+        let globals = crate::vm::hash::new_map();
 
         let rc = Rc::new(RefCell::new(VmTable::new()));
         gc.register_table(&rc);
@@ -393,7 +403,7 @@ mod tests {
     fn test_gc_cross_reference() {
         let mut gc = GcTracker::new();
         let stack = Vec::new();
-        let globals = HashMap::new();
+        let globals = crate::vm::hash::new_map();
 
         let a = Rc::new(RefCell::new(VmTable::new()));
         let b = Rc::new(RefCell::new(VmTable::new()));
@@ -416,7 +426,7 @@ mod tests {
     fn test_gc_3_cycle() {
         let mut gc = GcTracker::new();
         let stack = Vec::new();
-        let globals = HashMap::new();
+        let globals = crate::vm::hash::new_map();
 
         let a = Rc::new(RefCell::new(VmTable::new()));
         let b = Rc::new(RefCell::new(VmTable::new()));
@@ -443,7 +453,7 @@ mod tests {
     fn test_gc_root_preservation() {
         let mut gc = GcTracker::new();
         let mut stack = Vec::new();
-        let globals = HashMap::new();
+        let globals = crate::vm::hash::new_map();
 
         let root_rc = Rc::new(RefCell::new(VmTable::new()));
         let child_rc = Rc::new(RefCell::new(VmTable::new()));
@@ -466,13 +476,14 @@ mod tests {
     fn test_gc_external_reference_prevents_data_corruption() {
         let mut gc = GcTracker::new();
         let stack = Vec::new(); // Not in stack
-        let globals = HashMap::new(); // Not in globals
+        let globals = crate::vm::hash::new_map(); // Not in globals
 
         // Table is held by external Rust code outside VM roots
         let external_table = Rc::new(RefCell::new(VmTable::new()));
-        external_table
-            .borrow_mut()
-            .set_str("important", Value::Int(num_bigint::BigInt::from(999)));
+        external_table.borrow_mut().set_str(
+            "important",
+            Value::from_bigint(num_bigint::BigInt::from(999)),
+        );
         gc.register_table(&external_table);
 
         // Run collection when table is not in roots

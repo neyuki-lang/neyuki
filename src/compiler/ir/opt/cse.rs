@@ -46,13 +46,39 @@ pub fn common_subexpression_elimination_cfg(cfg: &mut ControlFlowGraph) -> bool 
     changed
 }
 
+/// Operators whose result depends only on their operand values. `a .. b` on
+/// a table consults state that a store or a call can change while the operand
+/// variables stay the same, so it is never shared.
+fn is_cse_candidate(op: IrBinaryOp) -> bool {
+    !matches!(op, IrBinaryOp::Concat | IrBinaryOp::Coalesce)
+}
+
+/// Whether an instruction may run arbitrary code or change memory that an
+/// earlier expression could have depended on (through a metamethod).
+fn has_side_effects(inst: &IrInst) -> bool {
+    matches!(
+        inst,
+        IrInst::Call { .. }
+            | IrInst::Spread { .. }
+            | IrInst::TForCall { .. }
+            | IrInst::SetTable { .. }
+            | IrInst::GetTable { .. }
+            | IrInst::AppendArray { .. }
+            | IrInst::SetGlobal { .. }
+            | IrInst::SetUpval { .. }
+    )
+}
+
 fn cse_slice(instructions: &mut [IrInst]) -> bool {
     let mut expr_map: HashMap<ExpressionKey, IrVar> = HashMap::new();
     let mut modified = false;
 
     for inst in instructions.iter_mut() {
+        if has_side_effects(inst) {
+            expr_map.clear();
+        }
         match inst {
-            IrInst::BinOp { dst, op, lhs, rhs } => {
+            IrInst::BinOp { dst, op, lhs, rhs } if is_cse_candidate(*op) => {
                 let key = canonical_binop_key(*op, *lhs, *rhs);
                 if let Some(&existing_var) = expr_map.get(&key) {
                     if existing_var != *dst {
@@ -69,7 +95,8 @@ fn cse_slice(instructions: &mut [IrInst]) -> bool {
                     continue;
                 }
             }
-            IrInst::UnOp { dst, op, src } => {
+            // `#t` reads the table, which anything in between may have grown.
+            IrInst::UnOp { dst, op, src } if *op != IrUnaryOp::Len => {
                 let key = ExpressionKey::UnOp(*op, *src);
                 if let Some(&existing_var) = expr_map.get(&key) {
                     if existing_var != *dst {

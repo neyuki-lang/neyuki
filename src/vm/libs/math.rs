@@ -24,7 +24,11 @@ fn math_abs(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         .first()
         .ok_or_else(|| "math.abs expects 1 argument".to_string())?;
     match val {
-        Value::Int(i) => Ok(vec![Value::Int(i.abs())]),
+        Value::Int(i) => Ok(vec![match i.checked_abs() {
+            Some(a) => Value::Int(a),
+            None => Value::from_bigint(num_bigint::BigInt::from(*i).abs()),
+        }]),
+        Value::BigInt(i) => Ok(vec![Value::from_bigint(num_traits::Signed::abs(&**i))]),
         Value::Float(f) => Ok(vec![Value::Float(f.abs())]),
         _ => Err("math.abs expects number".to_string()),
     }
@@ -234,7 +238,7 @@ fn math_random(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
             return Err("math.random m must be >= 1".to_string());
         }
         let val = rng.gen_range(1..=m);
-        Ok(vec![Value::Int(BigInt::from(val))])
+        Ok(vec![Value::from_bigint(BigInt::from(val))])
     } else {
         let m = to_f64(&args[0])? as i64;
         let n = to_f64(&args[1])? as i64;
@@ -242,33 +246,33 @@ fn math_random(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
             return Err("math.random min cannot be greater than max".to_string());
         }
         let val = rng.gen_range(m..=n);
-        Ok(vec![Value::Int(BigInt::from(val))])
+        Ok(vec![Value::from_bigint(BigInt::from(val))])
     }
 }
 
 pub fn create_math_lib() -> Value {
     let mut table = VmTable::new();
-    table.set_str("abs", Value::Native("math.abs", math_abs));
-    table.set_str("floor", Value::Native("math.floor", math_floor));
-    table.set_str("ceil", Value::Native("math.ceil", math_ceil));
-    table.set_str("round", Value::Native("math.round", math_round));
-    table.set_str("sqrt", Value::Native("math.sqrt", math_sqrt));
-    table.set_str("sin", Value::Native("math.sin", math_sin));
-    table.set_str("cos", Value::Native("math.cos", math_cos));
-    table.set_str("tan", Value::Native("math.tan", math_tan));
-    table.set_str("asin", Value::Native("math.asin", math_asin));
-    table.set_str("acos", Value::Native("math.acos", math_acos));
-    table.set_str("atan", Value::Native("math.atan", math_atan));
-    table.set_str("atan2", Value::Native("math.atan2", math_atan2));
-    table.set_str("deg", Value::Native("math.deg", math_deg));
-    table.set_str("rad", Value::Native("math.rad", math_rad));
-    table.set_str("exp", Value::Native("math.exp", math_exp));
-    table.set_str("log", Value::Native("math.log", math_log));
-    table.set_str("min", Value::Native("math.min", math_min));
-    table.set_str("max", Value::Native("math.max", math_max));
-    table.set_str("clamp", Value::Native("math.clamp", math_clamp));
-    table.set_str("sign", Value::Native("math.sign", math_sign));
-    table.set_str("random", Value::Native("math.random", math_random));
+    table.set_str("abs", crate::native!("math.abs", math_abs));
+    table.set_str("floor", crate::native!("math.floor", math_floor));
+    table.set_str("ceil", crate::native!("math.ceil", math_ceil));
+    table.set_str("round", crate::native!("math.round", math_round));
+    table.set_str("sqrt", crate::native!("math.sqrt", math_sqrt));
+    table.set_str("sin", crate::native!("math.sin", math_sin));
+    table.set_str("cos", crate::native!("math.cos", math_cos));
+    table.set_str("tan", crate::native!("math.tan", math_tan));
+    table.set_str("asin", crate::native!("math.asin", math_asin));
+    table.set_str("acos", crate::native!("math.acos", math_acos));
+    table.set_str("atan", crate::native!("math.atan", math_atan));
+    table.set_str("atan2", crate::native!("math.atan2", math_atan2));
+    table.set_str("deg", crate::native!("math.deg", math_deg));
+    table.set_str("rad", crate::native!("math.rad", math_rad));
+    table.set_str("exp", crate::native!("math.exp", math_exp));
+    table.set_str("log", crate::native!("math.log", math_log));
+    table.set_str("min", crate::native!("math.min", math_min));
+    table.set_str("max", crate::native!("math.max", math_max));
+    table.set_str("clamp", crate::native!("math.clamp", math_clamp));
+    table.set_str("sign", crate::native!("math.sign", math_sign));
+    table.set_str("random", crate::native!("math.random", math_random));
     table.set_str("pi", Value::Float(std::f64::consts::PI));
     table.set_str("huge", Value::Float(f64::INFINITY));
     table.frozen = true;

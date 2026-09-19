@@ -1,7 +1,5 @@
 // Metatable and raw table built-in functions: setmetatable, getmetatable, rawget, rawset, rawequal, rawlen.
 
-use num_bigint::BigInt;
-use num_traits::{ToPrimitive, Zero};
 use std::rc::Rc;
 
 use crate::vm::machine::VM;
@@ -70,13 +68,12 @@ pub fn builtin_rawget(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String
         Value::Table(t) => {
             let tbl = t.borrow();
             match key {
-                Value::String(k) => Ok(vec![tbl.fields.get(k).cloned().unwrap_or(Value::Nil)]),
-                Value::Int(idx) if *idx > BigInt::zero() => {
-                    let i = idx
-                        .to_usize()
-                        .ok_or_else(|| "table index too large".to_string())?;
+                Value::String(k) => Ok(vec![tbl.fields.get(&**k).cloned().unwrap_or(Value::Nil)]),
+                Value::Int(idx) if *idx > 0 => {
+                    let i = *idx as usize;
                     Ok(vec![tbl.array.get(i - 1).cloned().unwrap_or(Value::Nil)])
                 }
+                Value::BigInt(_) => Err("table index too large".to_string()),
                 _ => Ok(vec![Value::Nil]),
             }
         }
@@ -107,10 +104,9 @@ pub fn builtin_rawset(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String>
                 Value::String(k) => {
                     tbl.fields.insert(k.clone(), val);
                 }
-                Value::Int(idx) if *idx > BigInt::zero() => {
-                    let i = idx
-                        .to_usize()
-                        .ok_or_else(|| "table index too large".to_string())?;
+                Value::BigInt(_) => return Err("table index too large".to_string()),
+                Value::Int(idx) if *idx > 0 => {
+                    let i = *idx as usize;
                     if i - 1 < tbl.array.len() {
                         tbl.array[i - 1] = val;
                     } else if i - 1 == tbl.array.len() {
@@ -140,7 +136,7 @@ pub fn builtin_rawequal(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, Stri
         (Value::Table(x), Value::Table(y)) => Ok(vec![Value::Bool(Rc::ptr_eq(x, y))]),
         (Value::Buffer(x), Value::Buffer(y)) => Ok(vec![Value::Bool(Rc::ptr_eq(x, y))]),
         (Value::Closure(x), Value::Closure(y)) => Ok(vec![Value::Bool(Rc::ptr_eq(x, y))]),
-        (Value::Native(na, _), Value::Native(nb, _)) => Ok(vec![Value::Bool(na == nb)]),
+        (Value::Native(na), Value::Native(nb)) => Ok(vec![Value::Bool(na.name == nb.name)]),
         _ => Ok(vec![Value::Bool(false)]),
     }
 }
@@ -150,9 +146,9 @@ pub fn builtin_rawlen(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String
         .first()
         .ok_or_else(|| "rawlen expects 1 argument".to_string())?;
     match val {
-        Value::Table(t) => Ok(vec![Value::Int(BigInt::from(t.borrow().array.len()))]),
-        Value::String(s) => Ok(vec![Value::Int(BigInt::from(s.len()))]),
-        Value::Buffer(b) => Ok(vec![Value::Int(BigInt::from(b.borrow().len()))]),
+        Value::Table(t) => Ok(vec![Value::from_usize(t.borrow().array.len())]),
+        Value::String(s) => Ok(vec![Value::from_usize(s.len())]),
+        Value::Buffer(b) => Ok(vec![Value::from_usize(b.borrow().len())]),
         _ => Err("rawlen expects table, string, or buffer".to_string()),
     }
 }

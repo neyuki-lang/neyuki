@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::time::Instant;
 
-use crate::runtime;
+use crate::vm;
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -19,7 +19,7 @@ pub struct TestResult {
 pub fn run_test_file(path: &Path) -> TestResult {
     let start = Instant::now();
     let path_str = path.to_str().expect("path should be valid UTF-8");
-    let res = runtime::run_file(path_str);
+    let res = vm::run_file(path_str);
     let duration_ms = start.elapsed().as_millis();
 
     match res {

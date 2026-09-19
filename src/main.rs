@@ -40,20 +40,22 @@ fn main() {
             process::exit(1);
         }
     } else if action == "compile" {
-        let use_ir = args.iter().any(|a| a == "--opt-ir" || a == "-O2");
+        // The optimizing IR pipeline is the default; `--direct` keeps the
+        // older single-pass compiler reachable for comparison.
+        let use_direct = args.iter().any(|a| a == "--direct");
         let non_flag_args: Vec<&String> = args
             .iter()
             .skip(2)
             .filter(|a| !a.starts_with('-'))
             .collect();
         let Some(path) = non_flag_args.first() else {
-            eprintln!("Usage: {} compile <path> [output] [--opt-ir]", args[0]);
+            eprintln!("Usage: {} compile <path> [output] [--direct]", args[0]);
             process::exit(1);
         };
-        let compile_res = if use_ir {
-            compiler::compile_file_to_bytecode_via_ir(path)
-        } else {
+        let compile_res = if use_direct {
             compiler::compile_file_to_bytecode(path)
+        } else {
+            compiler::compile_file_to_bytecode_via_ir(path)
         };
         match compile_res {
             Ok(bytecode) => {
@@ -68,10 +70,10 @@ fn main() {
                 println!(
                     "compiled to bytecode ({}) via {} with magic 'neyuki!' ({} bytes)",
                     out_path,
-                    if use_ir {
-                        "IR CFG pipeline"
-                    } else {
+                    if use_direct {
                         "direct compiler"
+                    } else {
+                        "IR CFG pipeline"
                     },
                     bytecode.len()
                 );
@@ -82,46 +84,67 @@ fn main() {
             }
         }
     } else if action == "run" {
-        let use_ir = args.iter().any(|a| a == "--opt-ir" || a == "-O2");
+        // Programs run on the register VM. `--tree-walker` selects the
+        // original AST interpreter instead; `--opt-ir` is accepted for
+        // compatibility and means the default.
+        let use_tree_walker = args.iter().any(|a| a == "--tree-walker");
         let non_flag_args: Vec<&String> = args
             .iter()
             .skip(2)
             .filter(|a| !a.starts_with('-'))
             .collect();
         let Some(path) = non_flag_args.first() else {
-            eprintln!("Usage: {} run <path> [--opt-ir]", args[0]);
+            eprintln!("Usage: {} run <path> [--tree-walker]", args[0]);
             process::exit(1);
         };
-        // Check if file is a compiled binary starting with magic bytes
-        let is_bytecode = std::fs::read(path).is_ok_and(|bytes| bytes.starts_with(bytecode::MAGIC));
-        if is_bytecode {
-            if let Err(err) = vm::execute_bytecode_file(path) {
-                eprintln!("vm error: {}", err);
+        if use_tree_walker {
+            if let Err(err) = runtime::run_file(path) {
+                eprintln!("runtime error: {}", err);
                 process::exit(1);
             }
-        } else if use_ir {
-            match compiler::compile_file(path) {
-                Ok(stmts) => match compiler::try_compile_to_proto_via_ir(&stmts) {
-                    Ok(proto) => {
-                        let mut vm = vm::machine::VM::new();
-                        if let Err(err) = vm.execute(proto) {
-                            eprintln!("vm error: {}", err);
-                            process::exit(1);
-                        }
-                    }
-                    Err(err) => {
-                        eprintln!("compiler IR error: {}", err);
-                        process::exit(1);
-                    }
-                },
-                Err(err) => {
-                    eprintln!("syntax error: {}", err);
-                    process::exit(1);
-                }
-            }
-        } else if let Err(err) = runtime::run_file(path) {
-            eprintln!("runtime error: {}", err);
+        } else if let Err(err) = vm::run_file(path) {
+            eprintln!("vm error: {}", err);
             process::exit(1);
+        }
+    } else if action == "dump-ir" {
+        // Prints the IR of every function before and after optimization.
+        let Some(path) = args.get(2) else {
+            eprintln!("Usage: {} dump-ir <path>", args[0]);
+            process::exit(1);
+        };
+        match compiler::compile_file(path) {
+            Ok(stmts) => print!("{}", compiler::dump_ir(&stmts)),
+            Err(err) => {
+                eprintln!("{}: {}", path, err);
+                process::exit(1);
+            }
+        }
+    } else if action == "disasm" {
+        let use_direct = args.iter().any(|a| a == "--direct");
+        let non_flag_args: Vec<&String> = args
+            .iter()
+            .skip(2)
+            .filter(|a| !a.starts_with('-'))
+            .collect();
+        let Some(path) = non_flag_args.first() else {
+            eprintln!("Usage: {} disasm <path> [--direct]", args[0]);
+            process::exit(1);
+        };
+        // A debugging aid: shows what the compiler emits even for sources
+        // the type checker would reject.
+        let proto_res = compiler::compile_file(path).and_then(|stmts| {
+            if use_direct {
+                compiler::try_compile_to_proto(&stmts)
+            } else {
+                compiler::compile_bundled_to_proto(&stmts)
+            }
+        });
+        match proto_res {
+            Ok(proto) => print!("{}", bytecode::disasm::disassemble_proto(&proto, 0)),
+            Err(err) => {
+                eprintln!("{}: {}", path, err);
+                process::exit(1);
+            }
         }
     } else if action == "test" {
         tests::run_all_tests();

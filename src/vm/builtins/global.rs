@@ -31,12 +31,12 @@ pub fn builtin_assert(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String
 
 pub fn builtin_type(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let val = args.first().unwrap_or(&Value::Nil);
-    Ok(vec![Value::String(val.type_name().to_string())])
+    Ok(vec![Value::String((val.type_name().to_string()).into())])
 }
 
 pub fn builtin_typeof(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let val = args.first().unwrap_or(&Value::Nil);
-    Ok(vec![Value::String(val.typeof_name().to_string())])
+    Ok(vec![Value::String((val.typeof_name().to_string()).into())])
 }
 
 pub fn builtin_tostring(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
@@ -54,7 +54,7 @@ pub fn builtin_tostring(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, Strin
             return Ok(vec![res.into_iter().next().unwrap_or(Value::Nil)]);
         }
     }
-    Ok(vec![Value::String(val.to_string())])
+    Ok(vec![Value::string(val.to_string())])
 }
 
 pub fn builtin_tonumber(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
@@ -73,7 +73,7 @@ pub fn builtin_tonumber(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, Stri
             return Err("bad argument #2 to 'tonumber' (base out of range)".to_string());
         }
         let s = match val {
-            Value::String(s) => s.as_str(),
+            Value::String(s) => &**s,
             _ => return Ok(vec![Value::Nil]),
         };
         if s.len() > 65_536 {
@@ -105,14 +105,15 @@ pub fn builtin_tonumber(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, Stri
         return match BigInt::parse_bytes(s_digits.as_bytes(), base as u32) {
             Some(bi) => {
                 let bi = if sign < 0 { -bi } else { bi };
-                Ok(vec![Value::Int(bi)])
+                Ok(vec![Value::from_bigint(bi)])
             }
             None => Ok(vec![Value::Nil]),
         };
     }
 
     match val {
-        Value::Int(i) => Ok(vec![Value::Int(i.clone())]),
+        Value::Int(i) => Ok(vec![Value::Int(*i)]),
+        Value::BigInt(_) => Ok(vec![val.clone()]),
         Value::Float(f) => Ok(vec![Value::Float(*f)]),
         Value::String(s) => {
             if s.len() > 65_536 {
@@ -133,12 +134,12 @@ pub fn builtin_tonumber(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, Stri
                 && let Some(bi) = BigInt::parse_bytes(stripped_hex.as_bytes(), 16)
             {
                 let bi = if sign < 0 { -bi } else { bi };
-                return Ok(vec![Value::Int(bi)]);
+                return Ok(vec![Value::from_bigint(bi)]);
             }
             if let Ok(i) = s_trimmed.parse::<i64>() {
-                Ok(vec![Value::Int(BigInt::from(i))])
+                Ok(vec![Value::from_bigint(BigInt::from(i))])
             } else if let Ok(bi) = BigInt::from_str(s_trimmed) {
-                Ok(vec![Value::Int(bi)])
+                Ok(vec![Value::from_bigint(bi)])
             } else if let Ok(f) = s_trimmed.parse::<f64>() {
                 Ok(vec![Value::Float(f)])
             } else {
@@ -152,8 +153,9 @@ pub fn builtin_tonumber(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, Stri
 pub fn builtin_int(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let val = args.first().unwrap_or(&Value::Nil);
     match val {
-        Value::Int(i) => Ok(vec![Value::Int(i.clone())]),
-        Value::Float(f) => Ok(vec![Value::Int(
+        Value::Int(i) => Ok(vec![Value::Int(*i)]),
+        Value::BigInt(_) => Ok(vec![val.clone()]),
+        Value::Float(f) => Ok(vec![Value::from_bigint(
             BigInt::from_f64(f.trunc()).unwrap_or_default(),
         )]),
         Value::String(s) => {
@@ -162,7 +164,7 @@ pub fn builtin_int(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
             }
             let bi = BigInt::parse_bytes(s.as_bytes(), 10)
                 .ok_or_else(|| "invalid integer string".to_string())?;
-            Ok(vec![Value::Int(bi)])
+            Ok(vec![Value::from_bigint(bi)])
         }
         _ => Err("int expects number or string".to_string()),
     }
@@ -200,7 +202,7 @@ pub fn builtin_pcall(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> 
             res.insert(0, Value::Bool(true));
             Ok(res)
         }
-        Err(err) => Ok(vec![Value::Bool(false), Value::String(err)]),
+        Err(err) => Ok(vec![Value::Bool(false), Value::string(err)]),
     }
 }
 
@@ -215,7 +217,7 @@ pub fn builtin_try(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
             res.insert(0, Value::Bool(true));
             Ok(res)
         }
-        Err(err) => Ok(vec![Value::Bool(false), Value::String(err)]),
+        Err(err) => Ok(vec![Value::Bool(false), Value::string(err)]),
     }
 }
 
@@ -233,7 +235,7 @@ pub fn builtin_xpcall(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String>
             Ok(res)
         }
         Err(err) => {
-            let err_val = Value::String(err);
+            let err_val = Value::string(err);
             match vm.call_function(err_handler.clone(), std::slice::from_ref(&err_val)) {
                 Ok(h_res) => {
                     let ret = h_res.into_iter().next().unwrap_or(err_val);
@@ -241,7 +243,7 @@ pub fn builtin_xpcall(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String>
                 }
                 Err(h_err) => Ok(vec![
                     Value::Bool(false),
-                    Value::String(format!("error in error handling: {}", h_err)),
+                    Value::String((format!("error in error handling: {}", h_err)).into()),
                 ]),
             }
         }
@@ -276,7 +278,7 @@ pub fn builtin_require(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String
         .first()
         .ok_or_else(|| "require expects a module path".to_string())?
     {
-        Value::String(s) => s.as_str(),
+        Value::String(s) => &**s,
         _ => return Err("require expects string argument".to_string()),
     };
 
@@ -345,12 +347,14 @@ pub fn builtin_require(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String
                             pkg, err.message
                         ));
                     }
-                    let p = crate::compiler::try_compile_to_proto(&stmts)?;
+                    let p = crate::compiler::try_compile_to_proto_via_ir(&stmts)?;
                     crate::bytecode::verify_proto(&p)
                         .map_err(|e| format!("bytecode verification failed: {}", e))?;
                     p
                 };
-                let val = vm.execute(proto)?;
+                // Run on top of the current frames: `execute` would reset the
+                // stack out from under whatever called `require`.
+                let val = vm.execute_module(proto)?;
                 return Ok(vec![val]);
             }
             return Err(format!("cannot find module '{}'", pkg));

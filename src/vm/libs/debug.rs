@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::vm::machine::VM;
-use crate::vm::value::{Value, VmTable};
+use crate::vm::value::{NativeDef, Value, VmTable};
 
 pub fn create_debug_lib() -> Value {
     let t = Rc::new(RefCell::new(VmTable::new()));
@@ -14,18 +14,18 @@ pub fn create_debug_lib() -> Value {
 
     b.set_str(
         "traceback",
-        Value::Native("debug.traceback", debug_traceback),
+        crate::native!("debug.traceback", debug_traceback),
     );
-    b.set_str("getinfo", Value::Native("debug.getinfo", debug_getinfo));
-    b.set_str("getlocal", Value::Native("debug.getlocal", debug_getlocal));
-    b.set_str("setlocal", Value::Native("debug.setlocal", debug_setlocal));
+    b.set_str("getinfo", crate::native!("debug.getinfo", debug_getinfo));
+    b.set_str("getlocal", crate::native!("debug.getlocal", debug_getlocal));
+    b.set_str("setlocal", crate::native!("debug.setlocal", debug_setlocal));
     b.set_str(
         "getupvalue",
-        Value::Native("debug.getupvalue", debug_getupvalue),
+        crate::native!("debug.getupvalue", debug_getupvalue),
     );
     b.set_str(
         "setupvalue",
-        Value::Native("debug.setupvalue", debug_setupvalue),
+        crate::native!("debug.setupvalue", debug_setupvalue),
     );
 
     Value::Table(t.clone())
@@ -69,7 +69,7 @@ fn debug_traceback(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         ));
     }
 
-    Ok(vec![Value::String(out)])
+    Ok(vec![Value::string(out)])
 }
 
 fn debug_getinfo(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
@@ -87,25 +87,28 @@ fn debug_getinfo(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
                 .name
                 .clone()
                 .unwrap_or_else(|| "<anonymous>".to_string());
-            b.set_str("name", Value::String(name.clone()));
-            b.set_str("what", Value::String("Lua".to_string()));
-            b.set_str("source", Value::String(name));
-            b.set_str("numparams", Value::Int(BigInt::from(c.proto.num_params)));
+            b.set_str("name", Value::String((name.clone()).into()));
+            b.set_str("what", Value::str("Lua"));
+            b.set_str("source", Value::string(name));
+            b.set_str(
+                "numparams",
+                Value::from_bigint(BigInt::from(c.proto.num_params)),
+            );
             b.set_str("isvararg", Value::Bool(c.proto.is_vararg));
-            b.set_str("currentline", Value::Int(BigInt::from(-1)));
+            b.set_str("currentline", Value::from_bigint(BigInt::from(-1)));
             b.set_str("func", Value::Closure(c.clone()));
             drop(b);
             Ok(vec![Value::Table(tbl)])
         }
-        Value::Native(name, _) => {
+        Value::Native(NativeDef { name, .. }) => {
             let tbl = Rc::new(RefCell::new(VmTable::new()));
             let mut b = tbl.borrow_mut();
-            b.set_str("name", Value::String(name.to_string()));
-            b.set_str("what", Value::String("C".to_string()));
-            b.set_str("source", Value::String("=[C]".to_string()));
-            b.set_str("numparams", Value::Int(BigInt::from(0)));
+            b.set_str("name", Value::string(name.to_string()));
+            b.set_str("what", Value::str("C"));
+            b.set_str("source", Value::str("=[C]"));
+            b.set_str("numparams", Value::from_bigint(BigInt::from(0)));
             b.set_str("isvararg", Value::Bool(true));
-            b.set_str("currentline", Value::Int(BigInt::from(-1)));
+            b.set_str("currentline", Value::from_bigint(BigInt::from(-1)));
             b.set_str("func", arg0.clone());
             drop(b);
             Ok(vec![Value::Table(tbl)])
@@ -126,12 +129,12 @@ fn get_frame_info(vm: &VM, level: usize) -> Result<Vec<Value>, String> {
     if level == 0 {
         let tbl = Rc::new(RefCell::new(VmTable::new()));
         let mut b = tbl.borrow_mut();
-        b.set_str("name", Value::String("debug.getinfo".to_string()));
-        b.set_str("what", Value::String("C".to_string()));
-        b.set_str("source", Value::String("=[C]".to_string()));
-        b.set_str("numparams", Value::Int(BigInt::from(0)));
+        b.set_str("name", Value::str("debug.getinfo"));
+        b.set_str("what", Value::str("C"));
+        b.set_str("source", Value::str("=[C]"));
+        b.set_str("numparams", Value::from_bigint(BigInt::from(0)));
         b.set_str("isvararg", Value::Bool(true));
-        b.set_str("currentline", Value::Int(BigInt::from(-1)));
+        b.set_str("currentline", Value::from_bigint(BigInt::from(-1)));
         drop(b);
         return Ok(vec![Value::Table(tbl)]);
     }
@@ -150,10 +153,13 @@ fn get_frame_info(vm: &VM, level: usize) -> Result<Vec<Value>, String> {
         .name
         .clone()
         .unwrap_or_else(|| "<anonymous>".to_string());
-    b.set_str("name", Value::String(name.clone()));
-    b.set_str("what", Value::String("Lua".to_string()));
-    b.set_str("source", Value::String(name));
-    b.set_str("numparams", Value::Int(BigInt::from(proto.num_params)));
+    b.set_str("name", Value::String((name.clone()).into()));
+    b.set_str("what", Value::str("Lua"));
+    b.set_str("source", Value::string(name));
+    b.set_str(
+        "numparams",
+        Value::from_bigint(BigInt::from(proto.num_params)),
+    );
     b.set_str("isvararg", Value::Bool(proto.is_vararg));
 
     let line = if frame.ip < proto.lines.len() {
@@ -161,7 +167,7 @@ fn get_frame_info(vm: &VM, level: usize) -> Result<Vec<Value>, String> {
     } else {
         proto.lines.last().copied().unwrap_or(1)
     };
-    b.set_str("currentline", Value::Int(BigInt::from(line)));
+    b.set_str("currentline", Value::from_bigint(BigInt::from(line)));
     b.set_str("func", Value::Closure(frame.closure.clone()));
     drop(b);
 
@@ -206,7 +212,7 @@ fn debug_getlocal(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let stack_slot = frame.base + reg_idx as usize;
     let val = vm.stack.get(stack_slot).cloned().unwrap_or(Value::Nil);
 
-    Ok(vec![Value::String(local_info.name.clone()), val])
+    Ok(vec![Value::String((local_info.name.clone()).into()), val])
 }
 
 fn debug_setlocal(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
@@ -252,7 +258,7 @@ fn debug_setlocal(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     }
     vm.stack[stack_slot] = new_val;
 
-    Ok(vec![Value::String(local_info.name.clone())])
+    Ok(vec![Value::String((local_info.name.clone()).into())])
 }
 
 fn debug_getupvalue(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
@@ -267,8 +273,8 @@ fn debug_getupvalue(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> 
     if idx == 0 || idx > c.upvalues.len() {
         return Ok(vec![Value::Nil]);
     }
-    let val = c.upvalues[idx - 1].borrow().clone();
-    Ok(vec![Value::String(format!("upval_{}", idx)), val])
+    let val = _vm.upvalue_get(&c.upvalues[idx - 1]);
+    Ok(vec![Value::String((format!("upval_{}", idx)).into()), val])
 }
 
 fn debug_setupvalue(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
@@ -284,6 +290,7 @@ fn debug_setupvalue(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> 
     if idx == 0 || idx > c.upvalues.len() {
         return Ok(vec![Value::Nil]);
     }
-    *c.upvalues[idx - 1].borrow_mut() = new_val;
-    Ok(vec![Value::String(format!("upval_{}", idx))])
+    let uv = c.upvalues[idx - 1].clone();
+    _vm.upvalue_set(&uv, new_val);
+    Ok(vec![Value::String((format!("upval_{}", idx)).into())])
 }

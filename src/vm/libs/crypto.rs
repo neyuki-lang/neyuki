@@ -105,13 +105,13 @@ fn crypto_hash(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         return Err("input string exceeds maximum hash limit (10MB)".to_string());
     }
     let algorithm = match args.get(1) {
-        Some(Value::String(a)) => a.as_str(),
+        Some(Value::String(a)) => &**a,
         Some(_) => return Err("algorithm must be a string".to_string()),
         None => return Err("algorithm must be provided".to_string()),
     };
 
     if algorithm == "sha256" {
-        Ok(vec![Value::String(sha256(s.as_bytes()))])
+        Ok(vec![Value::String((sha256(s.as_bytes())).into())])
     } else {
         Err(format!("unknown algorithm, '{}'", algorithm))
     }
@@ -119,7 +119,7 @@ fn crypto_hash(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 
 pub fn create_crypto_lib() -> Value {
     let mut table = VmTable::new();
-    table.set_str("hash", Value::Native("crypto.hash", crypto_hash));
+    table.set_str("hash", crate::native!("crypto.hash", crypto_hash));
     table.frozen = true;
     Value::Table(Rc::new(RefCell::new(table)))
 }

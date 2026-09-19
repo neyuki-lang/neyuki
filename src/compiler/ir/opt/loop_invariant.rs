@@ -1,12 +1,11 @@
 // Loop Invariant Code Motion (LICM) pass on CFG.
 // Detects natural loops using dominator analysis and hoists invariant pure expressions.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::compiler::ir::block::ControlFlowGraph;
 use crate::compiler::ir::dom::DominatorTree;
 use crate::compiler::ir::inst::IrInst;
-use crate::compiler::ir::opt::dce::is_pure_instruction;
 use crate::compiler::ir::types::{IrLabel, IrVar};
 
 #[derive(Debug, Clone)]
@@ -52,11 +51,36 @@ pub fn find_natural_loops(cfg: &ControlFlowGraph, dom: &DominatorTree) -> Vec<Na
     loops
 }
 
+/// Whether an instruction may run earlier, and possibly more or fewer times,
+/// than written. Values are dynamically typed, so even `a + b` can raise an
+/// error or call a metamethod; only loading a constant or copying a variable
+/// is free of any observable effect. A table constructor is pure for dead
+/// code purposes but must still run once per iteration.
+fn is_hoistable(inst: &IrInst) -> bool {
+    matches!(
+        inst,
+        IrInst::LoadConst { .. } | IrInst::LoadNil { .. } | IrInst::Move { .. }
+    )
+}
+
 // Hoists loop-invariant pure instructions out of natural loops
 pub fn loop_invariant_code_motion(cfg: &mut ControlFlowGraph, dom: &DominatorTree) -> bool {
     let captured = super::captured_vars(cfg);
     let loops = find_natural_loops(cfg, dom);
     let mut changed = false;
+
+    // The IR is not in SSA form here: a variable assigned more than once
+    // anywhere in the function is a real local whose value at a given point
+    // depends on which assignment ran last, so none of its assignments can
+    // move. Only single-assignment temporaries are candidates.
+    let mut def_counts: HashMap<IrVar, usize> = HashMap::new();
+    for block in &cfg.blocks {
+        for inst in &block.instructions {
+            for def in inst.def_vars() {
+                *def_counts.entry(def).or_insert(0) += 1;
+            }
+        }
+    }
 
     for lp in loops {
         // Collect all variables defined inside the loop
@@ -98,8 +122,12 @@ pub fn loop_invariant_code_motion(cfg: &mut ControlFlowGraph, dom: &DominatorTre
 
             let mut remaining = Vec::new();
             for inst in blk.instructions.drain(..) {
-                if is_pure_instruction(&inst)
+                if is_hoistable(&inst)
                     && !inst.def_vars().iter().any(|d| captured.contains(d))
+                    && inst
+                        .def_vars()
+                        .iter()
+                        .all(|d| def_counts.get(d).copied().unwrap_or(0) == 1)
                 {
                     let uses = inst.use_vars();
                     let is_invariant = uses

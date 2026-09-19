@@ -26,13 +26,13 @@ fn to_i32(val: &Value) -> Result<i32, String> {
 
 fn bit_band(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     if args.is_empty() {
-        return Ok(vec![Value::Int(BigInt::from(0xFFFFFFFFu32))]);
+        return Ok(vec![Value::from_bigint(BigInt::from(0xFFFFFFFFu32))]);
     }
     let mut res = to_u32(&args[0])?;
     for a in &args[1..] {
         res &= to_u32(a)?;
     }
-    Ok(vec![Value::Int(BigInt::from(res))])
+    Ok(vec![Value::from_bigint(BigInt::from(res))])
 }
 
 fn bit_bor(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
@@ -40,7 +40,7 @@ fn bit_bor(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     for a in args {
         res |= to_u32(a)?;
     }
-    Ok(vec![Value::Int(BigInt::from(res))])
+    Ok(vec![Value::from_bigint(BigInt::from(res))])
 }
 
 fn bit_bxor(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
@@ -48,7 +48,7 @@ fn bit_bxor(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     for a in args {
         res ^= to_u32(a)?;
     }
-    Ok(vec![Value::Int(BigInt::from(res))])
+    Ok(vec![Value::from_bigint(BigInt::from(res))])
 }
 
 fn bit_bnot(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
@@ -56,7 +56,7 @@ fn bit_bnot(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         .first()
         .ok_or_else(|| "bit.bnot expects 1 argument".to_string())?;
     let u = to_u32(val)?;
-    Ok(vec![Value::Int(BigInt::from(!u))])
+    Ok(vec![Value::from_bigint(BigInt::from(!u))])
 }
 
 fn bit_lshift(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
@@ -68,7 +68,7 @@ fn bit_lshift(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         .ok_or_else(|| "bit.lshift expects 2 arguments".to_string())?;
     let u = to_u32(val)?;
     let s = to_u32(disp)? % 32;
-    Ok(vec![Value::Int(BigInt::from(u << s))])
+    Ok(vec![Value::from_bigint(BigInt::from(u << s))])
 }
 
 fn bit_rshift(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
@@ -80,7 +80,7 @@ fn bit_rshift(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         .ok_or_else(|| "bit.rshift expects 2 arguments".to_string())?;
     let u = to_u32(val)?;
     let s = to_u32(disp)? % 32;
-    Ok(vec![Value::Int(BigInt::from(u >> s))])
+    Ok(vec![Value::from_bigint(BigInt::from(u >> s))])
 }
 
 fn bit_arshift(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
@@ -92,7 +92,7 @@ fn bit_arshift(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         .ok_or_else(|| "bit.arshift expects 2 arguments".to_string())?;
     let i = to_i32(val)?;
     let s = to_u32(disp)? % 32;
-    Ok(vec![Value::Int(BigInt::from(i >> s))])
+    Ok(vec![Value::from_bigint(BigInt::from(i >> s))])
 }
 
 fn bit_rol(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
@@ -104,7 +104,7 @@ fn bit_rol(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         .ok_or_else(|| "bit.rol expects 2 arguments".to_string())?;
     let u = to_u32(val)?;
     let s = to_u32(disp)? % 32;
-    Ok(vec![Value::Int(BigInt::from(u.rotate_left(s)))])
+    Ok(vec![Value::from_bigint(BigInt::from(u.rotate_left(s)))])
 }
 
 fn bit_ror(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
@@ -116,7 +116,7 @@ fn bit_ror(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         .ok_or_else(|| "bit.ror expects 2 arguments".to_string())?;
     let u = to_u32(val)?;
     let s = to_u32(disp)? % 32;
-    Ok(vec![Value::Int(BigInt::from(u.rotate_right(s)))])
+    Ok(vec![Value::from_bigint(BigInt::from(u.rotate_right(s)))])
 }
 
 fn bit_btest(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
@@ -144,7 +144,7 @@ fn bit_extract(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     }
     let mask = (1u64 << w) - 1;
     let res = ((u >> f) as u64 & mask) as u32;
-    Ok(vec![Value::Int(BigInt::from(res))])
+    Ok(vec![Value::from_bigint(BigInt::from(res))])
 }
 
 fn bit_replace(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
@@ -167,7 +167,7 @@ fn bit_replace(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     }
     let mask = (((1u64 << w) - 1) << f) as u32;
     let res = (u & !mask) | ((v << f) & mask);
-    Ok(vec![Value::Int(BigInt::from(res))])
+    Ok(vec![Value::from_bigint(BigInt::from(res))])
 }
 
 fn bit_tohex(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
@@ -190,11 +190,9 @@ fn bit_tohex(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     } else {
         format!("{:0width$x}", u, width = len)
     };
-    Ok(vec![Value::String(if n < 0 {
-        res.to_uppercase()
-    } else {
-        res
-    })])
+    Ok(vec![Value::String(
+        (if n < 0 { res.to_uppercase() } else { res }).into(),
+    )])
 }
 
 fn bit_tobit(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
@@ -202,25 +200,25 @@ fn bit_tobit(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         .first()
         .ok_or_else(|| "bit.tobit expects 1 argument".to_string())?;
     let i = to_i32(val)?;
-    Ok(vec![Value::Int(BigInt::from(i))])
+    Ok(vec![Value::from_bigint(BigInt::from(i))])
 }
 
 pub fn create_bit_lib() -> Value {
     let mut table = VmTable::new();
-    table.set_str("band", Value::Native("bit.band", bit_band));
-    table.set_str("bor", Value::Native("bit.bor", bit_bor));
-    table.set_str("bxor", Value::Native("bit.bxor", bit_bxor));
-    table.set_str("bnot", Value::Native("bit.bnot", bit_bnot));
-    table.set_str("lshift", Value::Native("bit.lshift", bit_lshift));
-    table.set_str("rshift", Value::Native("bit.rshift", bit_rshift));
-    table.set_str("arshift", Value::Native("bit.arshift", bit_arshift));
-    table.set_str("rol", Value::Native("bit.rol", bit_rol));
-    table.set_str("ror", Value::Native("bit.ror", bit_ror));
-    table.set_str("btest", Value::Native("bit.btest", bit_btest));
-    table.set_str("extract", Value::Native("bit.extract", bit_extract));
-    table.set_str("replace", Value::Native("bit.replace", bit_replace));
-    table.set_str("tohex", Value::Native("bit.tohex", bit_tohex));
-    table.set_str("tobit", Value::Native("bit.tobit", bit_tobit));
+    table.set_str("band", crate::native!("bit.band", bit_band));
+    table.set_str("bor", crate::native!("bit.bor", bit_bor));
+    table.set_str("bxor", crate::native!("bit.bxor", bit_bxor));
+    table.set_str("bnot", crate::native!("bit.bnot", bit_bnot));
+    table.set_str("lshift", crate::native!("bit.lshift", bit_lshift));
+    table.set_str("rshift", crate::native!("bit.rshift", bit_rshift));
+    table.set_str("arshift", crate::native!("bit.arshift", bit_arshift));
+    table.set_str("rol", crate::native!("bit.rol", bit_rol));
+    table.set_str("ror", crate::native!("bit.ror", bit_ror));
+    table.set_str("btest", crate::native!("bit.btest", bit_btest));
+    table.set_str("extract", crate::native!("bit.extract", bit_extract));
+    table.set_str("replace", crate::native!("bit.replace", bit_replace));
+    table.set_str("tohex", crate::native!("bit.tohex", bit_tohex));
+    table.set_str("tobit", crate::native!("bit.tobit", bit_tobit));
     table.frozen = true;
     Value::Table(Rc::new(RefCell::new(table)))
 }

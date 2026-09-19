@@ -22,28 +22,28 @@ use crate::vm::machine::VM;
 
 pub fn register_all(vm: &mut VM) {
     // Globals
-    vm.register_native("print", builtin_print);
-    vm.register_native("assert", builtin_assert);
-    vm.register_native("type", builtin_type);
-    vm.register_native("typeof", builtin_typeof);
-    vm.register_native("tostring", builtin_tostring);
-    vm.register_native("tonumber", builtin_tonumber);
-    vm.register_native("int", builtin_int);
-    vm.register_native("float", builtin_float);
-    vm.register_native("error", builtin_error);
-    vm.register_native("pcall", builtin_pcall);
-    vm.register_native("xpcall", builtin_xpcall);
-    vm.register_native("try", builtin_try);
-    vm.register_native("require", builtin_require);
+    vm.register_native(crate::native_def!("print", builtin_print));
+    vm.register_native(crate::native_def!("assert", builtin_assert));
+    vm.register_native(crate::native_def!("type", builtin_type));
+    vm.register_native(crate::native_def!("typeof", builtin_typeof));
+    vm.register_native(crate::native_def!("tostring", builtin_tostring));
+    vm.register_native(crate::native_def!("tonumber", builtin_tonumber));
+    vm.register_native(crate::native_def!("int", builtin_int));
+    vm.register_native(crate::native_def!("float", builtin_float));
+    vm.register_native(crate::native_def!("error", builtin_error));
+    vm.register_native(crate::native_def!("pcall", builtin_pcall));
+    vm.register_native(crate::native_def!("xpcall", builtin_xpcall));
+    vm.register_native(crate::native_def!("try", builtin_try));
+    vm.register_native(crate::native_def!("require", builtin_require));
 
     // Garbage collector
-    vm.register_native("collectgarbage", builtin_collectgarbage);
+    vm.register_native(crate::native_def!("collectgarbage", builtin_collectgarbage));
 
     // Metatable and raw functions
-    vm.register_native("setmetatable", builtin_setmetatable);
-    vm.register_native("getmetatable", builtin_getmetatable);
-    vm.register_native("rawget", builtin_rawget);
-    vm.register_native("rawset", builtin_rawset);
-    vm.register_native("rawequal", builtin_rawequal);
-    vm.register_native("rawlen", builtin_rawlen);
+    vm.register_native(crate::native_def!("setmetatable", builtin_setmetatable));
+    vm.register_native(crate::native_def!("getmetatable", builtin_getmetatable));
+    vm.register_native(crate::native_def!("rawget", builtin_rawget));
+    vm.register_native(crate::native_def!("rawset", builtin_rawset));
+    vm.register_native(crate::native_def!("rawequal", builtin_rawequal));
+    vm.register_native(crate::native_def!("rawlen", builtin_rawlen));
 }

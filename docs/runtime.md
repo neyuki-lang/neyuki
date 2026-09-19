@@ -8,10 +8,13 @@ Run these commands from the `neyuki/` directory:
 cargo run -- lint examples/hello.nyk
 cargo run -- compile examples/hello.nyk
 cargo run -- run examples/hello.nyk
+cargo run -- disasm examples/hello.nyk
 cargo run -- test
 ```
 
-`lint` prints tokens and checks parsing. `compile` parses a file and reports the statement count. `run` executes the file. `test` lints every `.nyk` file in `tests/`.
+`lint` prints tokens and checks parsing. `compile` compiles a file to `.nykb` bytecode. `run` compiles the file (or loads a `.nykb`) and executes it on the register VM. `disasm` prints the bytecode the compiler emits, and `dump-ir` the intermediate representation before and after optimization. `test` runs every `.nyk` file in `tests/`.
+
+Programs go through the optimizing IR pipeline by default. `run --tree-walker` executes the file on the original AST interpreter instead, and `compile --direct` uses the older single-pass bytecode compiler; both exist for comparison and debugging.
 
 ## Builtins
 

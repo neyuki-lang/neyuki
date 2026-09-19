@@ -432,7 +432,7 @@ fn read_proto(bytes: &[u8], cursor: &mut usize, depth: usize) -> Result<Proto, S
     }
     let mut protos = Vec::with_capacity(num_protos);
     for _ in 0..num_protos {
-        protos.push(read_proto(bytes, cursor, depth + 1)?);
+        protos.push(std::rc::Rc::new(read_proto(bytes, cursor, depth + 1)?));
     }
 
     let num_upvalues = read_u32(bytes, cursor)? as usize;
@@ -493,5 +493,6 @@ fn read_proto(bytes: &[u8], cursor: &mut usize, depth: usize) -> Result<Proto, S
         upvalues,
         lines,
         local_names,
+        cache: Default::default(),
     })
 }

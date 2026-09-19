@@ -3,7 +3,7 @@
 /// indices never reach 255, so it cannot be mistaken for a real count.
 pub const MULTRET: u8 = u8::MAX;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Instruction {
     // Load nil into register
     LoadNil { dst: u8 },

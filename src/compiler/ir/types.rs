@@ -51,6 +51,22 @@ pub enum IrBinaryOp {
     Coalesce,
 }
 
+impl IrBinaryOp {
+    /// True for the operators that produce a boolean and lower to a
+    /// conditional jump rather than a value-producing instruction.
+    pub fn is_comparison(self) -> bool {
+        matches!(
+            self,
+            IrBinaryOp::Eq
+                | IrBinaryOp::Ne
+                | IrBinaryOp::Lt
+                | IrBinaryOp::Le
+                | IrBinaryOp::Gt
+                | IrBinaryOp::Ge
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum IrUnaryOp {
     Neg,

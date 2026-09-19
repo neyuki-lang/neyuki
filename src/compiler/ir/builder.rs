@@ -4,6 +4,7 @@ use num_bigint::BigInt;
 use std::collections::HashMap;
 use std::str::FromStr;
 
+use crate::ast::node_id::NodeId;
 use crate::ast::op::{BinOp, UnOp};
 use crate::ast::pattern::AssignTarget;
 use crate::ast::{Expr, InterpPart, Param, Stmt};
@@ -103,62 +104,42 @@ impl IrBuilder {
     }
 
     fn resolve_upvalue(&mut self, name: &str) -> Option<u8> {
-        let parent_frame = self.parent_scopes.last()?;
-        for scope in parent_frame.iter().rev() {
-            if let Some(&var) = scope.get(name) {
-                return Some(self.capture(var, true));
-            }
-        }
-
         let num_parents = self.parent_scopes.len();
-        if num_parents > 1 {
-            for p in (0..num_parents - 1).rev() {
-                for scope in self.parent_scopes[p].iter().rev() {
-                    if let Some(&var) = scope.get(name) {
-                        return Some(self.capture(var, false));
-                    }
+        // Innermost enclosing function first; `p` counts down through the
+        // ancestors, so the variable's distance is how far below the top it is.
+        for p in (0..num_parents).rev() {
+            for scope in self.parent_scopes[p].iter().rev() {
+                if let Some(&var) = scope.get(name) {
+                    let levels_up = num_parents - 1 - p;
+                    return Some(self.capture(var, levels_up));
                 }
             }
         }
-
         None
     }
 
-    /// Records that this function captures `var`, returning its upvalue slot.
-    /// `from_parent` says whether it lives in the immediately enclosing
-    /// function; if not, that function has to capture it too, which is settled
-    /// once this one is attached to it. Each descriptor's `index` is filled in
-    /// then, or at lowering for a parent's register.
-    fn capture(&mut self, var: IrVar, from_parent: bool) -> u8 {
-        for (i, source) in self.upvalue_vars.iter().enumerate() {
-            match source {
-                UpvalSource::ParentLocal(v) | UpvalSource::Pending(v) if *v == var => {
-                    return i as u8;
-                }
-                _ => {}
-            }
+    /// Records that this function captures `var`, which lives `levels_up`
+    /// functions above the immediately enclosing one (0 means in it), and
+    /// returns its upvalue slot. A variable further out has to be captured by
+    /// the enclosing function too, which is settled once this one is attached
+    /// to it. Each descriptor's `index` is filled in then, or at lowering for
+    /// a parent's register.
+    fn capture(&mut self, var: IrVar, levels_up: usize) -> u8 {
+        let wanted = if levels_up == 0 {
+            UpvalSource::ParentLocal(var)
+        } else {
+            UpvalSource::Pending { var, levels_up }
+        };
+        if let Some(i) = self.upvalue_vars.iter().position(|s| *s == wanted) {
+            return i as u8;
         }
         let idx = self.upvalues.len() as u8;
         self.upvalues.push(UpvalueDesc {
-            in_stack: from_parent,
+            in_stack: levels_up == 0,
             index: 0,
         });
-        self.upvalue_vars.push(if from_parent {
-            UpvalSource::ParentLocal(var)
-        } else {
-            UpvalSource::Pending(var)
-        });
+        self.upvalue_vars.push(wanted);
         idx
-    }
-
-    /// Captures `var` on behalf of a nested function that reaches past this
-    /// one for it, returning the slot it now occupies here.
-    fn capture_for_child(&mut self, var: IrVar) -> u8 {
-        let in_enclosing = self
-            .parent_scopes
-            .last()
-            .is_some_and(|frame| frame.iter().any(|scope| scope.values().any(|v| *v == var)));
-        self.capture(var, in_enclosing)
     }
 
     /// True when `expr` can yield more than one value at runtime.
@@ -672,8 +653,10 @@ impl IrBuilder {
         // captured here as well, so it can read it from this function's
         // upvalues rather than from a register that does not hold it.
         for slot in 0..sub_builder.upvalue_vars.len() {
-            if let UpvalSource::Pending(var) = sub_builder.upvalue_vars[slot] {
-                sub_builder.upvalues[slot].index = self.capture_for_child(var);
+            if let UpvalSource::Pending { var, levels_up } = sub_builder.upvalue_vars[slot] {
+                // One level closer from here: the child's grandparent is this
+                // function's parent.
+                sub_builder.upvalues[slot].index = self.capture(var, levels_up - 1);
                 sub_builder.upvalue_vars[slot] = UpvalSource::ParentUpvalue;
             }
         }
@@ -817,10 +800,46 @@ impl IrBuilder {
                         src: closure_var,
                     });
                 } else if let Some(func_name) = name {
-                    self.emit(IrInst::SetGlobal {
-                        name: func_name.clone(),
-                        src: closure_var,
-                    });
+                    if let Some((path, field)) = func_name.rsplit_once('.') {
+                        // `function a.b.c()` stores the closure in field `c`
+                        // of the table `a.b` evaluates to.
+                        let mut table = self.compile_expr(
+                            &Expr::Variable {
+                                id: NodeId::next(),
+                                name: path.split('.').next().unwrap().to_string(),
+                            },
+                            None,
+                        );
+                        for segment in path.split('.').skip(1) {
+                            let key = self.alloc_var();
+                            self.emit(IrInst::LoadConst {
+                                dst: key,
+                                val: IrConstant::String(segment.to_string()),
+                            });
+                            let next = self.alloc_var();
+                            self.emit(IrInst::GetTable {
+                                dst: next,
+                                table,
+                                key,
+                            });
+                            table = next;
+                        }
+                        let key = self.alloc_var();
+                        self.emit(IrInst::LoadConst {
+                            dst: key,
+                            val: IrConstant::String(field.to_string()),
+                        });
+                        self.emit(IrInst::SetTable {
+                            table,
+                            key,
+                            val: closure_var,
+                        });
+                    } else {
+                        self.emit(IrInst::SetGlobal {
+                            name: func_name.clone(),
+                            src: closure_var,
+                        });
+                    }
                 }
             }
             Stmt::If {

@@ -1,6 +1,5 @@
 // Standard table manipulation library for Neyuki VM.
 
-use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -86,7 +85,7 @@ fn table_concat(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     )?;
     let sep = if let Some(sv) = args.get(1) {
         match sv {
-            Value::String(s) => s.clone(),
+            Value::String(s) => s.to_string(),
             _ => sv.to_string(),
         }
     } else {
@@ -107,7 +106,7 @@ fn table_concat(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     };
 
     if i > j || i > len {
-        return Ok(vec![Value::String(String::new())]);
+        return Ok(vec![Value::String((String::new()).into())]);
     }
 
     if j.saturating_sub(i - 1) > 1_000_000 {
@@ -120,13 +119,13 @@ fn table_concat(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
             parts.push(v.to_string());
         }
     }
-    Ok(vec![Value::String(parts.join(&sep))])
+    Ok(vec![Value::String((parts.join(&sep)).into())])
 }
 
 fn table_pack(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let mut tbl = VmTable::new();
     tbl.array = args.to_vec();
-    tbl.set_str("n", Value::Int(BigInt::from(args.len())));
+    tbl.set_str("n", Value::from_usize(args.len()));
     let rc = Rc::new(RefCell::new(tbl));
     vm.gc.register_table(&rc);
     Ok(vec![Value::Table(rc)])
@@ -367,24 +366,24 @@ pub fn table_getmetatable(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, St
 
 pub fn create_table_lib() -> Value {
     let mut table = VmTable::new();
-    table.set_str("insert", Value::Native("table.insert", table_insert));
-    table.set_str("remove", Value::Native("table.remove", table_remove));
-    table.set_str("concat", Value::Native("table.concat", table_concat));
-    table.set_str("pack", Value::Native("table.pack", table_pack));
-    table.set_str("unpack", Value::Native("table.unpack", table_unpack));
-    table.set_str("freeze", Value::Native("table.freeze", table_freeze));
-    table.set_str("isfrozen", Value::Native("table.isfrozen", table_isfrozen));
-    table.set_str("clear", Value::Native("table.clear", table_clear));
-    table.set_str("clone", Value::Native("table.clone", table_clone));
-    table.set_str("sort", Value::Native("table.sort", table_sort));
-    table.set_str("move", Value::Native("table.move", table_move));
+    table.set_str("insert", crate::native!("table.insert", table_insert));
+    table.set_str("remove", crate::native!("table.remove", table_remove));
+    table.set_str("concat", crate::native!("table.concat", table_concat));
+    table.set_str("pack", crate::native!("table.pack", table_pack));
+    table.set_str("unpack", crate::native!("table.unpack", table_unpack));
+    table.set_str("freeze", crate::native!("table.freeze", table_freeze));
+    table.set_str("isfrozen", crate::native!("table.isfrozen", table_isfrozen));
+    table.set_str("clear", crate::native!("table.clear", table_clear));
+    table.set_str("clone", crate::native!("table.clone", table_clone));
+    table.set_str("sort", crate::native!("table.sort", table_sort));
+    table.set_str("move", crate::native!("table.move", table_move));
     table.set_str(
         "setmetatable",
-        Value::Native("table.setmetatable", table_setmetatable),
+        crate::native!("table.setmetatable", table_setmetatable),
     );
     table.set_str(
         "getmetatable",
-        Value::Native("table.getmetatable", table_getmetatable),
+        crate::native!("table.getmetatable", table_getmetatable),
     );
     table.frozen = true;
     Value::Table(Rc::new(RefCell::new(table)))

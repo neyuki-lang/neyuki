@@ -58,7 +58,7 @@ pub fn try_compile_to_proto(statements: &[Stmt]) -> Result<Proto, String> {
 // is vetted at build time, and the tree-walking engine runs it unanalyzed too,
 // so it skips the type-checking pass that user code goes through.
 pub fn compile_bundled_to_proto(statements: &[Stmt]) -> Result<Proto, String> {
-    codegen_proto(statements)
+    compile_to_proto_via_ir_unchecked(statements)
 }
 
 fn codegen_proto(statements: &[Stmt]) -> Result<Proto, String> {
@@ -83,15 +83,47 @@ pub fn try_compile_to_proto_via_ir(statements: &[Stmt]) -> Result<Proto, String>
     {
         return Err(format!("semantic error: {}", err.message));
     }
+    compile_to_proto_via_ir_unchecked(statements)
+}
+
+// The IR pipeline without the semantic-analysis gate, for sources that have
+// already been checked (or are trusted, like the bundled standard library).
+fn compile_to_proto_via_ir_unchecked(statements: &[Stmt]) -> Result<Proto, String> {
     let optimized_stmts = fold_program(statements.to_vec());
     let mut ir_module = ir::ast_to_ir(&optimized_stmts);
-
-    let mut cfg = ir::build_cfg(&ir_module.main.instructions);
-    ir::optimize_cfg(&mut cfg);
-    ir_module.main.instructions = cfg.to_flat_instructions();
-    ir_module.main.cfg = Some(cfg);
-
+    optimize_ir_function(&mut ir_module.main);
     ir::ir_to_bytecode(&ir_module)
+}
+
+// The IR of a program before and after optimization, for debugging the
+// pipeline.
+pub fn dump_ir(statements: &[Stmt]) -> String {
+    let optimized_stmts = fold_program(statements.to_vec());
+    let mut ir_module = ir::ast_to_ir(&optimized_stmts);
+    let mut out = String::from(
+        "=== before optimization ===
+",
+    );
+    out.push_str(&ir::pretty::print_module(&ir_module));
+    optimize_ir_function(&mut ir_module.main);
+    out.push_str(
+        "
+=== after optimization ===
+",
+    );
+    out.push_str(&ir::pretty::print_module(&ir_module));
+    out
+}
+
+// Runs the CFG optimizer over a function and every function nested in it.
+fn optimize_ir_function(func: &mut ir::IrFunction) {
+    let mut cfg = ir::build_cfg(&func.instructions);
+    ir::optimize_cfg(&mut cfg);
+    func.instructions = cfg.to_flat_instructions();
+    func.cfg = Some(cfg);
+    for child in &mut func.protos {
+        optimize_ir_function(child);
+    }
 }
 
 // Compile AST function (with parameters and body statements) into a register-based Proto

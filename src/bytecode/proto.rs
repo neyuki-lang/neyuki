@@ -1,7 +1,11 @@
 // Function prototype and constant definitions for bytecode.
 
 use crate::bytecode::instruction::Instruction;
+use crate::vm::value::Value;
 use num_bigint::BigInt;
+use std::cell::{Cell, OnceCell};
+use std::fmt;
+use std::rc::Rc;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Constant {
@@ -36,11 +40,44 @@ pub struct Proto {
     pub is_vararg: bool,
     pub constants: Vec<Constant>,
     pub instructions: Vec<Instruction>,
-    pub protos: Vec<Proto>,
+    // Shared with every closure instantiated from the child, so creating a
+    // closure never copies its code.
+    pub protos: Vec<Rc<Proto>>,
     pub upvalues: Vec<UpvalueDesc>,
     pub lines: Vec<u32>,
     // Local variable debug info for traceback
     pub local_names: Vec<LocalVarInfo>,
+    // Runtime-derived state the VM attaches on first execution.
+    pub cache: ProtoCache,
+}
+
+/// What the VM works out about a prototype the first time it runs it: the
+/// constant pool as runtime values (so a constant loads with a refcount bump
+/// instead of allocating a fresh string or bignum every time) and whether
+/// the bytecode has passed verification. Derived data: it never takes part
+/// in equality, and a copied proto rebuilds its own.
+#[derive(Default)]
+pub struct ProtoCache {
+    values: OnceCell<Vec<Value>>,
+    verified: Cell<bool>,
+}
+
+impl PartialEq for ProtoCache {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Clone for ProtoCache {
+    fn clone(&self) -> Self {
+        ProtoCache::default()
+    }
+}
+
+impl fmt::Debug for ProtoCache {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ProtoCache")
+    }
 }
 
 impl Proto {
@@ -56,7 +93,41 @@ impl Proto {
             upvalues: Vec::new(),
             lines: Vec::new(),
             local_names: Vec::new(),
+            cache: ProtoCache::default(),
         }
+    }
+
+    /// Whether this prototype (and so every prototype nested in it) has
+    /// passed bytecode verification. The VM relies on a verified prototype
+    /// never naming a register at or beyond `max_registers`.
+    #[inline]
+    pub fn is_verified(&self) -> bool {
+        self.cache.verified.get()
+    }
+
+    /// Records that verification of this prototype tree succeeded.
+    pub fn mark_verified(&self) {
+        self.cache.verified.set(true);
+        for child in &self.protos {
+            child.mark_verified();
+        }
+    }
+
+    /// The constant pool as runtime values.
+    #[inline]
+    pub fn values(&self) -> &[Value] {
+        self.cache.values.get_or_init(|| {
+            self.constants
+                .iter()
+                .map(|c| match c {
+                    Constant::Nil => Value::Nil,
+                    Constant::Bool(b) => Value::Bool(*b),
+                    Constant::Int(i) => Value::from_bigint(i.clone()),
+                    Constant::Float(f) => Value::Float(*f),
+                    Constant::String(s) => Value::str(s),
+                })
+                .collect()
+        })
     }
 
     // Add a constant, deduplicating if identical constant already exists

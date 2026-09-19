@@ -12,8 +12,8 @@ pub fn create_json_lib() -> Value {
     let t = Rc::new(RefCell::new(VmTable::new()));
     let mut b = t.borrow_mut();
 
-    b.set_str("encode", Value::Native("json.encode", json_encode));
-    b.set_str("decode", Value::Native("json.decode", json_decode));
+    b.set_str("encode", crate::native!("json.encode", json_encode));
+    b.set_str("decode", crate::native!("json.decode", json_decode));
 
     Value::Table(t.clone())
 }
@@ -29,7 +29,7 @@ pub(crate) fn encode_to_string(val: &Value) -> Result<String, String> {
 fn json_encode(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let val = args.first().unwrap_or(&Value::Nil);
     let out = encode_to_string(val)?;
-    Ok(vec![Value::String(out)])
+    Ok(vec![Value::string(out)])
 }
 
 fn encode_value(val: &Value, out: &mut String, depth: usize) -> Result<(), String> {
@@ -126,7 +126,7 @@ pub(crate) fn decode_from_str(s: &str) -> Result<Value, String> {
 
 fn json_decode(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let s = match args.first() {
-        Some(Value::String(s)) => s.as_str(),
+        Some(Value::String(s)) => &**s,
         _ => return Err("bad argument #1 to 'json.decode' (string expected)".to_string()),
     };
 
@@ -181,7 +181,7 @@ impl JsonParser {
         match ch {
             'n' => self.parse_null(),
             't' | 'f' => self.parse_bool(),
-            '"' => self.parse_string().map(Value::String),
+            '"' => self.parse_string().map(Value::string),
             '[' => self.parse_array(),
             '{' => self.parse_object(),
             '-' | '0'..='9' => self.parse_number(),
@@ -279,7 +279,7 @@ impl JsonParser {
         } else {
             let i = BigInt::from_str(&num_str)
                 .map_err(|e| format!("invalid int '{}': {}", num_str, e))?;
-            Ok(Value::Int(i))
+            Ok(Value::from_bigint(i))
         }
     }
 
@@ -364,7 +364,7 @@ impl JsonParser {
             self.advance(); // consume ':'
 
             let val = self.parse_value()?;
-            tbl.borrow_mut().fields.insert(key, val);
+            tbl.borrow_mut().fields.insert(Rc::from(key.as_str()), val);
             self.skip_whitespace();
 
             match self.peek() {

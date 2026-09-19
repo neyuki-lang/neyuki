@@ -494,7 +494,7 @@ impl Compiler {
 
         let parent = self.current_mut();
         let idx = parent.proto.protos.len() as u16;
-        parent.proto.protos.push(child_proto);
+        parent.proto.protos.push(std::rc::Rc::new(child_proto));
         idx
     }
 }
