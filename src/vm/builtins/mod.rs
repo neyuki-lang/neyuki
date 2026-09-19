@@ -10,7 +10,7 @@ pub use array::{builtin_array_create, builtin_table_clear};
 pub use gc::builtin_collectgarbage;
 pub use global::{
     builtin_assert, builtin_error, builtin_float, builtin_int, builtin_pcall, builtin_print,
-    builtin_require, builtin_tonumber, builtin_tostring, builtin_type, builtin_typeof,
+    builtin_require, builtin_tonumber, builtin_tostring, builtin_try, builtin_type, builtin_typeof,
     builtin_xpcall,
 };
 pub use meta::{
@@ -33,6 +33,7 @@ pub fn register_all(vm: &mut VM) {
     vm.register_native("error", builtin_error);
     vm.register_native("pcall", builtin_pcall);
     vm.register_native("xpcall", builtin_xpcall);
+    vm.register_native("try", builtin_try);
     vm.register_native("require", builtin_require);
 
     // Garbage collector

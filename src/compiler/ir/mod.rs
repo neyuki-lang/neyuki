@@ -18,12 +18,12 @@ pub mod ssa;
 pub mod types;
 pub mod verify;
 
-pub use block::{BasicBlock, ControlFlowGraph, IrFunction, IrModule};
+pub use block::{BasicBlock, ControlFlowGraph, IrFunction, IrModule, UpvalSource};
 pub use builder::{IrBuilder, ast_to_ir};
 pub use cfg_builder::build_cfg;
 pub use codegen::ir_to_bytecode;
 pub use dom::DominatorTree;
-pub use inst::IrInst;
+pub use inst::{IrInst, SpreadSink, SpreadSource};
 pub use liveness::{LiveInterval, LivenessInfo};
 pub use opt::{
     common_subexpression_elimination, common_subexpression_elimination_cfg, constant_propagation,
@@ -42,6 +42,104 @@ mod tests {
     use crate::compiler::compile_source;
     use crate::vm::machine::VM;
     use num_bigint::BigInt;
+
+    /// Compiles and runs `code` through the full IR pipeline, the way
+    /// `--opt-ir` does.
+    fn run_via_ir(code: &str) -> String {
+        let stmts = compile_source(code).expect("syntax error");
+        let proto =
+            crate::compiler::try_compile_to_proto_via_ir(&stmts).expect("ir lowering failed");
+        let mut vm = VM::new();
+        vm.execute(proto).expect("execution failed").to_string()
+    }
+
+    #[test]
+    fn test_ir_call_does_not_clobber_live_registers() {
+        // The call window has to sit above every live variable, or the
+        // callee's frame overwrites them while it runs.
+        let code = "local function add(a, b)\n  return a + b\nend\n\
+local keep = 7\n\
+local sum = add(1, 2)\n\
+return keep * 100 + sum";
+        assert_eq!(run_via_ir(code), "703");
+    }
+
+    #[test]
+    fn test_ir_recursive_global_function() {
+        let code = "function fib(n)\n\
+  if n <= 1 then\n    return n\n  end\n\
+  return fib(n - 1) + fib(n - 2)\n\
+end\n\
+return fib(10)";
+        assert_eq!(run_via_ir(code), "55");
+    }
+
+    #[test]
+    fn test_ir_generic_for_terminates() {
+        // Staging the iterator inside the loop would reset the control
+        // variable on every pass and never finish.
+        let code = "local t = { 10, 20, 30 }\n\
+local sum = 0\n\
+for _, v in t do\n  sum = sum + v\nend\n\
+return sum";
+        assert_eq!(run_via_ir(code), "60");
+    }
+
+    #[test]
+    fn test_ir_capture_across_two_function_levels() {
+        // The middle function has to capture `secret` too, so the innermost
+        // one can read it from an upvalue rather than a register.
+        let code = "local function outer()
+  local secret = 42
+  local function middle()
+    local function inner() return secret end
+    return inner()
+  end
+  return middle()
+end
+return outer()";
+        assert_eq!(run_via_ir(code), "42");
+    }
+
+    #[test]
+    fn test_ir_closure_capture_survives_register_reuse() {
+        let code = "local function make()\n\
+  local hidden = 11\n\
+  local unrelated = 1\n\
+  return function() return hidden end\n\
+end\n\
+return make()()";
+        assert_eq!(run_via_ir(code), "11");
+    }
+
+    #[test]
+    fn test_ir_multiple_assignment_from_call() {
+        let code = "local function pair()\n  return 1, 2\nend\n\
+local a, b = pair()\n\
+return a * 10 + b";
+        assert_eq!(run_via_ir(code), "12");
+    }
+
+    #[test]
+    fn test_ir_spreads_call_results() {
+        let code = "local table = require(\"@neyuki/table\")\n\
+local function three()\n  return 1, 2, 3\nend\n\
+local collected = { three() }\n\
+local function total(a, b, c)\n  return a + b + c\nend\n\
+return #collected * 100 + total(table.unpack(collected))";
+        assert_eq!(run_via_ir(code), "306");
+    }
+
+    #[test]
+    fn test_ir_reuses_registers_across_many_locals() {
+        // One register per variable would run past the 255-register limit.
+        let mut code = String::from("local total = 0\n");
+        for i in 0..300 {
+            code.push_str(&format!("total = total + {}\n", i));
+        }
+        code.push_str("return total");
+        assert_eq!(run_via_ir(&code), "44850");
+    }
 
     #[test]
     fn test_ir_basic() {
@@ -262,6 +360,7 @@ mod tests {
                 instructions: cfg.to_flat_instructions(),
                 protos: Vec::new(),
                 upvalues: Vec::new(),
+                upvalue_vars: Vec::new(),
                 cfg: Some(cfg),
             },
         })

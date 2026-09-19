@@ -14,7 +14,49 @@ use crate::ast::op::{BinOp, UnOp};
 use crate::ast::pattern::AssignTarget;
 use crate::parser::{Expr, Param, Stmt};
 
-const BUNDLED_LIBRARIES: &[(&str, &str)] =
+/// The `__`-prefixed primitives the bundled `lib/*.nyk` modules are built
+/// on. The register VM bridges this same list, so both engines run the
+/// standard library over one set of implementations.
+pub(crate) const PRIMITIVES: &[(&str, Native)] = &[
+    ("__floor", builtin_floor),
+    ("__sqrt", builtin_sqrt),
+    ("__ceil", builtin_ceil),
+    ("__round", builtin_round),
+    ("__sin", builtin_sin),
+    ("__cos", builtin_cos),
+    ("__tan", builtin_tan),
+    ("__asin", builtin_asin),
+    ("__acos", builtin_acos),
+    ("__atan", builtin_atan),
+    ("__atan2", builtin_atan2),
+    ("__sinh", builtin_sinh),
+    ("__cosh", builtin_cosh),
+    ("__tanh", builtin_tanh),
+    ("__log", builtin_log),
+    ("__log10", builtin_log10),
+    ("__pow", builtin_pow),
+    ("__fmod", builtin_fmod),
+    ("__modf", builtin_modf),
+    ("__frexp", builtin_frexp),
+    ("__ldexp", builtin_ldexp),
+    ("__isfinite", builtin_isfinite),
+    ("__isinf", builtin_isinf),
+    ("__noise", builtin_noise),
+    ("__random_int", builtin_random_int),
+    ("__random_bigint", builtin_random_bigint),
+    ("__table_unpack", builtin_table_unpack),
+    ("__table_freeze", builtin_table_freeze),
+    ("__table_isfrozen", builtin_table_isfrozen),
+    ("__os_clock", builtin_os_clock),
+    ("__os_time", builtin_os_time),
+    ("__os_difftime", builtin_os_difftime),
+    ("__os_getenv", builtin_os_getenv),
+    ("__random_float", builtin_random_float),
+];
+
+/// Every `lib/*.nyk` module, keyed by its `@neyuki/...` name. Both engines
+/// load their standard library from here.
+pub(crate) const BUNDLED_LIBRARIES: &[(&str, &str)] =
     include!(concat!(env!("OUT_DIR"), "/bundled_libraries.rs"));
 
 pub(crate) type EnvRef = Rc<RefCell<Env>>;
@@ -446,47 +488,6 @@ impl Runtime {
             ("int", native("int", builtin_int)),
             ("float", native("float", builtin_float)),
             ("tonumber", native("tonumber", builtin_tonumber)),
-            ("__floor", native("__floor", builtin_floor)),
-            ("__sqrt", native("__sqrt", builtin_sqrt)),
-            ("__ceil", native("__ceil", builtin_ceil)),
-            ("__round", native("__round", builtin_round)),
-            ("__sin", native("__sin", builtin_sin)),
-            ("__cos", native("__cos", builtin_cos)),
-            ("__tan", native("__tan", builtin_tan)),
-            ("__asin", native("__asin", builtin_asin)),
-            ("__acos", native("__acos", builtin_acos)),
-            ("__atan", native("__atan", builtin_atan)),
-            ("__atan2", native("__atan2", builtin_atan2)),
-            ("__sinh", native("__sinh", builtin_sinh)),
-            ("__cosh", native("__cosh", builtin_cosh)),
-            ("__tanh", native("__tanh", builtin_tanh)),
-            ("__log", native("__log", builtin_log)),
-            ("__log10", native("__log10", builtin_log10)),
-            ("__pow", native("__pow", builtin_pow)),
-            ("__fmod", native("__fmod", builtin_fmod)),
-            ("__modf", native("__modf", builtin_modf)),
-            ("__frexp", native("__frexp", builtin_frexp)),
-            ("__ldexp", native("__ldexp", builtin_ldexp)),
-            ("__isfinite", native("__isfinite", builtin_isfinite)),
-            ("__isinf", native("__isinf", builtin_isinf)),
-            ("__noise", native("__noise", builtin_noise)),
-            ("__random_int", native("__random_int", builtin_random_int)),
-            (
-                "__random_bigint",
-                native("__random_bigint", builtin_random_bigint),
-            ),
-            (
-                "__table_unpack",
-                native("__table_unpack", builtin_table_unpack),
-            ),
-            (
-                "__table_freeze",
-                native("__table_freeze", builtin_table_freeze),
-            ),
-            (
-                "__table_isfrozen",
-                native("__table_isfrozen", builtin_table_isfrozen),
-            ),
             ("try", native("try", builtin_try)),
             ("pcall", native("pcall", builtin_pcall)),
             ("xpcall", native("xpcall", builtin_xpcall)),
@@ -496,22 +497,12 @@ impl Runtime {
             ("rawset", native("rawset", builtin_rawset)),
             ("rawget", native("rawget", builtin_rawget)),
             ("rawequal", native("rawequal", builtin_rawequal)),
-            ("__os_clock", native("__os_clock", builtin_os_clock)),
-            ("__os_time", native("__os_time", builtin_os_time)),
-            (
-                "__os_difftime",
-                native("__os_difftime", builtin_os_difftime),
-            ),
-            ("__os_getenv", native("__os_getenv", builtin_os_getenv)),
-            (
-                "__random_float",
-                native("__random_float", builtin_random_float),
-            ),
         ] {
             env.borrow_mut().values.insert(name.to_string(), function);
         }
-        for (name, call) in crate::string_lib::NATIVES
+        for (name, call) in PRIMITIVES
             .iter()
+            .chain(crate::string_lib::NATIVES)
             .chain(crate::fs_lib::NATIVES)
             .chain(crate::http_lib::NATIVES)
             .chain(crate::io_lib::NATIVES)

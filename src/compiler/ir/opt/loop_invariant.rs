@@ -54,6 +54,7 @@ pub fn find_natural_loops(cfg: &ControlFlowGraph, dom: &DominatorTree) -> Vec<Na
 
 // Hoists loop-invariant pure instructions out of natural loops
 pub fn loop_invariant_code_motion(cfg: &mut ControlFlowGraph, dom: &DominatorTree) -> bool {
+    let captured = super::captured_vars(cfg);
     let loops = find_natural_loops(cfg, dom);
     let mut changed = false;
 
@@ -63,7 +64,7 @@ pub fn loop_invariant_code_motion(cfg: &mut ControlFlowGraph, dom: &DominatorTre
         for &block_lbl in &lp.body {
             if let Some(blk) = cfg.find_block(block_lbl) {
                 for inst in &blk.instructions {
-                    if let Some(def) = inst.def_var() {
+                    for def in inst.def_vars() {
                         loop_defs.insert(def);
                     }
                 }
@@ -97,7 +98,9 @@ pub fn loop_invariant_code_motion(cfg: &mut ControlFlowGraph, dom: &DominatorTre
 
             let mut remaining = Vec::new();
             for inst in blk.instructions.drain(..) {
-                if is_pure_instruction(&inst) {
+                if is_pure_instruction(&inst)
+                    && !inst.def_vars().iter().any(|d| captured.contains(d))
+                {
                     let uses = inst.use_vars();
                     let is_invariant = uses
                         .iter()

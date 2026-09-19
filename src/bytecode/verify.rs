@@ -2,7 +2,7 @@
 // Prevents out-of-bounds register accesses, invalid constant pool indices,
 // corrupted branch offsets, and invalid nested prototype references.
 
-use crate::bytecode::instruction::Instruction;
+use crate::bytecode::instruction::{Instruction, MULTRET};
 use crate::bytecode::proto::Proto;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -199,8 +199,11 @@ fn verify_proto_depth(proto: &Proto, depth: usize) -> Result<(), BytecodeVerifyE
             }
             Instruction::SetList { table, base, count } => {
                 check_reg(*table, pc)?;
-                // base .. base+count must all be valid
-                check_reg_range(*base, *count as usize, pc)?;
+                // base .. base+count must all be valid, unless the count comes
+                // from the runtime stack top
+                if *count != MULTRET {
+                    check_reg_range(*base, *count as usize, pc)?;
+                }
             }
             Instruction::GetGlobal { dst, name_k } => {
                 check_reg(*dst, pc)?;
@@ -275,9 +278,19 @@ fn verify_proto_depth(proto: &Proto, depth: usize) -> Result<(), BytecodeVerifyE
             }
             Instruction::Call { callee, argc, retc } => {
                 check_reg(*callee, pc)?;
-                // callee+1 .. callee+argc are args; callee .. callee+retc-1 are results
-                let args_top = (*callee as usize) + 1 + (*argc as usize);
-                let rets_top = (*callee as usize) + (*retc as usize);
+                // callee+1 .. callee+argc are args; callee .. callee+retc-1 are
+                // results. A MULTRET count is bounded by the runtime stack top
+                // rather than by max_registers, so it is not checked here.
+                let args_top = if *argc == MULTRET {
+                    0
+                } else {
+                    (*callee as usize) + 1 + (*argc as usize)
+                };
+                let rets_top = if *retc == MULTRET {
+                    0
+                } else {
+                    (*callee as usize) + (*retc as usize)
+                };
                 let max_top = args_top.max(rets_top);
                 if max_top > proto.max_registers as usize {
                     return Err(BytecodeVerifyError {
@@ -291,14 +304,14 @@ fn verify_proto_depth(proto: &Proto, depth: usize) -> Result<(), BytecodeVerifyE
                 }
             }
             Instruction::Return { base, count } => {
-                if *count > 0 {
+                if *count > 0 && *count != MULTRET {
                     // Return range: base .. base+count-1
                     check_reg_range(*base, *count as usize, pc)?;
                 }
             }
             Instruction::Vararg { dst, count } => {
                 check_reg(*dst, pc)?;
-                if *count > 0 {
+                if *count > 0 && *count != MULTRET {
                     check_reg_range(*dst, *count as usize, pc)?;
                 }
             }

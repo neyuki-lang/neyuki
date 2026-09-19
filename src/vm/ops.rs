@@ -54,11 +54,10 @@ pub fn eval_mul(a: Value, b: Value) -> Result<Value, String> {
 }
 
 pub fn eval_div(a: Value, b: Value) -> Result<Value, String> {
+    // `/` is always floating point and follows IEEE 754, so dividing by zero
+    // gives an infinity or NaN. Only `//` and `%` treat it as an error.
     let fa = to_f64(a)?;
     let fb = to_f64(b)?;
-    if fb == 0.0 {
-        return Err("division by zero".to_string());
-    }
     Ok(Value::Float(fa / fb))
 }
 

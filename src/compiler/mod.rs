@@ -51,6 +51,17 @@ pub fn try_compile_to_proto(statements: &[Stmt]) -> Result<Proto, String> {
     {
         return Err(format!("semantic error: {}", err.message));
     }
+    codegen_proto(statements)
+}
+
+// Compile the statements of a bundled `lib/*.nyk` module. The standard library
+// is vetted at build time, and the tree-walking engine runs it unanalyzed too,
+// so it skips the type-checking pass that user code goes through.
+pub fn compile_bundled_to_proto(statements: &[Stmt]) -> Result<Proto, String> {
+    codegen_proto(statements)
+}
+
+fn codegen_proto(statements: &[Stmt]) -> Result<Proto, String> {
     let optimized_stmts = fold_program(statements.to_vec());
     let mut compiler = Compiler::new(Some("main".to_string()), 0, false);
     compiler.compile_program(&optimized_stmts);

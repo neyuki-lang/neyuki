@@ -121,6 +121,7 @@ impl Compiler {
         }
         let parent_idx = func_idx - 1;
         if let Some(local_reg) = funcs[parent_idx].resolve_local(name) {
+            funcs[parent_idx].mark_captured(local_reg);
             return Some(funcs[func_idx].add_upvalue(true, local_reg));
         }
         if let Some(parent_upval) = Self::resolve_upval_rec(funcs, parent_idx, name) {

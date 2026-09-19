@@ -34,7 +34,7 @@ pub fn inline_functions(module: &mut IrModule) -> bool {
     // Find closure definitions mapping variable -> proto_idx
     let mut closure_map: HashMap<IrVar, usize> = HashMap::new();
     for inst in &module.main.instructions {
-        if let IrInst::Closure { dst, proto_idx } = inst {
+        if let IrInst::Closure { dst, proto_idx, .. } = inst {
             closure_map.insert(*dst, *proto_idx as usize);
         }
     }
@@ -63,14 +63,14 @@ pub fn inline_functions(module: &mut IrModule) -> bool {
         };
 
         match (candidate_target, inst) {
-            (Some(target_func), IrInst::Call { dst, args, .. }) => {
+            (Some(target_func), IrInst::Call { dsts, args, .. }) => {
                 let mut var_map: HashMap<IrVar, IrVar> = HashMap::new();
                 for (i, &arg) in args.iter().enumerate() {
                     var_map.insert(IrVar(i as u32), arg);
                 }
                 for body_inst in &target_func.instructions {
                     if let IrInst::Return(ret_vars) = body_inst {
-                        if let Some(out_dst) = dst {
+                        if let Some(&out_dst) = dsts.first() {
                             match ret_vars.first() {
                                 Some(&ret_v) => {
                                     let resolved_ret =

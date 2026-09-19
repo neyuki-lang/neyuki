@@ -5,7 +5,7 @@ use num_traits::ToPrimitive;
 use super::Compiler;
 use super::state::FuncState;
 use crate::ast::op::{BinOp, UnOp};
-use crate::bytecode::instruction::Instruction;
+use crate::bytecode::instruction::{Instruction, MULTRET};
 use crate::bytecode::proto::Constant;
 use crate::parser::{Expr, InterpPart, Param, Stmt};
 
@@ -148,7 +148,8 @@ impl Compiler {
             Expr::Table { entries, .. } => {
                 self.current_mut().emit(Instruction::NewTable { dst });
                 let mut array_regs = Vec::new();
-                for entry in entries {
+                for (index, entry) in entries.iter().enumerate() {
+                    let is_last = index + 1 == entries.len();
                     if let Some(key) = &entry.key {
                         if !array_regs.is_empty() {
                             let base = array_regs[0];
@@ -168,6 +169,27 @@ impl Compiler {
                             table: dst,
                             key_k,
                             val: val_reg,
+                        });
+                        self.current_mut().free_reg(val_reg);
+                    } else if is_last && Compiler::is_multi_value(&entry.value) {
+                        if !array_regs.is_empty() {
+                            let base = array_regs[0];
+                            let count = array_regs.len() as u8;
+                            self.current_mut().emit(Instruction::SetList {
+                                table: dst,
+                                base,
+                                count,
+                            });
+                            for r in array_regs.drain(..).rev() {
+                                self.current_mut().free_reg(r);
+                            }
+                        }
+                        let val_reg = self.current_mut().alloc_reg();
+                        self.compile_expr_multi(&entry.value, val_reg);
+                        self.current_mut().emit(Instruction::SetList {
+                            table: dst,
+                            base: val_reg,
+                            count: MULTRET,
                         });
                         self.current_mut().free_reg(val_reg);
                     } else {
@@ -314,15 +336,10 @@ impl Compiler {
             Expr::Call { callee, args, .. } => {
                 let func_reg = self.current_mut().alloc_reg();
                 self.compile_expr(callee, Some(func_reg));
-                let mut arg_regs = Vec::new();
-                for arg in args {
-                    let r = self.current_mut().alloc_reg();
-                    self.compile_expr(arg, Some(r));
-                    arg_regs.push(r);
-                }
+                let (argc, arg_regs) = self.compile_args(args, 0);
                 self.current_mut().emit(Instruction::Call {
                     callee: func_reg,
-                    argc: args.len() as u8,
+                    argc,
                     retc: 1,
                 });
                 if func_reg != dst {
@@ -349,15 +366,10 @@ impl Compiler {
                     table: arg0,
                     key_k,
                 });
-                let mut arg_regs = Vec::new();
-                for arg in args {
-                    let r = self.current_mut().alloc_reg();
-                    self.compile_expr(arg, Some(r));
-                    arg_regs.push(r);
-                }
+                let (argc, arg_regs) = self.compile_args(args, 1);
                 self.current_mut().emit(Instruction::Call {
                     callee: func_reg,
-                    argc: (args.len() + 1) as u8,
+                    argc,
                     retc: 1,
                 });
                 if func_reg != dst {
@@ -378,6 +390,85 @@ impl Compiler {
         }
 
         dst
+    }
+
+    /// True when `expr` can produce more than one value at runtime, so that a
+    /// call, a `return` or a table constructor should keep them all instead of
+    /// truncating to the first.
+    pub(crate) fn is_multi_value(expr: &Expr) -> bool {
+        matches!(
+            expr,
+            Expr::Call { .. } | Expr::MethodCall { .. } | Expr::Vararg { .. }
+        )
+    }
+
+    /// Compiles `expr` at `dst` keeping every value it yields; the VM's stack
+    /// top is left just past the last one. `dst` must be the highest register
+    /// allocated so far, because a call lays its arguments out above it.
+    pub(crate) fn compile_expr_multi(&mut self, expr: &Expr, dst: u8) {
+        match expr {
+            Expr::Call { callee, args, .. } => {
+                self.compile_expr(callee, Some(dst));
+                let (argc, arg_regs) = self.compile_args(args, 0);
+                self.current_mut().emit(Instruction::Call {
+                    callee: dst,
+                    argc,
+                    retc: MULTRET,
+                });
+                for r in arg_regs.into_iter().rev() {
+                    self.current_mut().free_reg(r);
+                }
+            }
+            Expr::MethodCall {
+                object,
+                method,
+                args,
+                ..
+            } => {
+                let arg0 = self.current_mut().alloc_reg();
+                self.compile_expr(object, Some(arg0));
+                let key_k = self.add_constant(Constant::String(method.clone()));
+                self.current_mut().emit(Instruction::GetTableK {
+                    dst,
+                    table: arg0,
+                    key_k,
+                });
+                let (argc, arg_regs) = self.compile_args(args, 1);
+                self.current_mut().emit(Instruction::Call {
+                    callee: dst,
+                    argc,
+                    retc: MULTRET,
+                });
+                for r in arg_regs.into_iter().rev() {
+                    self.current_mut().free_reg(r);
+                }
+                self.current_mut().free_reg(arg0);
+            }
+            Expr::Vararg { .. } => {
+                self.current_mut()
+                    .emit(Instruction::Vararg { dst, count: 0 });
+            }
+            other => {
+                self.compile_expr(other, Some(dst));
+            }
+        }
+    }
+
+    /// Compiles call arguments into the registers above the callee. `fixed`
+    /// counts arguments already placed there (the receiver of a method call).
+    /// The returned `argc` is MULTRET when the last argument spreads.
+    pub(crate) fn compile_args(&mut self, args: &[Expr], fixed: u8) -> (u8, Vec<u8>) {
+        let mut arg_regs = Vec::new();
+        for (index, arg) in args.iter().enumerate() {
+            let r = self.current_mut().alloc_reg();
+            arg_regs.push(r);
+            if index + 1 == args.len() && Compiler::is_multi_value(arg) {
+                self.compile_expr_multi(arg, r);
+                return (MULTRET, arg_regs);
+            }
+            self.compile_expr(arg, Some(r));
+        }
+        (fixed + args.len() as u8, arg_regs)
     }
 
     pub(crate) fn compile_function(

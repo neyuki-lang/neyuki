@@ -1,7 +1,19 @@
 // Control Flow Graph (CFG) and BasicBlock definitions for IR.
 
 use crate::compiler::ir::inst::IrInst;
-use crate::compiler::ir::types::IrLabel;
+use crate::compiler::ir::types::{IrLabel, IrVar};
+
+/// Where a captured value comes from, as seen by the function capturing it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum UpvalSource {
+    /// A register of the immediately enclosing function.
+    ParentLocal(IrVar),
+    /// An upvalue of the immediately enclosing function.
+    ParentUpvalue,
+    /// A variable further out. The enclosing function has to capture it first,
+    /// which happens when this function is attached to it.
+    Pending(IrVar),
+}
 use crate::parser::Param;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -93,6 +105,9 @@ pub struct IrFunction {
     pub instructions: Vec<IrInst>,
     pub protos: Vec<IrFunction>,
     pub upvalues: Vec<UpvalueDesc>,
+    /// Parallel to `upvalues`: where each captured value comes from. A
+    /// descriptor's `index` is meaningless until it is resolved from this.
+    pub upvalue_vars: Vec<UpvalSource>,
     pub cfg: Option<ControlFlowGraph>,
 }
 
@@ -106,6 +121,7 @@ impl IrFunction {
             instructions: Vec::new(),
             protos: Vec::new(),
             upvalues: Vec::new(),
+            upvalue_vars: Vec::new(),
             cfg: None,
         }
     }

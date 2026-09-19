@@ -90,7 +90,7 @@ fn cse_slice(instructions: &mut [IrInst]) -> bool {
         }
 
         // Any instruction that modifies a variable invalidates expressions using or defining it
-        if let Some(def) = inst.def_var() {
+        for def in inst.def_vars() {
             invalidate_expressions(&mut expr_map, def);
         }
     }

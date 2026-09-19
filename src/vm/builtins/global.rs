@@ -204,6 +204,21 @@ pub fn builtin_pcall(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> 
     }
 }
 
+/// `try(f, ...)` is `pcall` under the name the bundled libraries use: it
+/// returns `true` followed by the results, or `false` and the error message.
+pub fn builtin_try(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let func = args
+        .first()
+        .ok_or_else(|| "try expects a function".to_string())?;
+    match vm.call_function(func.clone(), &args[1..]) {
+        Ok(mut res) => {
+            res.insert(0, Value::Bool(true));
+            Ok(res)
+        }
+        Err(err) => Ok(vec![Value::Bool(false), Value::String(err)]),
+    }
+}
+
 pub fn builtin_xpcall(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let func = args
         .first()
@@ -233,6 +248,29 @@ pub fn builtin_xpcall(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String>
     }
 }
 
+/// Loads a `@neyuki/...` module from the sources bundled at build time, or
+/// returns `None` when `name` is not one of them. Each module runs once and its
+/// value is kept, so repeated `require`s share the same table.
+fn load_bundled_module(vm: &mut VM, name: &str) -> Result<Option<Value>, String> {
+    let bare = name.strip_prefix("@neyuki/").unwrap_or(name);
+    let Some((_, source)) = crate::runtime::BUNDLED_LIBRARIES
+        .iter()
+        .find(|(bundled, _)| bundled.strip_prefix("@neyuki/") == Some(bare))
+    else {
+        return Ok(None);
+    };
+    if let Some(cached) = vm.modules.get(bare).cloned() {
+        return Ok(Some(cached));
+    }
+    let stmts = crate::compiler::compile_source(source)
+        .map_err(|err| format!("error in module '{}': {}", name, err))?;
+    let proto = crate::compiler::compile_bundled_to_proto(&stmts)
+        .map_err(|err| format!("error in module '{}': {}", name, err))?;
+    let value = vm.execute_module(proto)?;
+    vm.modules.insert(bare.to_string(), value.clone());
+    Ok(Some(value))
+}
+
 pub fn builtin_require(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let pkg = match args
         .first()
@@ -242,10 +280,11 @@ pub fn builtin_require(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String
         _ => return Err("require expects string argument".to_string()),
     };
 
+    // `math` and `string` are deliberately absent: the VM's own versions cover
+    // only part of the API, so they come from the bundled sources below, the
+    // same ones the tree-walking engine uses.
     let mod_name = match pkg {
-        "@neyuki/math" | "math" => "math",
         "@neyuki/table" | "table" => "table",
-        "@neyuki/string" | "string" => "string",
         "@neyuki/bit" | "bit" | "@neyuki/bit32" | "bit32" => "bit",
         "@neyuki/buffer" | "buffer" => "buffer",
         "@neyuki/os" | "os" => "os",
@@ -255,6 +294,11 @@ pub fn builtin_require(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String
         "@neyuki/utf8" | "utf8" => "utf8",
         "@neyuki/crypto" | "crypto" => "crypto",
         other => {
+            // Modules with no Rust counterpart in the VM (http, fs, io) are the
+            // bundled `lib/*.nyk` sources, run on top of the bridged natives.
+            if let Some(val) = load_bundled_module(vm, other)? {
+                return Ok(vec![val]);
+            }
             let path = if other.ends_with(".nyk") || other.ends_with(".nykb") {
                 other.to_string()
             } else {

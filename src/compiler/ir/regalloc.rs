@@ -27,6 +27,17 @@ pub fn allocate_registers(
     let intervals_map = liveness.compute_live_intervals(cfg);
 
     let mut intervals: Vec<_> = intervals_map.into_values().collect();
+
+    // A closure holds the register of each variable it captures, so that
+    // register must not be handed to anything else once the variable's last
+    // read goes by: the closure would see whatever overwrote it.
+    let captured = crate::compiler::ir::opt::captured_vars(cfg);
+    for interval in &mut intervals {
+        if captured.contains(&interval.var) {
+            interval.end = usize::MAX;
+        }
+    }
+
     // Sort by start position
     intervals.sort_by_key(|intv| (intv.start, intv.end));
 

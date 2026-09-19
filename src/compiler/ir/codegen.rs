@@ -3,14 +3,20 @@
 use std::collections::HashMap;
 
 use crate::bytecode::instruction::Instruction;
+use crate::bytecode::instruction::MULTRET;
 use crate::bytecode::proto::{Constant, Proto};
 use crate::compiler::ir::block::{IrFunction, IrModule};
-use crate::compiler::ir::inst::IrInst;
+use crate::compiler::ir::cfg_builder::build_cfg;
+use crate::compiler::ir::inst::{IrInst, SpreadSink, SpreadSource};
+use crate::compiler::ir::regalloc::allocate_registers;
 use crate::compiler::ir::types::{IrBinaryOp, IrConstant, IrLabel, IrUnaryOp, IrVar};
 
 struct RegAlloc {
     var_to_reg: HashMap<IrVar, u8>,
     next_reg: u8,
+    /// Set once the 255-register limit is hit, so lowering reports it instead
+    /// of handing out a register that is already in use.
+    exhausted: bool,
 }
 
 impl RegAlloc {
@@ -22,6 +28,18 @@ impl RegAlloc {
         Self {
             var_to_reg,
             next_reg: num_params,
+            exhausted: false,
+        }
+    }
+
+    /// Starts from a linear-scan allocation, which reuses a register once the
+    /// variable holding it is dead. Giving every variable its own register
+    /// instead runs a function of any size past the 255-register limit.
+    fn from_allocation(alloc: &crate::compiler::ir::regalloc::RegisterAllocation) -> Self {
+        Self {
+            var_to_reg: alloc.mapping.clone(),
+            next_reg: alloc.max_registers,
+            exhausted: false,
         }
     }
 
@@ -30,6 +48,9 @@ impl RegAlloc {
             r
         } else {
             let r = self.next_reg;
+            if self.next_reg == u8::MAX {
+                self.exhausted = true;
+            }
             self.next_reg = self.next_reg.saturating_add(1);
             if self.next_reg > proto.max_registers {
                 proto.max_registers = self.next_reg;
@@ -37,6 +58,21 @@ impl RegAlloc {
             self.var_to_reg.insert(var, r);
             r
         }
+    }
+
+    /// Claims `size` consecutive registers that no variable will ever be given.
+    /// Calls and `for` loops need their operands laid out side by side, and the
+    /// registers next to an arbitrary variable's are not free to overwrite.
+    fn reserve(&mut self, size: u8, proto: &mut Proto) -> u8 {
+        let base = self.next_reg;
+        if self.next_reg.checked_add(size).is_none() {
+            self.exhausted = true;
+        }
+        self.next_reg = self.next_reg.saturating_add(size);
+        if self.next_reg > proto.max_registers {
+            proto.max_registers = self.next_reg;
+        }
+        base
     }
 
     fn bind(&mut self, var: IrVar, reg: u8, proto: &mut Proto) {
@@ -47,6 +83,55 @@ impl RegAlloc {
         }
         if self.next_reg > proto.max_registers {
             proto.max_registers = self.next_reg;
+        }
+    }
+}
+
+/// Lays a producer out starting at register `at` and leaves every value it
+/// yields on the stack from there. A trailing producer is emitted just above
+/// this call's own arguments, so the two runs are contiguous.
+fn emit_spread_source(source: &SpreadSource, at: u8, regs: &mut RegAlloc, proto: &mut Proto) {
+    match source {
+        SpreadSource::Call {
+            callee,
+            args,
+            trailing,
+        } => {
+            let rc = regs.get(*callee, proto);
+            if rc != at {
+                proto.emit(Instruction::Move { dst: at, src: rc }, 1);
+            }
+            for (i, arg) in args.iter().enumerate() {
+                let ra = regs.get(*arg, proto);
+                let target = at + 1 + i as u8;
+                if ra != target {
+                    proto.emit(
+                        Instruction::Move {
+                            dst: target,
+                            src: ra,
+                        },
+                        1,
+                    );
+                }
+            }
+            let argc = match trailing {
+                Some(inner) => {
+                    emit_spread_source(inner, at + 1 + args.len() as u8, regs, proto);
+                    MULTRET
+                }
+                None => args.len() as u8,
+            };
+            proto.emit(
+                Instruction::Call {
+                    callee: at,
+                    argc,
+                    retc: MULTRET,
+                },
+                1,
+            );
+        }
+        SpreadSource::Vararg => {
+            proto.emit(Instruction::Vararg { dst: at, count: 0 }, 1);
         }
     }
 }
@@ -66,11 +151,95 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
     let mut proto = Proto::new(func.name.clone(), func.num_params, func.is_vararg);
     proto.upvalues = func.upvalues.clone();
 
-    let mut regs = RegAlloc::new(func.num_params);
+    let allocation = allocate_registers(&build_cfg(&func.instructions), func.num_params)?;
+    let mut regs = RegAlloc::from_allocation(&allocation);
     if regs.next_reg > proto.max_registers {
         proto.max_registers = regs.next_reg;
     }
 
+    // Reserve the register runs that calls and `for` loops need before any
+    // variable is given a register. A call needs `[callee, args…]` side by
+    // side and a `for` needs `[index, limit, step, vars…]`; taking the slots
+    // next to an arbitrary variable would overwrite whatever lives there.
+    // Binding the loop's variables into its window up front also means their
+    // values are written straight into place, instead of being copied there
+    // by moves that would re-run on every iteration.
+    // Any variable the allocation missed still has to land below the windows
+    // reserved next, because a call places the callee's frame directly above
+    // the callee's register and would overwrite anything higher up.
+    for inst in &func.instructions {
+        for var in inst.use_vars().into_iter().chain(inst.def_vars()) {
+            regs.get(var, &mut proto);
+        }
+    }
+
+    for inst in &func.instructions {
+        match inst {
+            IrInst::ForPrep {
+                base,
+                limit,
+                step,
+                loop_var,
+                ..
+            } => {
+                let rb = regs.reserve(4, &mut proto);
+                regs.bind(*base, rb, &mut proto);
+                regs.bind(*limit, rb + 1, &mut proto);
+                regs.bind(*step, rb + 2, &mut proto);
+                regs.bind(*loop_var, rb + 3, &mut proto);
+            }
+            IrInst::TForCall {
+                base,
+                state,
+                ctrl,
+                vars,
+            } => {
+                let rb = regs.reserve(3u8.saturating_add(vars.len() as u8), &mut proto);
+                regs.bind(*base, rb, &mut proto);
+                regs.bind(*state, rb + 1, &mut proto);
+                regs.bind(*ctrl, rb + 2, &mut proto);
+                for (i, v) in vars.iter().enumerate() {
+                    regs.bind(*v, rb + 3 + i as u8, &mut proto);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Reserved last, so the call window is the highest run in the frame.
+    let call_slots = func
+        .instructions
+        .iter()
+        .filter_map(|inst| match inst {
+            IrInst::Call { args, retc, .. } => {
+                Some(1u8.saturating_add((args.len() as u8).max(*retc)))
+            }
+            // A spread lays out the consuming call, then its fixed arguments,
+            // then the producing call, all in the one window.
+            IrInst::Spread { source, sink } => {
+                let produced = source.slots();
+                let consumed = match sink {
+                    SpreadSink::Call {
+                        fixed_args, retc, ..
+                    } => 1u8
+                        .saturating_add(fixed_args.len() as u8)
+                        .max(1u8.saturating_add(*retc)),
+                    SpreadSink::List { .. } | SpreadSink::Return => 0,
+                };
+                Some(consumed.saturating_add(produced))
+            }
+            _ => None,
+        })
+        .max();
+    let call_window = call_slots.map(|slots| regs.reserve(slots, &mut proto));
+    if regs.exhausted {
+        return Err(format!(
+            "register allocation failure: {} needs more than 255 registers",
+            func.name.as_deref().unwrap_or("<anonymous>")
+        ));
+    }
+
+    let mut capture_regs: HashMap<u16, Vec<Option<u8>>> = HashMap::new();
     let mut label_positions: HashMap<IrLabel, usize> = HashMap::new();
     let mut jump_patches: Vec<(usize, IrLabel)> = Vec::new();
 
@@ -376,8 +545,19 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
                     1,
                 );
             }
-            IrInst::Closure { dst, proto_idx } => {
+            IrInst::Closure {
+                dst,
+                proto_idx,
+                captures,
+            } => {
                 let rd = regs.get(*dst, &mut proto);
+                // Record where each captured variable ended up; the nested
+                // prototype's upvalue descriptors are filled in from this.
+                let mut resolved = Vec::with_capacity(captures.len());
+                for capture in captures {
+                    resolved.push(capture.map(|var| regs.get(var, &mut proto)));
+                }
+                capture_regs.insert(*proto_idx, resolved);
                 proto.emit(
                     Instruction::Closure {
                         dst: rd,
@@ -385,6 +565,77 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
                     },
                     1,
                 );
+            }
+            IrInst::Spread { source, sink } => {
+                let cw = call_window.expect("call window reserved when a spread exists");
+                // The consuming call sits at the base of the window with its
+                // fixed arguments after it; the produced values must follow
+                // immediately, so the producer is placed right after them.
+                let produce_at = match sink {
+                    SpreadSink::Call { fixed_args, .. } => cw + 1 + fixed_args.len() as u8,
+                    SpreadSink::List { .. } | SpreadSink::Return => cw,
+                };
+
+                emit_spread_source(source, produce_at, &mut regs, &mut proto);
+
+                match sink {
+                    SpreadSink::Call {
+                        dsts,
+                        callee,
+                        fixed_args,
+                        retc,
+                    } => {
+                        // The fixed arguments sit below the produced values,
+                        // so together they form the one run the call reads.
+                        let rc = regs.get(*callee, &mut proto);
+                        proto.emit(Instruction::Move { dst: cw, src: rc }, 1);
+                        for (i, arg) in fixed_args.iter().enumerate() {
+                            let ra = regs.get(*arg, &mut proto);
+                            proto.emit(
+                                Instruction::Move {
+                                    dst: cw + 1 + i as u8,
+                                    src: ra,
+                                },
+                                1,
+                            );
+                        }
+                        proto.emit(
+                            Instruction::Call {
+                                callee: cw,
+                                argc: MULTRET,
+                                retc: *retc,
+                            },
+                            1,
+                        );
+                        for (slot, d) in dsts.iter().enumerate() {
+                            let rd = regs.get(*d, &mut proto);
+                            let src = cw + slot as u8;
+                            if rd != src {
+                                proto.emit(Instruction::Move { dst: rd, src }, 1);
+                            }
+                        }
+                    }
+                    SpreadSink::List { table } => {
+                        let rt = regs.get(*table, &mut proto);
+                        proto.emit(
+                            Instruction::SetList {
+                                table: rt,
+                                base: produce_at,
+                                count: MULTRET,
+                            },
+                            1,
+                        );
+                    }
+                    SpreadSink::Return => {
+                        proto.emit(
+                            Instruction::Return {
+                                base: produce_at,
+                                count: MULTRET,
+                            },
+                            1,
+                        );
+                    }
+                }
             }
             IrInst::Vararg { dst, count } => {
                 let rd = regs.get(*dst, &mut proto);
@@ -403,32 +654,12 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
                 loop_var,
                 jump,
             } => {
+                // `base`, `limit`, `step` and `loop_var` were bound to this
+                // loop's window before lowering, so they are already in place.
                 let rb = regs.get(*base, &mut proto);
-                let r_limit = regs.get(*limit, &mut proto);
-                if r_limit != rb + 1 {
-                    proto.emit(
-                        Instruction::Move {
-                            dst: rb + 1,
-                            src: r_limit,
-                        },
-                        1,
-                    );
-                }
-                regs.bind(*limit, rb + 1, &mut proto);
-
-                let r_step = regs.get(*step, &mut proto);
-                if r_step != rb + 2 {
-                    proto.emit(
-                        Instruction::Move {
-                            dst: rb + 2,
-                            src: r_step,
-                        },
-                        1,
-                    );
-                }
-                regs.bind(*step, rb + 2, &mut proto);
-
-                regs.bind(*loop_var, rb + 3, &mut proto);
+                debug_assert_eq!(regs.get(*limit, &mut proto), rb + 1);
+                debug_assert_eq!(regs.get(*step, &mut proto), rb + 2);
+                debug_assert_eq!(regs.get(*loop_var, &mut proto), rb + 3);
 
                 let ip = proto.emit(Instruction::ForPrep { base: rb, jump: 0 }, 1);
                 jump_patches.push((ip, *jump));
@@ -444,34 +675,13 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
                 ctrl,
                 vars,
             } => {
+                // The iterator, its state and the control variable were bound
+                // to this loop's window before lowering; copying them here
+                // would re-run on every iteration and reset the control
+                // variable, so the loop would never end.
                 let rb = regs.get(*base, &mut proto);
-                let r_state = regs.get(*state, &mut proto);
-                if r_state != rb + 1 {
-                    proto.emit(
-                        Instruction::Move {
-                            dst: rb + 1,
-                            src: r_state,
-                        },
-                        1,
-                    );
-                }
-                regs.bind(*state, rb + 1, &mut proto);
-
-                let r_ctrl = regs.get(*ctrl, &mut proto);
-                if r_ctrl != rb + 2 {
-                    proto.emit(
-                        Instruction::Move {
-                            dst: rb + 2,
-                            src: r_ctrl,
-                        },
-                        1,
-                    );
-                }
-                regs.bind(*ctrl, rb + 2, &mut proto);
-
-                for (i, v) in vars.iter().enumerate() {
-                    regs.bind(*v, rb + 3 + i as u8, &mut proto);
-                }
+                debug_assert_eq!(regs.get(*state, &mut proto), rb + 1);
+                debug_assert_eq!(regs.get(*ctrl, &mut proto), rb + 2);
 
                 proto.emit(
                     Instruction::TForCall {
@@ -487,15 +697,19 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
                 jump_patches.push((ip, *jump));
             }
             IrInst::Call {
-                dst,
+                dsts,
                 callee,
                 args,
                 retc,
             } => {
+                let cw = call_window.expect("call window reserved when a call exists");
                 let rc = regs.get(*callee, &mut proto);
+                if rc != cw {
+                    proto.emit(Instruction::Move { dst: cw, src: rc }, 1);
+                }
                 for (i, arg) in args.iter().enumerate() {
                     let ra = regs.get(*arg, &mut proto);
-                    let target_reg = rc + 1 + i as u8;
+                    let target_reg = cw + 1 + i as u8;
                     if ra != target_reg {
                         proto.emit(
                             Instruction::Move {
@@ -506,22 +720,20 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
                         );
                     }
                 }
-                let needed_regs = (rc as usize) + 1 + (args.len()).max(*retc as usize);
-                if needed_regs > proto.max_registers as usize {
-                    proto.max_registers = needed_regs as u8;
-                }
                 proto.emit(
                     Instruction::Call {
-                        callee: rc,
+                        callee: cw,
                         argc: args.len() as u8,
                         retc: *retc,
                     },
                     1,
                 );
-                if let Some(d) = dst {
+                // Results land in the window starting at the callee's slot.
+                for (slot, d) in dsts.iter().enumerate() {
                     let rd = regs.get(*d, &mut proto);
-                    if rd != rc {
-                        proto.emit(Instruction::Move { dst: rd, src: rc }, 1);
+                    let src = cw + slot as u8;
+                    if rd != src {
+                        proto.emit(Instruction::Move { dst: rd, src }, 1);
                     }
                 }
             }
@@ -617,13 +829,13 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
     }
 
     // Lower nested function prototypes
-    for child in &func.protos {
+    for (index, child) in func.protos.iter().enumerate() {
         let mut child_proto = ir_function_to_proto(child, depth + 1)?;
-        for updesc in &mut child_proto.upvalues {
-            if updesc.in_stack {
-                let parent_var = IrVar(updesc.index as u32);
-                let parent_reg = regs.get(parent_var, &mut proto);
-                updesc.index = parent_reg;
+        if let Some(resolved) = capture_regs.get(&(index as u16)) {
+            for (slot, updesc) in child_proto.upvalues.iter_mut().enumerate() {
+                if let Some(Some(reg)) = resolved.get(slot) {
+                    updesc.index = *reg;
+                }
             }
         }
         proto.protos.push(child_proto);

@@ -99,34 +99,63 @@ pub fn format_inst(inst: &IrInst) -> String {
         IrInst::GetUpval { dst, index } => format!("v{} = upval[{}]", dst.0, index),
         IrInst::SetUpval { index, src } => format!("upval[{}] = v{}", index, src.0),
         IrInst::Call {
-            dst,
+            dsts,
             callee,
             args,
             retc,
         } => {
             let args_str: Vec<String> = args.iter().map(|a| format!("v{}", a.0)).collect();
-            if let Some(d) = dst {
-                format!(
-                    "v{} = call v{}({}) [retc: {}]",
-                    d.0,
-                    callee.0,
-                    args_str.join(", "),
-                    retc
-                )
+            let call = format!(
+                "call v{}({}) [retc: {}]",
+                callee.0,
+                args_str.join(", "),
+                retc
+            );
+            if dsts.is_empty() {
+                call
             } else {
-                format!(
-                    "call v{}({}) [retc: {}]",
-                    callee.0,
-                    args_str.join(", "),
-                    retc
-                )
+                let dsts_str: Vec<String> = dsts.iter().map(|d| format!("v{}", d.0)).collect();
+                format!("{} = {}", dsts_str.join(", "), call)
+            }
+        }
+        IrInst::Spread { source, sink } => {
+            let src = match source {
+                crate::compiler::ir::inst::SpreadSource::Call { callee, args, .. } => {
+                    let args_str: Vec<String> = args.iter().map(|a| format!("v{}", a.0)).collect();
+                    format!("v{}({})...", callee.0, args_str.join(", "))
+                }
+                crate::compiler::ir::inst::SpreadSource::Vararg => "...".to_string(),
+            };
+            match sink {
+                crate::compiler::ir::inst::SpreadSink::Call {
+                    dsts,
+                    callee,
+                    fixed_args,
+                    retc,
+                } => {
+                    let mut all: Vec<String> =
+                        fixed_args.iter().map(|a| format!("v{}", a.0)).collect();
+                    all.push(src);
+                    let call = format!("call v{}({}) [retc: {}]", callee.0, all.join(", "), retc);
+                    if dsts.is_empty() {
+                        call
+                    } else {
+                        let dsts_str: Vec<String> =
+                            dsts.iter().map(|d| format!("v{}", d.0)).collect();
+                        format!("{} = {}", dsts_str.join(", "), call)
+                    }
+                }
+                crate::compiler::ir::inst::SpreadSink::List { table } => {
+                    format!("append_all(v{}, {})", table.0, src)
+                }
+                crate::compiler::ir::inst::SpreadSink::Return => format!("return {}", src),
             }
         }
         IrInst::Return(vars) => {
             let vars_str: Vec<String> = vars.iter().map(|v| format!("v{}", v.0)).collect();
             format!("return {}", vars_str.join(", "))
         }
-        IrInst::Closure { dst, proto_idx } => {
+        IrInst::Closure { dst, proto_idx, .. } => {
             format!("v{} = closure(proto #{})", dst.0, proto_idx)
         }
         IrInst::Vararg { dst, count } => format!("v{} = vararg({})", dst.0, count),

@@ -175,11 +175,21 @@ fn fold_binary_op(op: BinOp, left: FoldVal, right: FoldVal) -> Option<FoldVal> {
                 Some(FoldVal::Float(fa - (fa / fb).floor() * fb))
             }
         },
-        BinOp::Pow => {
-            let fa = left.to_f64()?;
-            let fb = right.to_f64()?;
-            Some(FoldVal::Float(fa.powf(fb)))
-        }
+        BinOp::Pow => match (left, right) {
+            // Integer powers stay integers, as they do at runtime; folding
+            // them through f64 would silently lose precision past 2^53.
+            (FoldVal::Int(a), FoldVal::Int(b)) if b.sign() != Sign::Minus => {
+                // Huge exponents are left for runtime rather than built here.
+                const MAX_FOLDED_EXPONENT: u32 = 4096;
+                let exp = b.to_u32().filter(|e| *e <= MAX_FOLDED_EXPONENT)?;
+                Some(FoldVal::Int(a.pow(exp)))
+            }
+            (a, b) => {
+                let fa = a.to_f64()?;
+                let fb = b.to_f64()?;
+                Some(FoldVal::Float(fa.powf(fb)))
+            }
+        },
         BinOp::BitAnd => {
             let ia = left.to_bigint()?;
             let ib = right.to_bigint()?;

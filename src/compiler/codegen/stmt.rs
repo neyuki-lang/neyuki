@@ -4,7 +4,7 @@ use super::Compiler;
 use super::state::LoopContext;
 use crate::ast::node_id::NodeId;
 use crate::ast::pattern::AssignTarget;
-use crate::bytecode::instruction::Instruction;
+use crate::bytecode::instruction::{Instruction, MULTRET};
 use crate::bytecode::proto::Constant;
 use crate::parser::{Expr, Stmt};
 
@@ -27,29 +27,49 @@ impl Compiler {
                 initializers,
                 ..
             } => {
-                if initializers.len() == 1 && matches!(initializers[0], Expr::Call { .. }) {
-                    let Expr::Call { callee, args, .. } = &initializers[0] else {
-                        unreachable!()
-                    };
+                if initializers.len() == 1
+                    && matches!(initializers[0], Expr::Call { .. } | Expr::MethodCall { .. })
+                {
                     let func_reg = self.current_mut().alloc_reg();
-                    self.compile_expr(callee, Some(func_reg));
-                    let mut arg_regs = Vec::new();
-                    for arg in args {
-                        let r = self.current_mut().alloc_reg();
-                        self.compile_expr(arg, Some(r));
-                        arg_regs.push(r);
-                    }
+                    let (argc, arg_regs, self_reg) = match &initializers[0] {
+                        Expr::Call { callee, args, .. } => {
+                            self.compile_expr(callee, Some(func_reg));
+                            let (argc, arg_regs) = self.compile_args(args, 0);
+                            (argc, arg_regs, None)
+                        }
+                        Expr::MethodCall {
+                            object,
+                            method,
+                            args,
+                            ..
+                        } => {
+                            let arg0 = self.current_mut().alloc_reg();
+                            self.compile_expr(object, Some(arg0));
+                            let key_k = self.add_constant(Constant::String(method.clone()));
+                            self.current_mut().emit(Instruction::GetTableK {
+                                dst: func_reg,
+                                table: arg0,
+                                key_k,
+                            });
+                            let (argc, arg_regs) = self.compile_args(args, 1);
+                            (argc, arg_regs, Some(arg0))
+                        }
+                        _ => unreachable!(),
+                    };
                     let retc = names.len() as u8;
                     for _ in 1..names.len() {
                         self.current_mut().alloc_reg();
                     }
                     self.current_mut().emit(Instruction::Call {
                         callee: func_reg,
-                        argc: args.len() as u8,
+                        argc,
                         retc,
                     });
                     for r in arg_regs.into_iter().rev() {
                         self.current_mut().free_reg(r);
+                    }
+                    if let Some(arg0) = self_reg {
+                        self.current_mut().free_reg(arg0);
                     }
                     let min_top = func_reg + names.len() as u8;
                     if self.current().reg_top < min_top {
@@ -88,19 +108,14 @@ impl Compiler {
                     };
                     let func_reg = self.current_mut().alloc_reg();
                     self.compile_expr(callee, Some(func_reg));
-                    let mut arg_regs = Vec::new();
-                    for arg in args {
-                        let r = self.current_mut().alloc_reg();
-                        self.compile_expr(arg, Some(r));
-                        arg_regs.push(r);
-                    }
+                    let (argc, arg_regs) = self.compile_args(args, 0);
                     let retc = targets.len() as u8;
                     while self.current_mut().reg_top < func_reg + retc {
                         self.current_mut().alloc_reg();
                     }
                     self.current_mut().emit(Instruction::Call {
                         callee: func_reg,
-                        argc: args.len() as u8,
+                        argc,
                         retc,
                     });
                     for r in arg_regs.into_iter().rev() {
@@ -129,19 +144,14 @@ impl Compiler {
                         table: arg0,
                         key_k,
                     });
-                    let mut arg_regs = Vec::new();
-                    for arg in args {
-                        let r = self.current_mut().alloc_reg();
-                        self.compile_expr(arg, Some(r));
-                        arg_regs.push(r);
-                    }
+                    let (argc, arg_regs) = self.compile_args(args, 1);
                     let retc = targets.len() as u8;
                     while self.current_mut().reg_top < func_reg + retc {
                         self.current_mut().alloc_reg();
                     }
                     self.current_mut().emit(Instruction::Call {
                         callee: func_reg,
-                        argc: (args.len() + 1) as u8,
+                        argc,
                         retc,
                     });
                     for r in arg_regs.into_iter().rev() {
@@ -571,15 +581,36 @@ impl Compiler {
                         .emit(Instruction::Return { base: r, count: 1 });
                     self.current_mut().free_reg(r);
                 } else if exprs.len() == 1 {
-                    let r = self.compile_expr(&exprs[0], None);
-                    self.current_mut()
-                        .emit(Instruction::Return { base: r, count: 1 });
-                    self.current_mut().free_reg(r);
+                    // `return f()` hands back every value f produced, so that
+                    // wrappers can forward multiple returns.
+                    if Compiler::is_multi_value(&exprs[0]) {
+                        let base = self.current_mut().alloc_reg();
+                        self.compile_expr_multi(&exprs[0], base);
+                        self.current_mut().emit(Instruction::Return {
+                            base,
+                            count: MULTRET,
+                        });
+                        self.current_mut().free_reg(base);
+                    } else {
+                        let r = self.compile_expr(&exprs[0], None);
+                        self.current_mut()
+                            .emit(Instruction::Return { base: r, count: 1 });
+                        self.current_mut().free_reg(r);
+                    }
                 } else {
                     let base = self.current_mut().alloc_reg();
                     self.compile_expr(&exprs[0], Some(base));
-                    for expr in &exprs[1..] {
+                    let last = exprs.len() - 1;
+                    for (index, expr) in exprs[1..].iter().enumerate() {
                         let next_r = self.current_mut().alloc_reg();
+                        if index + 1 == last && Compiler::is_multi_value(expr) {
+                            self.compile_expr_multi(expr, next_r);
+                            self.current_mut().emit(Instruction::Return {
+                                base,
+                                count: MULTRET,
+                            });
+                            return;
+                        }
                         self.compile_expr(expr, Some(next_r));
                     }
                     self.current_mut().emit(Instruction::Return {

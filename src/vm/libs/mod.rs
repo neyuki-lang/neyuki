@@ -1,6 +1,7 @@
 // VM standard libraries module.
 
 pub mod bit;
+pub mod bridge;
 pub mod buffer;
 pub mod coroutine;
 pub mod crypto;
@@ -13,6 +14,7 @@ pub mod table;
 pub mod utf8;
 
 pub use bit::create_bit_lib;
+pub use bridge::register_bridged_natives;
 pub use buffer::create_buffer_lib;
 pub use coroutine::create_coroutine_lib;
 pub use crypto::create_crypto_lib;

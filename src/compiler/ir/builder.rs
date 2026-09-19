@@ -7,8 +7,8 @@ use std::str::FromStr;
 use crate::ast::op::{BinOp, UnOp};
 use crate::ast::pattern::AssignTarget;
 use crate::ast::{Expr, InterpPart, Param, Stmt};
-use crate::compiler::ir::block::{IrFunction, IrModule};
-use crate::compiler::ir::inst::IrInst;
+use crate::compiler::ir::block::{IrFunction, IrModule, UpvalSource};
+use crate::compiler::ir::inst::{IrInst, SpreadSink, SpreadSource};
 use crate::compiler::ir::types::{IrBinaryOp, IrConstant, IrLabel, IrUnaryOp, IrVar};
 
 struct IrLoopContext {
@@ -28,6 +28,7 @@ pub struct IrBuilder {
     named_labels: HashMap<String, IrLabel>,
     parent_scopes: Vec<Vec<HashMap<String, IrVar>>>,
     upvalues: Vec<UpvalueDesc>,
+    upvalue_vars: Vec<UpvalSource>,
 }
 
 impl IrBuilder {
@@ -42,6 +43,7 @@ impl IrBuilder {
             named_labels: HashMap::new(),
             parent_scopes: Vec::new(),
             upvalues: Vec::new(),
+            upvalue_vars: Vec::new(),
         }
     }
 
@@ -104,17 +106,7 @@ impl IrBuilder {
         let parent_frame = self.parent_scopes.last()?;
         for scope in parent_frame.iter().rev() {
             if let Some(&var) = scope.get(name) {
-                for (i, up) in self.upvalues.iter().enumerate() {
-                    if up.in_stack && up.index == var.0 as u8 {
-                        return Some(i as u8);
-                    }
-                }
-                let idx = self.upvalues.len() as u8;
-                self.upvalues.push(UpvalueDesc {
-                    in_stack: true,
-                    index: var.0 as u8,
-                });
-                return Some(idx);
+                return Some(self.capture(var, true));
             }
         }
 
@@ -123,23 +115,191 @@ impl IrBuilder {
             for p in (0..num_parents - 1).rev() {
                 for scope in self.parent_scopes[p].iter().rev() {
                     if let Some(&var) = scope.get(name) {
-                        for (i, up) in self.upvalues.iter().enumerate() {
-                            if !up.in_stack && up.index == var.0 as u8 {
-                                return Some(i as u8);
-                            }
-                        }
-                        let idx = self.upvalues.len() as u8;
-                        self.upvalues.push(UpvalueDesc {
-                            in_stack: false,
-                            index: var.0 as u8,
-                        });
-                        return Some(idx);
+                        return Some(self.capture(var, false));
                     }
                 }
             }
         }
 
         None
+    }
+
+    /// Records that this function captures `var`, returning its upvalue slot.
+    /// `from_parent` says whether it lives in the immediately enclosing
+    /// function; if not, that function has to capture it too, which is settled
+    /// once this one is attached to it. Each descriptor's `index` is filled in
+    /// then, or at lowering for a parent's register.
+    fn capture(&mut self, var: IrVar, from_parent: bool) -> u8 {
+        for (i, source) in self.upvalue_vars.iter().enumerate() {
+            match source {
+                UpvalSource::ParentLocal(v) | UpvalSource::Pending(v) if *v == var => {
+                    return i as u8;
+                }
+                _ => {}
+            }
+        }
+        let idx = self.upvalues.len() as u8;
+        self.upvalues.push(UpvalueDesc {
+            in_stack: from_parent,
+            index: 0,
+        });
+        self.upvalue_vars.push(if from_parent {
+            UpvalSource::ParentLocal(var)
+        } else {
+            UpvalSource::Pending(var)
+        });
+        idx
+    }
+
+    /// Captures `var` on behalf of a nested function that reaches past this
+    /// one for it, returning the slot it now occupies here.
+    fn capture_for_child(&mut self, var: IrVar) -> u8 {
+        let in_enclosing = self
+            .parent_scopes
+            .last()
+            .is_some_and(|frame| frame.iter().any(|scope| scope.values().any(|v| *v == var)));
+        self.capture(var, in_enclosing)
+    }
+
+    /// True when `expr` can yield more than one value at runtime.
+    fn is_multi_value(expr: &Expr) -> bool {
+        matches!(
+            expr,
+            Expr::Call { .. } | Expr::MethodCall { .. } | Expr::Vararg { .. }
+        )
+    }
+
+    fn last_spreads(args: &[Expr]) -> bool {
+        args.last().is_some_and(Self::is_multi_value)
+    }
+
+    /// Compiles `expr` as the producer of a run of values. Only called for an
+    /// expression `is_multi_value` accepted.
+    fn spread_source(&mut self, expr: &Expr) -> SpreadSource {
+        match expr {
+            Expr::Call { callee, args, .. } => {
+                let callee_var = self.compile_expr(callee, None);
+                let spreads = Self::last_spreads(args);
+                let fixed = if spreads {
+                    &args[..args.len() - 1]
+                } else {
+                    &args[..]
+                };
+                let arg_vars = fixed
+                    .iter()
+                    .map(|arg| self.compile_expr(arg, None))
+                    .collect();
+                let trailing = spreads.then(|| Box::new(self.spread_source(&args[args.len() - 1])));
+                SpreadSource::Call {
+                    callee: callee_var,
+                    args: arg_vars,
+                    trailing,
+                }
+            }
+            Expr::MethodCall {
+                object,
+                method,
+                args,
+                ..
+            } => {
+                let tbl = self.compile_expr(object, None);
+                let key = self.alloc_var();
+                self.emit(IrInst::LoadConst {
+                    dst: key,
+                    val: IrConstant::String(method.clone()),
+                });
+                let callee = self.alloc_var();
+                self.emit(IrInst::GetTable {
+                    dst: callee,
+                    table: tbl,
+                    key,
+                });
+                let spreads = Self::last_spreads(args);
+                let fixed = if spreads {
+                    &args[..args.len() - 1]
+                } else {
+                    &args[..]
+                };
+                let mut arg_vars = vec![tbl];
+                for arg in fixed {
+                    arg_vars.push(self.compile_expr(arg, None));
+                }
+                let trailing = spreads.then(|| Box::new(self.spread_source(&args[args.len() - 1])));
+                SpreadSource::Call {
+                    callee,
+                    args: arg_vars,
+                    trailing,
+                }
+            }
+            _ => SpreadSource::Vararg,
+        }
+    }
+
+    /// Compiles `expr` as a call asked for `count` results, one variable each.
+    /// Returns `None` when `expr` is not a call, so the caller falls back to
+    /// evaluating it as a single value.
+    fn compile_call_results(&mut self, expr: &Expr, count: usize) -> Option<Vec<IrVar>> {
+        let (callee, args) = match expr {
+            Expr::Call { callee, args, .. } => {
+                let callee_var = self.compile_expr(callee, None);
+                let arg_vars = args
+                    .iter()
+                    .map(|arg| self.compile_expr(arg, None))
+                    .collect::<Vec<_>>();
+                (callee_var, arg_vars)
+            }
+            Expr::MethodCall {
+                object,
+                method,
+                args,
+                ..
+            } => {
+                let tbl = self.compile_expr(object, None);
+                let key = self.alloc_var();
+                self.emit(IrInst::LoadConst {
+                    dst: key,
+                    val: IrConstant::String(method.clone()),
+                });
+                let callee = self.alloc_var();
+                self.emit(IrInst::GetTable {
+                    dst: callee,
+                    table: tbl,
+                    key,
+                });
+                let mut arg_vars = vec![tbl];
+                for arg in args {
+                    arg_vars.push(self.compile_expr(arg, None));
+                }
+                (callee, arg_vars)
+            }
+            _ => return None,
+        };
+
+        let dsts: Vec<IrVar> = (0..count).map(|_| self.alloc_var()).collect();
+        self.emit(IrInst::Call {
+            dsts: dsts.clone(),
+            callee,
+            args,
+            retc: count as u8,
+        });
+        Some(dsts)
+    }
+
+    /// The parent variables a freshly compiled nested prototype captures.
+    fn captures_of(&self, proto_idx: u16) -> Vec<Option<IrVar>> {
+        self.child_protos
+            .get(proto_idx as usize)
+            .map(|child| {
+                child
+                    .upvalue_vars
+                    .iter()
+                    .map(|source| match source {
+                        UpvalSource::ParentLocal(var) => Some(*var),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub fn emit(&mut self, inst: IrInst) {
@@ -331,12 +491,29 @@ impl IrBuilder {
             }
             Expr::Call { callee, args, .. } => {
                 let callee_var = self.compile_expr(callee, None);
+                if Self::last_spreads(args) {
+                    let fixed = args[..args.len() - 1]
+                        .iter()
+                        .map(|arg| self.compile_expr(arg, None))
+                        .collect();
+                    let source = self.spread_source(&args[args.len() - 1]);
+                    self.emit(IrInst::Spread {
+                        source,
+                        sink: SpreadSink::Call {
+                            dsts: vec![dst],
+                            callee: callee_var,
+                            fixed_args: fixed,
+                            retc: 1,
+                        },
+                    });
+                    return dst;
+                }
                 let mut arg_vars = Vec::new();
                 for arg in args {
                     arg_vars.push(self.compile_expr(arg, None));
                 }
                 self.emit(IrInst::Call {
-                    dst: Some(dst),
+                    dsts: vec![dst],
                     callee: callee_var,
                     args: arg_vars,
                     retc: 1,
@@ -361,12 +538,29 @@ impl IrBuilder {
                     key,
                 });
 
+                if Self::last_spreads(args) {
+                    let mut fixed = vec![tbl];
+                    for arg in &args[..args.len() - 1] {
+                        fixed.push(self.compile_expr(arg, None));
+                    }
+                    let source = self.spread_source(&args[args.len() - 1]);
+                    self.emit(IrInst::Spread {
+                        source,
+                        sink: SpreadSink::Call {
+                            dsts: vec![dst],
+                            callee,
+                            fixed_args: fixed,
+                            retc: 1,
+                        },
+                    });
+                    return dst;
+                }
                 let mut arg_vars = vec![tbl];
                 for arg in args {
                     arg_vars.push(self.compile_expr(arg, None));
                 }
                 self.emit(IrInst::Call {
-                    dst: Some(dst),
+                    dsts: vec![dst],
                     callee,
                     args: arg_vars,
                     retc: 1,
@@ -374,7 +568,19 @@ impl IrBuilder {
             }
             Expr::Table { entries, .. } => {
                 self.emit(IrInst::NewTable { dst });
-                for entry in entries {
+                // A trailing call or `...` contributes every value it yields,
+                // so it is appended as a run rather than as one element.
+                let trailing = entries
+                    .last()
+                    .filter(|e| e.key.is_none())
+                    .filter(|e| Self::is_multi_value(&e.value))
+                    .map(|e| e.value.clone());
+                let fixed_entries = if trailing.is_some() {
+                    &entries[..entries.len() - 1]
+                } else {
+                    &entries[..]
+                };
+                for entry in fixed_entries {
                     if let Some(ref k) = entry.key {
                         let key_var = self.alloc_var();
                         self.emit(IrInst::LoadConst {
@@ -394,6 +600,13 @@ impl IrBuilder {
                             src: elem_var,
                         });
                     }
+                }
+                if let Some(value) = trailing {
+                    let source = self.spread_source(&value);
+                    self.emit(IrInst::Spread {
+                        source,
+                        sink: SpreadSink::List { table: dst },
+                    });
                 }
             }
             Expr::Index { object, index, .. } => {
@@ -420,7 +633,12 @@ impl IrBuilder {
             }
             Expr::Function { params, body, .. } => {
                 let proto_idx = self.compile_sub_function(None, params, body);
-                self.emit(IrInst::Closure { dst, proto_idx });
+                let captures = self.captures_of(proto_idx);
+                self.emit(IrInst::Closure {
+                    dst,
+                    proto_idx,
+                    captures,
+                });
             }
         }
         dst
@@ -450,6 +668,16 @@ impl IrBuilder {
         }
         sub_builder.exit_scope();
 
+        // A variable the nested function reaches past this one for has to be
+        // captured here as well, so it can read it from this function's
+        // upvalues rather than from a register that does not hold it.
+        for slot in 0..sub_builder.upvalue_vars.len() {
+            if let UpvalSource::Pending(var) = sub_builder.upvalue_vars[slot] {
+                sub_builder.upvalues[slot].index = self.capture_for_child(var);
+                sub_builder.upvalue_vars[slot] = UpvalSource::ParentUpvalue;
+            }
+        }
+
         let has_terminal = matches!(sub_builder.instructions.last(), Some(IrInst::Return(_)));
         if !has_terminal {
             let nil_var = sub_builder.alloc_var();
@@ -466,6 +694,7 @@ impl IrBuilder {
             instructions: sub_builder.instructions,
             protos: sub_builder.child_protos,
             upvalues: sub_builder.upvalues,
+            upvalue_vars: sub_builder.upvalue_vars,
             cfg: None,
         });
         proto_idx
@@ -489,6 +718,17 @@ impl IrBuilder {
                 initializers,
                 ..
             } => {
+                // `local a, b = f()` takes one value per name from the call
+                // rather than giving only the first name a value.
+                if initializers.len() == 1
+                    && names.len() > 1
+                    && let Some(vars) = self.compile_call_results(&initializers[0], names.len())
+                {
+                    for (name, var) in names.iter().zip(vars) {
+                        self.add_local(name.clone(), var);
+                    }
+                    return;
+                }
                 for (i, name) in names.iter().enumerate() {
                     let var = self.alloc_var();
                     if let Some(init) = initializers.get(i) {
@@ -506,6 +746,15 @@ impl IrBuilder {
             Stmt::AssignMany {
                 targets, values, ..
             } => {
+                if values.len() == 1
+                    && targets.len() > 1
+                    && let Some(vars) = self.compile_call_results(&values[0], targets.len())
+                {
+                    for (target, var) in targets.iter().zip(vars) {
+                        self.compile_assign(target, var);
+                    }
+                    return;
+                }
                 let mut val_vars = Vec::new();
                 for val in values {
                     val_vars.push(self.compile_expr(val, None));
@@ -556,9 +805,11 @@ impl IrBuilder {
                 };
                 let proto_idx = self.compile_sub_function(name.clone(), params, body);
                 let closure_var = self.alloc_var();
+                let captures = self.captures_of(proto_idx);
                 self.emit(IrInst::Closure {
                     dst: closure_var,
                     proto_idx,
+                    captures,
                 });
                 if let Some(lv) = local_var {
                     self.emit(IrInst::Move {
@@ -757,7 +1008,7 @@ impl IrBuilder {
                             arg_vars.push(self.compile_expr(arg, None));
                         }
                         self.emit(IrInst::Call {
-                            dst: Some(callee_var),
+                            dsts: vec![callee_var],
                             callee: callee_var,
                             args: arg_vars,
                             retc: 3,
@@ -820,6 +1071,15 @@ impl IrBuilder {
                 }
             }
             Stmt::Return { values: exprs, .. } => {
+                // `return f()` hands back every value f produced.
+                if exprs.len() == 1 && Self::is_multi_value(&exprs[0]) {
+                    let source = self.spread_source(&exprs[0]);
+                    self.emit(IrInst::Spread {
+                        source,
+                        sink: SpreadSink::Return,
+                    });
+                    return;
+                }
                 let mut ret_vars = Vec::new();
                 for e in exprs {
                     ret_vars.push(self.compile_expr(e, None));
@@ -908,6 +1168,7 @@ pub fn ast_to_ir(stmts: &[Stmt]) -> IrModule {
             instructions: builder.instructions,
             protos: builder.child_protos,
             upvalues: Vec::new(),
+            upvalue_vars: Vec::new(),
             cfg: None,
         },
     }

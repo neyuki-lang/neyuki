@@ -1,5 +1,7 @@
 // Local variables, loop contexts, and function compilation state for bytecode generator.
 
+use std::collections::HashSet;
+
 use crate::bytecode::instruction::Instruction;
 use crate::bytecode::proto::{Constant, Proto, UpvalueDesc};
 
@@ -24,6 +26,11 @@ pub(crate) struct FuncState {
     pub(crate) reg_top: u8,
     pub(crate) loops: Vec<LoopContext>,
     pub(crate) current_line: u32,
+    /// Registers an inner closure captured as an upvalue. They are never
+    /// handed out again: the instruction set has no "close upvalue" op, so a
+    /// later write to such a register would reach through the open upvalue and
+    /// change what the closure sees.
+    pub(crate) captured: HashSet<u8>,
 }
 
 impl FuncState {
@@ -35,7 +42,12 @@ impl FuncState {
             reg_top: 0,
             loops: Vec::new(),
             current_line: 1,
+            captured: HashSet::new(),
         }
+    }
+
+    pub(crate) fn mark_captured(&mut self, reg: u8) {
+        self.captured.insert(reg);
     }
 
     pub(crate) fn alloc_reg(&mut self) -> u8 {
@@ -48,6 +60,9 @@ impl FuncState {
     }
 
     pub(crate) fn free_reg(&mut self, reg: u8) {
+        if self.captured.contains(&reg) {
+            return;
+        }
         if reg + 1 == self.reg_top {
             self.reg_top -= 1;
         }

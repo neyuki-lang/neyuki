@@ -4,14 +4,14 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::bytecode::instruction::Instruction;
+use crate::bytecode::instruction::{Instruction, MULTRET};
 use crate::bytecode::proto::{Constant, Proto};
 use crate::vm::frame::CallFrame;
 use crate::vm::gc::GcTracker;
 use crate::vm::libs::{
     create_bit_lib, create_buffer_lib, create_coroutine_lib, create_crypto_lib, create_debug_lib,
     create_json_lib, create_math_lib, create_os_lib, create_string_lib, create_table_lib,
-    create_utf8_lib,
+    create_utf8_lib, register_bridged_natives,
 };
 use crate::vm::value::{NativeFn, Value, VmClosure, VmTable};
 
@@ -36,6 +36,15 @@ pub struct VM {
     pub current_co: Option<usize>,
     pub is_yielding: bool,
     pub open_upvalues: HashMap<usize, Rc<RefCell<Value>>>,
+    /// One past the last value produced by the most recent MULTRET `Call`,
+    /// `Vararg` or returning frame. Only meaningful for the instruction that
+    /// immediately consumes it.
+    pub top: usize,
+    /// Modules already loaded by `require`, so each one runs once.
+    pub modules: HashMap<String, Value>,
+    /// Every value the frame that just unwound to a `run_to_depth` boundary
+    /// returned, so `call_function` can hand back more than the first.
+    returned: Vec<Value>,
 }
 
 impl VM {
@@ -50,6 +59,9 @@ impl VM {
             current_co: None,
             is_yielding: false,
             open_upvalues: HashMap::new(),
+            top: 0,
+            modules: HashMap::new(),
+            returned: Vec::new(),
         };
         vm.register_builtins();
         vm
@@ -74,6 +86,8 @@ impl VM {
         self.globals.insert("utf8".to_string(), create_utf8_lib());
         self.globals
             .insert("crypto".to_string(), create_crypto_lib());
+
+        register_bridged_natives(self);
     }
 
     pub fn register_native(&mut self, name: &'static str, func: NativeFn) {
@@ -143,6 +157,48 @@ impl VM {
         }
     }
 
+    /// Runs a module's top-level code and returns its value, leaving the
+    /// frames and registers of whatever called `require` untouched.
+    pub fn execute_module(&mut self, proto: Proto) -> Result<Value, String> {
+        let closure = Rc::new(VmClosure {
+            proto,
+            upvalues: Vec::new(),
+        });
+        let depth = self.frames.len();
+        let prev_stack_len = self.stack.len();
+        let base = prev_stack_len + 1;
+        let needed = base + closure.proto.max_registers as usize + 1;
+        if needed >= self.stack.len() {
+            self.stack.resize(needed + 1, Value::Nil);
+        }
+        self.frames.push(CallFrame::new(closure, base));
+        let result = self.run_to_depth(depth);
+        self.frames.truncate(depth);
+        self.stack.truncate(prev_stack_len);
+        // Upvalues captured by the module's closures live on in the closures
+        // themselves; dropping them here just closes them over their values.
+        self.open_upvalues.retain(|&idx, _| idx < prev_stack_len);
+        result
+    }
+
+    /// Writes the results of a native (or `__call`) invocation back into the
+    /// caller's registers, starting at the register that held the callee.
+    fn store_call_results(&mut self, callee: u8, retc: u8, results: &[Value]) {
+        let count = match retc {
+            MULTRET => results.len(),
+            0 => 1,
+            n => n as usize,
+        };
+        for i in 0..count {
+            let val = results.get(i).cloned().unwrap_or(Value::Nil);
+            self.set_reg(callee + i as u8, val);
+        }
+        if retc == MULTRET {
+            let base = self.frames.last().map(|f| f.base).unwrap_or(0);
+            self.top = base + callee as usize + count;
+        }
+    }
+
     pub fn call_function(&mut self, func: Value, args: &[Value]) -> Result<Vec<Value>, String> {
         const MAX_CALL_DEPTH: usize = 512;
         if self.frames.len() >= MAX_CALL_DEPTH {
@@ -175,13 +231,21 @@ impl VM {
                 };
                 self.frames
                     .push(CallFrame::with_varargs(c.clone(), base, varargs));
+                self.returned.clear();
                 match self.run_to_depth(depth) {
                     Ok(res) => {
                         if !self.is_yielding {
                             self.stack.truncate(prev_stack_len);
                             self.open_upvalues.retain(|&idx, _| idx < prev_stack_len);
                         }
-                        Ok(vec![res])
+                        // A closure can return several values, which callers
+                        // such as a generic `for` over an iterator rely on.
+                        let returned = std::mem::take(&mut self.returned);
+                        if returned.is_empty() {
+                            Ok(vec![res])
+                        } else {
+                            Ok(returned)
+                        }
                     }
                     Err(err) => {
                         if !self.is_yielding {
@@ -345,13 +409,25 @@ impl VM {
                     }
                 }
                 Instruction::SetList { table, base, count } => {
+                    let frame_base = self.frames.last().unwrap().base;
+                    let start = frame_base + base as usize;
+                    let end = if count == MULTRET {
+                        self.top.max(start)
+                    } else {
+                        start + count as usize
+                    };
+                    let values: Vec<Value> = (start..end)
+                        .map(|idx| {
+                            self.open_upvalues
+                                .get(&idx)
+                                .map(|cell| cell.borrow().clone())
+                                .or_else(|| self.stack.get(idx).cloned())
+                                .unwrap_or(Value::Nil)
+                        })
+                        .collect();
                     let tbl = self.get_reg(table);
                     if let Value::Table(t) = tbl {
-                        let mut t_mut = t.borrow_mut();
-                        for i in 0..count {
-                            let val = self.get_reg(base + i);
-                            t_mut.array.push(val);
-                        }
+                        t.borrow_mut().array.extend(values);
                     } else {
                         return Err("cannot SetList to non-table".to_string());
                     }
@@ -840,7 +916,17 @@ impl VM {
                     let callee_val = self.get_reg(callee);
                     let base = self.frames.last().unwrap().base;
                     let args_start = base + callee as usize + 1;
-                    let args_end = args_start + argc as usize;
+                    // MULTRET args run from the first argument register up to
+                    // whatever the previous instruction left on the stack.
+                    let args_end = if argc == MULTRET {
+                        self.top.max(args_start)
+                    } else {
+                        args_start + argc as usize
+                    };
+                    let argc = args_end - args_start;
+                    if args_end > self.stack.len() {
+                        self.stack.resize(args_end, Value::Nil);
+                    }
 
                     match callee_val {
                         Value::Closure(closure) => {
@@ -857,26 +943,23 @@ impl VM {
                                 self.stack.resize(needed + 1, Value::Nil);
                             }
                             let num_params = closure.proto.num_params as usize;
-                            for i in (argc as usize)..num_params {
+                            for i in argc..num_params {
                                 self.stack[new_base + i] = Value::Nil;
                             }
-                            let varargs = if argc as usize > num_params {
+                            let varargs = if argc > num_params {
                                 self.stack[args_start + num_params..args_end].to_vec()
                             } else {
                                 Vec::new()
                             };
-                            let new_frame = CallFrame::with_varargs(closure, new_base, varargs);
+                            let new_frame =
+                                CallFrame::with_varargs(closure, new_base, varargs).wanting(retc);
                             self.frames.push(new_frame);
                         }
                         Value::Native(_, func) => {
                             let args = self.stack[args_start..args_end].to_vec();
                             match func(self, &args) {
                                 Ok(results) => {
-                                    let count = if retc == 0 { 1 } else { retc as usize };
-                                    for i in 0..count {
-                                        let val = results.get(i).cloned().unwrap_or(Value::Nil);
-                                        self.set_reg(callee + i as u8, val);
-                                    }
+                                    self.store_call_results(callee, retc, &results);
                                 }
                                 Err(err) if self.is_yielding => {
                                     if let Some(co_id) = self.current_co
@@ -900,11 +983,7 @@ impl VM {
                                 let mut call_args = vec![callee_val.clone()];
                                 call_args.extend_from_slice(&self.stack[args_start..args_end]);
                                 let results = self.call_function(handler, &call_args)?;
-                                let count = if retc == 0 { 1 } else { retc as usize };
-                                for i in 0..count {
-                                    let val = results.get(i).cloned().unwrap_or(Value::Nil);
-                                    self.set_reg(callee + i as u8, val);
-                                }
+                                self.store_call_results(callee, retc, &results);
                             } else {
                                 return Err(format!(
                                     "attempted to call non-function ({:?})",
@@ -923,34 +1002,55 @@ impl VM {
                 Instruction::Return { base, count } => {
                     let frame = self.frames.pop().unwrap();
                     self.open_upvalues.retain(|&idx, _| idx < frame.base);
-                    let return_count = count as usize;
-                    let mut ret_vals = Vec::with_capacity(return_count);
-                    for i in 0..return_count {
-                        ret_vals.push(self.stack[frame.base + base as usize + i].clone());
+                    let ret_start = frame.base + base as usize;
+                    let ret_end = if count == MULTRET {
+                        self.top.max(ret_start)
+                    } else {
+                        ret_start + count as usize
+                    };
+                    let mut ret_vals = Vec::with_capacity(ret_end - ret_start);
+                    for idx in ret_start..ret_end {
+                        ret_vals.push(self.stack.get(idx).cloned().unwrap_or(Value::Nil));
                     }
                     let top_val = ret_vals.first().cloned().unwrap_or(Value::Nil);
                     if self.frames.len() == target_depth {
+                        self.returned = ret_vals;
                         return Ok(top_val);
                     }
+                    // The results land where the caller's `Call` put the callee.
                     let caller_dest = frame.base - 1;
-                    for (i, val) in ret_vals.into_iter().enumerate() {
-                        let idx = caller_dest + i;
-                        if idx >= self.stack.len() {
-                            self.stack.resize(idx + 1, Value::Nil);
-                        }
-                        self.stack[idx] = val;
+                    let wanted = if frame.want_ret == MULTRET {
+                        ret_vals.len()
+                    } else if frame.want_ret == 0 {
+                        1
+                    } else {
+                        frame.want_ret as usize
+                    };
+                    let needed = caller_dest + wanted;
+                    if needed > self.stack.len() {
+                        self.stack.resize(needed, Value::Nil);
+                    }
+                    for i in 0..wanted {
+                        // Fewer values than asked for pads with nil rather than
+                        // leaving whatever the register happened to hold.
+                        self.stack[caller_dest + i] =
+                            ret_vals.get(i).cloned().unwrap_or(Value::Nil);
+                    }
+                    if frame.want_ret == MULTRET {
+                        self.top = caller_dest + ret_vals.len();
                     }
                 }
                 Instruction::Vararg { dst, count } => {
                     let varargs = self.frames.last().unwrap().varargs.clone();
-                    let cnt = if count == 0 {
-                        varargs.len()
-                    } else {
-                        count as usize
-                    };
+                    let all = count == 0 || count == MULTRET;
+                    let cnt = if all { varargs.len() } else { count as usize };
                     for i in 0..cnt {
                         let val = varargs.get(i).cloned().unwrap_or(Value::Nil);
                         self.set_reg(dst + i as u8, val);
+                    }
+                    if all {
+                        let base = self.frames.last().unwrap().base;
+                        self.top = base + dst as usize + cnt;
                     }
                 }
             }
@@ -1570,5 +1670,88 @@ return sum";
             run_code(code);
         });
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_vm_return_forwards_every_value() {
+        let code = "local function pair()
+  return 1, 2
+end
+local function forward()
+  return pair()
+end
+local a, b = forward()
+return a + b";
+        assert_eq!(run_code(code).to_string(), "3");
+    }
+
+    #[test]
+    fn test_vm_missing_returns_pad_with_nil() {
+        // The callee returns one value where two were asked for; the second
+        // must be nil rather than whatever the register held.
+        let code = "local function one()
+  return 7
+end
+local used = 99
+local a, b = one()
+return b == nil";
+        assert_eq!(run_code(code).to_string(), "true");
+    }
+
+    #[test]
+    fn test_vm_varargs_spread_into_call_and_table() {
+        let code = "local table = require(\"@neyuki/table\")
+local function count(...)
+  local args = {...}
+  return #args
+end
+local function relay(...)
+  return count(...)
+end
+return relay(1, 2, 3) + #{table.unpack({4, 5})}";
+        assert_eq!(run_code(code).to_string(), "5");
+    }
+
+    #[test]
+    fn test_vm_block_local_captured_by_closure() {
+        // The closure's upvalue must survive the register being reused after
+        // the block it was declared in ends.
+        let code = "local function make()
+  local t = {}
+  if (true) then
+    local hidden = 11
+    t.get = function() return hidden end
+  end
+  return t
+end
+return make().get()";
+        assert_eq!(run_code(code).to_string(), "11");
+    }
+
+    #[test]
+    fn test_vm_string_gmatch() {
+        let code = "local string = require(\"@neyuki/string\")
+local parts = {}
+for piece in string.gmatch(\"a=1&b=2\", \"[^&]+\") do
+  parts[#parts + 1] = piece
+end
+return parts[1] .. \",\" .. parts[2]";
+        assert_eq!(run_code(code).to_string(), "a=1,b=2");
+    }
+
+    #[test]
+    fn test_vm_requires_bundled_http_module() {
+        // `@neyuki/http` has no Rust counterpart in the VM: it is the bundled
+        // lib/http.nyk running on the bridged native primitives.
+        let code = "local http = require(\"@neyuki/http\")
+local path, params = http.parseQuery(\"/hello?name=you\")
+return path .. \" \" .. params.name .. \" \" .. http.encode(\"a b\")";
+        assert_eq!(run_code(code).to_string(), "/hello you a%20b");
+    }
+
+    #[test]
+    fn test_vm_require_caches_modules() {
+        let code = "return require(\"@neyuki/io\") == require(\"@neyuki/io\")";
+        assert_eq!(run_code(code).to_string(), "true");
     }
 }

@@ -40,7 +40,7 @@ impl LivenessInfo {
                         block_use.insert(u);
                     }
                 }
-                if let Some(d) = inst.def_var() {
+                for d in inst.def_vars() {
                     block_def.insert(d);
                 }
             }
@@ -140,7 +140,7 @@ impl LivenessInfo {
                         .or_insert((pc, pc));
                 }
 
-                if let Some(d) = inst.def_var() {
+                for d in inst.def_vars() {
                     intervals
                         .entry(d)
                         .and_modify(|(_, end)| *end = (*end).max(pc))

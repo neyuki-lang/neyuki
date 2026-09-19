@@ -2,6 +2,69 @@
 
 use crate::compiler::ir::types::{IrBinaryOp, IrConstant, IrLabel, IrUnaryOp, IrVar};
 
+/// Where a run of values goes once it has been produced. The register VM keeps
+/// such a run on the stack rather than in named registers, so the producer and
+/// the consumer are lowered together as one instruction.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SpreadSink {
+    /// Passed as the trailing arguments of another call.
+    Call {
+        dsts: Vec<IrVar>,
+        callee: IrVar,
+        fixed_args: Vec<IrVar>,
+        retc: u8,
+    },
+    /// Appended to a table constructor's array part.
+    List { table: IrVar },
+    /// Returned from the enclosing function.
+    Return,
+}
+
+/// What produces a run of values: a call keeping all its results, or `...`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SpreadSource {
+    Call {
+        callee: IrVar,
+        args: Vec<IrVar>,
+        /// A producer for this call's own trailing arguments, as in
+        /// `f(g(h()))`, where each call passes on everything the next yields.
+        trailing: Option<Box<SpreadSource>>,
+    },
+    Vararg,
+}
+
+impl SpreadSource {
+    /// The variables read while producing the run.
+    pub fn use_vars(&self) -> Vec<IrVar> {
+        match self {
+            Self::Call {
+                callee,
+                args,
+                trailing,
+            } => {
+                let mut uses = vec![*callee];
+                uses.extend(args.iter().copied());
+                if let Some(inner) = trailing {
+                    uses.extend(inner.use_vars());
+                }
+                uses
+            }
+            Self::Vararg => Vec::new(),
+        }
+    }
+
+    /// How many consecutive registers laying this producer out needs.
+    pub fn slots(&self) -> u8 {
+        match self {
+            Self::Call { args, trailing, .. } => {
+                let nested = trailing.as_ref().map(|t| t.slots()).unwrap_or(0);
+                1u8.saturating_add(args.len() as u8).saturating_add(nested)
+            }
+            Self::Vararg => 1,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum IrInst {
     LoadConst {
@@ -60,7 +123,9 @@ pub enum IrInst {
         src: IrVar,
     },
     Call {
-        dst: Option<IrVar>,
+        /// Where the call's results go, one variable per result. A call used
+        /// as a statement has none; `local a, b = f()` has two.
+        dsts: Vec<IrVar>,
         callee: IrVar,
         args: Vec<IrVar>,
         retc: u8,
@@ -69,6 +134,11 @@ pub enum IrInst {
     Closure {
         dst: IrVar,
         proto_idx: u16,
+        /// Parallel to the nested prototype's upvalues: the parent variable
+        /// each one captures, or `None` when it comes from the parent's own
+        /// upvalues. Listing them here keeps the optimizer from dropping or
+        /// renaming a variable that only a nested function reads.
+        captures: Vec<Option<IrVar>>,
     },
     Vararg {
         dst: IrVar,
@@ -100,6 +170,12 @@ pub enum IrInst {
         cond: IrVar,
         target: IrLabel,
     },
+    /// Every value from `source` handed straight to `sink`, e.g. `f(g())`,
+    /// `{...}` or `return f()`.
+    Spread {
+        source: SpreadSource,
+        sink: SpreadSink,
+    },
     Label(IrLabel),
     // SSA Phi node: chooses incoming variable based on predecessor block label
     Phi {
@@ -123,16 +199,48 @@ impl IrInst {
             | Self::Closure { dst, .. }
             | Self::Vararg { dst, .. }
             | Self::Phi { dst, .. } => Some(*dst),
-            Self::Call { dst, .. } => *dst,
+            Self::Call { dsts, .. } => dsts.first().copied(),
             _ => None,
+        }
+    }
+
+    /// Every variable this instruction writes. `def_var` names only the single
+    /// value an expression produces; a `for` loop also writes its control and
+    /// loop variables on each iteration, and an analysis that cannot see those
+    /// will treat a use of the loop variable as loop-invariant.
+    pub fn def_vars(&self) -> Vec<IrVar> {
+        match self {
+            Self::ForPrep {
+                base,
+                limit,
+                step,
+                loop_var,
+                ..
+            } => vec![*base, *limit, *step, *loop_var],
+            Self::ForLoop { base, .. } | Self::TForLoop { base, .. } => vec![*base],
+            Self::TForCall {
+                base,
+                state,
+                ctrl,
+                vars,
+            } => {
+                let mut defs = vec![*base, *state, *ctrl];
+                defs.extend(vars.iter().copied());
+                defs
+            }
+            Self::Call { dsts, .. } => dsts.clone(),
+            Self::Spread {
+                sink: SpreadSink::Call { dsts, .. },
+                ..
+            } => dsts.clone(),
+            _ => self.def_var().into_iter().collect(),
         }
     }
 
     pub fn use_vars(&self) -> Vec<IrVar> {
         match self {
-            Self::Move { src, .. } | Self::UnOp { src, .. } | Self::AppendArray { src, .. } => {
-                vec![*src]
-            }
+            Self::Move { src, .. } | Self::UnOp { src, .. } => vec![*src],
+            Self::AppendArray { table, src } => vec![*table, *src],
             Self::BinOp { lhs, rhs, .. } => vec![*lhs, *rhs],
             Self::GetTable { table, key, .. } => vec![*table, *key],
             Self::SetTable { table, key, val } => vec![*table, *key, *val],
@@ -151,6 +259,21 @@ impl IrInst {
             Self::TForCall {
                 base, state, ctrl, ..
             } => vec![*base, *state, *ctrl],
+            Self::Closure { captures, .. } => captures.iter().flatten().copied().collect(),
+            Self::Spread { source, sink } => {
+                let mut uses = source.use_vars();
+                match sink {
+                    SpreadSink::Call {
+                        callee, fixed_args, ..
+                    } => {
+                        uses.push(*callee);
+                        uses.extend(fixed_args.iter().copied());
+                    }
+                    SpreadSink::List { table } => uses.push(*table),
+                    SpreadSink::Return => {}
+                }
+                uses
+            }
             Self::Phi { incoming, .. } => incoming.iter().map(|(_, v)| *v).collect(),
             _ => Vec::new(),
         }
@@ -160,6 +283,10 @@ impl IrInst {
         matches!(
             self,
             Self::Return(_)
+                | Self::Spread {
+                    sink: SpreadSink::Return,
+                    ..
+                }
                 | Self::Jump(_)
                 | Self::JumpIfFalse { .. }
                 | Self::ForPrep { .. }

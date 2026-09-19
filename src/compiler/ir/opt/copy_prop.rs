@@ -8,20 +8,25 @@ use crate::compiler::ir::inst::IrInst;
 use crate::compiler::ir::types::IrVar;
 
 pub fn copy_propagation(module: &mut IrModule) {
-    propagate_copies_slice(&mut module.main.instructions);
+    let captured = std::collections::HashSet::new();
+    propagate_copies_slice(&mut module.main.instructions, &captured);
 }
 
 pub fn copy_propagation_cfg(cfg: &mut ControlFlowGraph) -> bool {
+    let captured = super::captured_vars(cfg);
     let mut changed = false;
     for block in &mut cfg.blocks {
-        if propagate_copies_slice(&mut block.instructions) {
+        if propagate_copies_slice(&mut block.instructions, &captured) {
             changed = true;
         }
     }
     changed
 }
 
-fn propagate_copies_slice(instructions: &mut [IrInst]) -> bool {
+fn propagate_copies_slice(
+    instructions: &mut [IrInst],
+    captured: &std::collections::HashSet<IrVar>,
+) -> bool {
     let mut copies: HashMap<IrVar, IrVar> = HashMap::new();
     let mut modified = false;
 
@@ -106,14 +111,18 @@ fn propagate_copies_slice(instructions: &mut [IrInst]) -> bool {
         }
 
         // Invalidate copies if destination or source is overwritten
-        if let Some(def) = inst.def_var() {
+        for def in inst.def_vars() {
             copies.remove(&def);
             copies.retain(|_, src| *src != def);
         }
 
         // Register new copy
         match inst {
-            IrInst::Move { dst, src } if *dst != *src => {
+            // A captured variable's register is what the closure reads, so
+            // neither side of such a copy can be forwarded away.
+            IrInst::Move { dst, src }
+                if *dst != *src && !captured.contains(dst) && !captured.contains(src) =>
+            {
                 copies.insert(*dst, *src);
             }
             _ => {}

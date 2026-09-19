@@ -1,3 +1,8 @@
+/// Sentinel for `argc`, `retc` and `Return`'s `count` meaning "however many
+/// values are actually there", i.e. up to the VM's current stack top. Register
+/// indices never reach 255, so it cannot be mistaken for a real count.
+pub const MULTRET: u8 = u8::MAX;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Instruction {
     // Load nil into register
@@ -70,7 +75,8 @@ pub enum Instruction {
     // Unconditional relative jump
     Jump { offset: i16 },
 
-    // Function calls and returns
+    // Function calls and returns. `argc`/`retc` may be MULTRET to pass on, or
+    // keep, every value available rather than a fixed number.
     Call { callee: u8, argc: u8, retc: u8 },
     Return { base: u8, count: u8 },
     // Instantiate closure for nested proto
@@ -82,7 +88,8 @@ pub enum Instruction {
     ForPrep { base: u8, jump: i16 },
     // Numeric for loop step and test: R(base) += R(base+2); if valid, R(base+3) = R(base) and jump
     ForLoop { base: u8, jump: i16 },
-    // Batch array initialization: append `count` registers starting at `base` to `table`
+    // Batch array initialization: append `count` registers starting at `base` to
+    // `table`; MULTRET appends everything up to the stack top
     SetList { table: u8, base: u8, count: u8 },
     // Generic for loop: call R(base)(R(base+1), R(base+2)), store retc results at R(base+3)..
     TForCall { base: u8, retc: u8 },

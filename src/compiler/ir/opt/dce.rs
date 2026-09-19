@@ -22,6 +22,7 @@ pub fn is_pure_instruction(inst: &IrInst) -> bool {
 
 // CFG-aware Dead Code Elimination using backward dataflow liveness analysis
 pub fn dead_code_elimination_cfg(cfg: &mut ControlFlowGraph) -> bool {
+    let captured = super::captured_vars(cfg);
     let mut any_changed = false;
     let mut changed = true;
     let mut iterations = 0;
@@ -43,8 +44,12 @@ pub fn dead_code_elimination_cfg(cfg: &mut ControlFlowGraph) -> bool {
             let mut retained = Vec::new();
 
             for inst in block.instructions.drain(..).rev() {
+                let defs = inst.def_vars();
                 let is_dead = is_pure_instruction(&inst)
-                    && inst.def_var().is_some_and(|dst| !live_now.contains(&dst));
+                    && !defs.is_empty()
+                    && defs
+                        .iter()
+                        .all(|dst| !live_now.contains(dst) && !captured.contains(dst));
                 if is_dead {
                     // Dead instruction, eliminate it
                     changed = true;
@@ -53,7 +58,7 @@ pub fn dead_code_elimination_cfg(cfg: &mut ControlFlowGraph) -> bool {
                 }
 
                 // Update live_now backwards: remove def, add uses
-                if let Some(dst) = inst.def_var() {
+                for dst in defs {
                     live_now.remove(&dst);
                 }
                 for u in inst.use_vars() {

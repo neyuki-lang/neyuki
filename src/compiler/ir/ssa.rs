@@ -224,8 +224,11 @@ fn set_inst_def(inst: &mut IrInst, new_def: IrVar) {
         | IrInst::Phi { dst, .. } => {
             *dst = new_def;
         }
-        IrInst::Call { dst, .. } => {
-            *dst = Some(new_def);
+        IrInst::Call { dsts, .. } => {
+            // Only the first result is renamed; SSA does not model the rest.
+            if let Some(first) = dsts.first_mut() {
+                *first = new_def;
+            }
         }
         _ => {}
     }
