@@ -3,6 +3,9 @@
 use std::collections::HashSet;
 
 use crate::ast::expr::Expr;
+use crate::ast::literal::Literal;
+use crate::ast::op::{BinOp, UnOp};
+use crate::ast::pattern::AssignTarget;
 use crate::ast::stmt::Stmt;
 use crate::diagnostics::diagnostic::Diagnostic;
 use crate::diagnostics::error_code::ErrorCode;
@@ -156,7 +159,10 @@ impl<'a> SemanticAnalyzer<'a> {
 
             self.analyze_stmt(stmt);
 
-            if matches!(stmt, Stmt::Return(_) | Stmt::Break | Stmt::Continue) {
+            if matches!(
+                stmt,
+                Stmt::Return { .. } | Stmt::Break { .. } | Stmt::Continue { .. }
+            ) {
                 unreachable = true;
             }
         }
@@ -169,6 +175,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 is_const,
                 type_name,
                 initializer,
+                ..
             } => {
                 let span = self.find_ident_span(name);
                 self.check_shadowing(name, span);
@@ -220,6 +227,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 names,
                 is_const,
                 initializers,
+                ..
             } => {
                 for (i, name) in names.iter().enumerate() {
                     let span = self.find_ident_span(name);
@@ -245,15 +253,13 @@ impl<'a> SemanticAnalyzer<'a> {
                     self.analyze_expr(init);
                 }
             }
-            Stmt::Assign {
-                target,
-                value,
-                is_const: _,
-            } => {
+            Stmt::Assign { target, value, .. } => {
                 self.analyze_expr(value);
                 self.check_assign_target(target, value);
             }
-            Stmt::AssignMany { targets, values } => {
+            Stmt::AssignMany {
+                targets, values, ..
+            } => {
                 for v in values {
                     self.analyze_expr(v);
                 }
@@ -261,12 +267,12 @@ impl<'a> SemanticAnalyzer<'a> {
                     if let Some(v) = values.get(i) {
                         self.check_assign_target(t, v);
                     } else {
-                        self.check_assign_target(t, &Expr::Literal("nil".to_string()));
+                        self.check_assign_target(t, &Expr::nil());
                     }
                 }
             }
-            Stmt::Increment { target, amount: _ } => {
-                if let Expr::Variable(name) = target {
+            Stmt::Increment { target, .. } => match target {
+                AssignTarget::Variable(name) => {
                     let span = self.find_ident_span(name);
                     if let Some(sym) = self.scope_mgr.lookup_mut(name) {
                         sym.used = true;
@@ -288,13 +294,21 @@ impl<'a> SemanticAnalyzer<'a> {
                         self.diagnostics.push(diag);
                     }
                 }
-            }
+                AssignTarget::Member { object, .. } => {
+                    self.analyze_expr(object);
+                }
+                AssignTarget::Index { object, index } => {
+                    self.analyze_expr(object);
+                    self.analyze_expr(index);
+                }
+            },
             Stmt::Function {
                 name,
                 is_const,
                 params,
                 return_type,
                 body,
+                ..
             } => {
                 let ret_ty = return_type.as_deref().map(NeyukiType::parse);
                 if let Some(fn_name) = name {
@@ -358,6 +372,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 then_branch,
                 else_if_branches,
                 else_branch,
+                ..
             } => {
                 self.analyze_expr(condition);
                 self.scope_mgr.enter_scope(ScopeKind::Block);
@@ -377,13 +392,17 @@ impl<'a> SemanticAnalyzer<'a> {
                     self.check_unused_symbols();
                 }
             }
-            Stmt::While { condition, body } => {
+            Stmt::While {
+                condition, body, ..
+            } => {
                 self.analyze_expr(condition);
                 self.scope_mgr.enter_scope(ScopeKind::Loop);
                 self.analyze_block(body);
                 self.check_unused_symbols();
             }
-            Stmt::Repeat { body, condition } => {
+            Stmt::Repeat {
+                body, condition, ..
+            } => {
                 self.scope_mgr.enter_scope(ScopeKind::Loop);
                 self.analyze_block(body);
                 self.analyze_expr(condition);
@@ -395,6 +414,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 end,
                 step,
                 body,
+                ..
             } => {
                 self.analyze_expr(start);
                 self.analyze_expr(end);
@@ -415,7 +435,9 @@ impl<'a> SemanticAnalyzer<'a> {
                 self.analyze_block(body);
                 self.check_unused_symbols();
             }
-            Stmt::For { vars, source, body } => {
+            Stmt::For {
+                vars, source, body, ..
+            } => {
                 self.analyze_expr(source);
                 self.scope_mgr.enter_scope(ScopeKind::Loop);
                 for v in vars {
@@ -427,7 +449,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 self.analyze_block(body);
                 self.check_unused_symbols();
             }
-            Stmt::Return(exprs) => {
+            Stmt::Return { values: exprs, .. } => {
                 for e in exprs {
                     self.analyze_expr(e);
                 }
@@ -467,65 +489,77 @@ impl<'a> SemanticAnalyzer<'a> {
                     }
                 }
             }
-            Stmt::Break | Stmt::Continue => {}
-            Stmt::Expr(e) => {
+            Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Goto { .. } | Stmt::Label { .. } => {
+            }
+            Stmt::Expr { expr: e, .. } => {
                 self.analyze_expr(e);
             }
         }
     }
 
-    fn check_assign_target(&mut self, target: &Expr, value: &Expr) {
-        if let Expr::Variable(name) = target {
-            let span = self.find_ident_span(name);
-            let val_type = self.infer_expr_type(value);
+    fn check_assign_target(&mut self, target: &AssignTarget, value: &Expr) {
+        match target {
+            AssignTarget::Variable(name) => {
+                let span = self.find_ident_span(name);
+                let val_type = self.infer_expr_type(value);
 
-            if let Some(sym) = self.scope_mgr.lookup_mut(name) {
-                sym.assigned_count += 1;
-                sym.used = true;
-                if sym.is_const {
-                    let diag =
-                        Diagnostic::error(format!("cannot reassign to const variable '{}'", name))
-                            .with_code(ErrorCode::E0002)
-                            .with_label(span, "cannot reassign to a const variable")
-                            .with_secondary_label(sym.span, "defined as const here");
-                    self.diagnostics.push(diag);
-                } else if let Some(decl_type) = &sym.declared_type
-                    && val_type != NeyukiType::Any
-                    && !val_type.is_assignable_to(decl_type)
-                {
-                    let diag = Diagnostic::error(format!(
-                        "type mismatch in assignment to '{}': expected '{}', found '{}'",
-                        name,
-                        decl_type.display_name(),
-                        val_type.display_name()
-                    ))
-                    .with_code(ErrorCode::E0003)
-                    .with_label(
-                        span,
-                        format!(
-                            "expected '{}', found '{}'",
+                if let Some(sym) = self.scope_mgr.lookup_mut(name) {
+                    sym.assigned_count += 1;
+                    sym.used = true;
+                    if sym.is_const {
+                        let diag = Diagnostic::error(format!(
+                            "cannot reassign to const variable '{}'",
+                            name
+                        ))
+                        .with_code(ErrorCode::E0002)
+                        .with_label(span, "cannot reassign to a const variable")
+                        .with_secondary_label(sym.span, "defined as const here");
+                        self.diagnostics.push(diag);
+                    } else if let Some(decl_type) = &sym.declared_type
+                        && val_type != NeyukiType::Any
+                        && !val_type.is_assignable_to(decl_type)
+                    {
+                        let diag = Diagnostic::error(format!(
+                            "type mismatch in assignment to '{}': expected '{}', found '{}'",
+                            name,
                             decl_type.display_name(),
                             val_type.display_name()
-                        ),
-                    );
+                        ))
+                        .with_code(ErrorCode::E0003)
+                        .with_label(
+                            span,
+                            format!(
+                                "expected '{}', found '{}'",
+                                decl_type.display_name(),
+                                val_type.display_name()
+                            ),
+                        );
+                        self.diagnostics.push(diag);
+                    }
+                } else if !self.is_known_global(name) {
+                    let diag = Diagnostic::error(format!(
+                        "variable '{}' is used before declaration",
+                        name
+                    ))
+                    .with_code(ErrorCode::E0001)
+                    .with_label(span, "not found in this scope")
+                    .with_help(format!("declare 'local {} = ...' before using it", name));
                     self.diagnostics.push(diag);
                 }
-            } else if !self.is_known_global(name) {
-                let diag =
-                    Diagnostic::error(format!("variable '{}' is used before declaration", name))
-                        .with_code(ErrorCode::E0001)
-                        .with_label(span, "not found in this scope")
-                        .with_help(format!("declare 'local {} = ...' before using it", name));
-                self.diagnostics.push(diag);
             }
-        } else {
-            self.analyze_expr(target);
+            AssignTarget::Member { object, .. } => {
+                self.analyze_expr(object);
+            }
+            AssignTarget::Index { object, index } => {
+                self.analyze_expr(object);
+                self.analyze_expr(index);
+            }
         }
     }
 
     fn analyze_expr(&mut self, expr: &Expr) {
         match expr {
-            Expr::Variable(name) => {
+            Expr::Variable { name, .. } => {
                 let span = self.find_ident_span(name);
                 if !self.scope_mgr.mark_used(name) && !self.is_known_global(name) {
                     let diag =
@@ -539,13 +573,13 @@ impl<'a> SemanticAnalyzer<'a> {
                     self.diagnostics.push(diag);
                 }
             }
-            Expr::Call { callee, args } => {
+            Expr::Call { callee, args, .. } => {
                 self.analyze_expr(callee);
                 for a in args {
                     self.analyze_expr(a);
                 }
                 // Arity check if callee is a known local function
-                if let Expr::Variable(fn_name) = callee.as_ref()
+                if let Expr::Variable { name: fn_name, .. } = callee.as_ref()
                     && let Some(sym) = self.scope_mgr.lookup(fn_name)
                     && let Some(expected) = sym.num_params
                     && !sym.is_vararg
@@ -564,36 +598,32 @@ impl<'a> SemanticAnalyzer<'a> {
                     self.diagnostics.push(diag);
                 }
             }
-            Expr::MethodCall {
-                object,
-                method: _,
-                args,
-            } => {
+            Expr::MethodCall { object, args, .. } => {
                 self.analyze_expr(object);
                 for a in args {
                     self.analyze_expr(a);
                 }
             }
-            Expr::Member { object, field: _ } => {
+            Expr::Member { object, .. } => {
                 self.analyze_expr(object);
             }
-            Expr::Index { object, index } => {
+            Expr::Index { object, index, .. } => {
                 self.analyze_expr(object);
                 self.analyze_expr(index);
             }
-            Expr::Unary { op: _, expr } => {
+            Expr::Unary { expr, .. } => {
                 self.analyze_expr(expr);
             }
-            Expr::Binary { left, op: _, right } => {
+            Expr::Binary { left, right, .. } => {
                 self.analyze_expr(left);
                 self.analyze_expr(right);
             }
-            Expr::Table(entries) => {
+            Expr::Table { entries, .. } => {
                 for entry in entries {
                     self.analyze_expr(&entry.value);
                 }
             }
-            Expr::Function { params, body } => {
+            Expr::Function { params, body, .. } => {
                 self.scope_mgr.enter_scope(ScopeKind::Function);
                 for param in params {
                     let span = self.find_ident_span(&param.name);
@@ -610,36 +640,32 @@ impl<'a> SemanticAnalyzer<'a> {
                 self.analyze_block(body);
                 self.check_unused_symbols();
             }
-            Expr::Interp(parts) => {
+            Expr::Interp { parts, .. } => {
                 for part in parts {
                     if let crate::ast::expr::InterpPart::Expr(e) = part {
                         self.analyze_expr(e);
                     }
                 }
             }
-            Expr::Literal(_) | Expr::Str(_) | Expr::Vararg => {}
+            Expr::Literal { .. } | Expr::Vararg { .. } => {}
         }
     }
 
     fn infer_expr_type(&self, expr: &Expr) -> NeyukiType {
         match expr {
-            Expr::Literal(val) => {
-                if val == "nil" {
-                    NeyukiType::Nil
-                } else if val == "true" || val == "false" {
-                    NeyukiType::Boolean
-                } else {
-                    NeyukiType::Number
-                }
-            }
-            Expr::Str(_) => NeyukiType::String,
-            Expr::Table(_) => NeyukiType::Table,
+            Expr::Literal { value: val, .. } => match val {
+                Literal::Nil => NeyukiType::Nil,
+                Literal::Bool(_) => NeyukiType::Boolean,
+                Literal::Int(_) | Literal::Float(_) => NeyukiType::Number,
+                Literal::String(_) => NeyukiType::String,
+            },
+            Expr::Table { .. } => NeyukiType::Table,
             Expr::Function { .. } => NeyukiType::Function {
                 params: Vec::new(),
                 return_type: Box::new(NeyukiType::Any),
                 is_vararg: false,
             },
-            Expr::Variable(name) => {
+            Expr::Variable { name, .. } => {
                 if let Some(sym) = self.scope_mgr.lookup(name) {
                     sym.inferred_type.clone()
                 } else {
@@ -647,16 +673,20 @@ impl<'a> SemanticAnalyzer<'a> {
                 }
             }
             Expr::Unary { op, .. } => {
-                if op == "not" {
+                if *op == UnOp::Not {
                     NeyukiType::Boolean
                 } else {
                     NeyukiType::Number
                 }
             }
-            Expr::Binary { left, op, right } => match op.as_str() {
-                "==" | "!=" | "<" | "<=" | ">" | ">=" => NeyukiType::Boolean,
-                ".." => NeyukiType::String,
-                "??" => {
+            Expr::Binary {
+                left, op, right, ..
+            } => match op {
+                BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                    NeyukiType::Boolean
+                }
+                BinOp::Concat => NeyukiType::String,
+                BinOp::Coalesce => {
                     let r_ty = self.infer_expr_type(right);
                     if r_ty != NeyukiType::Any && r_ty != NeyukiType::Nil {
                         r_ty
@@ -664,7 +694,7 @@ impl<'a> SemanticAnalyzer<'a> {
                         self.infer_expr_type(left)
                     }
                 }
-                "and" | "or" => {
+                BinOp::And | BinOp::Or => {
                     let r_ty = self.infer_expr_type(right);
                     let l_ty = self.infer_expr_type(left);
                     if l_ty == r_ty { l_ty } else { NeyukiType::Any }
