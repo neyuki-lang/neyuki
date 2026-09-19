@@ -1,11 +1,31 @@
 // Abstract Syntax Tree (AST) definitions and traversal tools for Neyuki.
 
+pub mod decl;
 pub mod expr;
+pub mod fold;
+pub mod literal;
+pub mod module;
+pub mod node_id;
+pub mod op;
+pub mod pattern;
+pub mod pretty;
 pub mod span;
 pub mod stmt;
+pub mod ty;
 pub mod visitor;
+pub mod visitor_mut;
 
+pub use decl::Decl;
 pub use expr::{Expr, InterpPart, Param, TableEntry};
-pub use span::{SourceLocation, Span};
+pub use fold::{AstFolder, walk_fold_expr, walk_fold_stmt};
+pub use literal::Literal;
+pub use module::Module;
+pub use node_id::{NodeId, NodeIdGenerator};
+pub use op::{AssignOp, BinOp, CompoundOp, UnOp};
+pub use pattern::{AssignTarget, SpannedAssignTarget};
+pub use pretty::{pretty_print_expr, pretty_print_stmt, to_sexpr};
+pub use span::{SourceLocation, Span, SpanPool};
 pub use stmt::Stmt;
+pub use ty::TypeExpr;
 pub use visitor::{AstVisitor, walk_expr, walk_stmt};
+pub use visitor_mut::{AstVisitorMut, walk_expr_mut, walk_stmt_mut};

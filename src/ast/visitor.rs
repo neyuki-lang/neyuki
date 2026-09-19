@@ -28,19 +28,21 @@ pub fn walk_stmt<V: AstVisitor + ?Sized>(visitor: &mut V, stmt: &Stmt) {
             }
         }
         Stmt::Assign { target, value, .. } => {
-            visitor.visit_expr(target);
+            walk_assign_target(visitor, target);
             visitor.visit_expr(value);
         }
-        Stmt::AssignMany { targets, values } => {
+        Stmt::AssignMany {
+            targets, values, ..
+        } => {
             for t in targets {
-                visitor.visit_expr(t);
+                walk_assign_target(visitor, t);
             }
             for v in values {
                 visitor.visit_expr(v);
             }
         }
         Stmt::Increment { target, .. } => {
-            visitor.visit_expr(target);
+            walk_assign_target(visitor, target);
         }
         Stmt::Function { body, .. } => {
             for s in body {
@@ -52,6 +54,7 @@ pub fn walk_stmt<V: AstVisitor + ?Sized>(visitor: &mut V, stmt: &Stmt) {
             then_branch,
             else_if_branches,
             else_branch,
+            ..
         } => {
             visitor.visit_expr(condition);
             for s in then_branch {
@@ -91,34 +94,54 @@ pub fn walk_stmt<V: AstVisitor + ?Sized>(visitor: &mut V, stmt: &Stmt) {
                 visitor.visit_stmt(s);
             }
         }
-        Stmt::While { condition, body } => {
+        Stmt::While {
+            condition, body, ..
+        } => {
             visitor.visit_expr(condition);
             for s in body {
                 visitor.visit_stmt(s);
             }
         }
-        Stmt::Repeat { body, condition } => {
+        Stmt::Repeat {
+            body, condition, ..
+        } => {
             for s in body {
                 visitor.visit_stmt(s);
             }
             visitor.visit_expr(condition);
         }
-        Stmt::Return(exprs) => {
-            for e in exprs {
+        Stmt::Return { values, .. } => {
+            for e in values {
                 visitor.visit_expr(e);
             }
         }
-        Stmt::Expr(expr) => {
+        Stmt::Expr { expr, .. } => {
             visitor.visit_expr(expr);
         }
-        Stmt::Break | Stmt::Continue => {}
+        Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Goto { .. } | Stmt::Label { .. } => {}
+    }
+}
+
+pub fn walk_assign_target<V: AstVisitor + ?Sized>(
+    visitor: &mut V,
+    target: &crate::ast::pattern::AssignTarget,
+) {
+    match target {
+        crate::ast::pattern::AssignTarget::Variable(_) => {}
+        crate::ast::pattern::AssignTarget::Member { object, .. } => {
+            visitor.visit_expr(object);
+        }
+        crate::ast::pattern::AssignTarget::Index { object, index } => {
+            visitor.visit_expr(object);
+            visitor.visit_expr(index);
+        }
     }
 }
 
 pub fn walk_expr<V: AstVisitor + ?Sized>(visitor: &mut V, expr: &Expr) {
     match expr {
-        Expr::Literal(_) | Expr::Str(_) | Expr::Variable(_) | Expr::Vararg => {}
-        Expr::Interp(parts) => {
+        Expr::Literal { .. } | Expr::Variable { .. } | Expr::Vararg { .. } => {}
+        Expr::Interp { parts, .. } => {
             for p in parts {
                 if let crate::ast::expr::InterpPart::Expr(e) = p {
                     visitor.visit_expr(e);
@@ -128,11 +151,11 @@ pub fn walk_expr<V: AstVisitor + ?Sized>(visitor: &mut V, expr: &Expr) {
         Expr::Member { object, .. } => {
             visitor.visit_expr(object);
         }
-        Expr::Index { object, index } => {
+        Expr::Index { object, index, .. } => {
             visitor.visit_expr(object);
             visitor.visit_expr(index);
         }
-        Expr::Call { callee, args } => {
+        Expr::Call { callee, args, .. } => {
             visitor.visit_expr(callee);
             for a in args {
                 visitor.visit_expr(a);
@@ -156,7 +179,7 @@ pub fn walk_expr<V: AstVisitor + ?Sized>(visitor: &mut V, expr: &Expr) {
             visitor.visit_expr(left);
             visitor.visit_expr(right);
         }
-        Expr::Table(entries) => {
+        Expr::Table { entries, .. } => {
             for entry in entries {
                 visitor.visit_expr(&entry.value);
             }
