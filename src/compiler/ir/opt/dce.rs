@@ -2,56 +2,81 @@
 
 use std::collections::HashSet;
 
-use crate::compiler::ir::block::IrModule;
+use crate::compiler::ir::block::{ControlFlowGraph, IrModule};
 use crate::compiler::ir::inst::IrInst;
+use crate::compiler::ir::liveness::LivenessInfo;
 use crate::compiler::ir::types::IrVar;
+
+pub fn is_pure_instruction(inst: &IrInst) -> bool {
+    matches!(
+        inst,
+        IrInst::LoadConst { .. }
+            | IrInst::LoadNil { .. }
+            | IrInst::Move { .. }
+            | IrInst::BinOp { .. }
+            | IrInst::UnOp { .. }
+            | IrInst::NewTable { .. }
+            | IrInst::Phi { .. }
+    )
+}
+
+// CFG-aware Dead Code Elimination using backward dataflow liveness analysis
+pub fn dead_code_elimination_cfg(cfg: &mut ControlFlowGraph) -> bool {
+    let mut any_changed = false;
+    let mut changed = true;
+    let mut iterations = 0;
+    const MAX_PASSES: usize = 20;
+
+    while changed && iterations < MAX_PASSES {
+        changed = false;
+        iterations += 1;
+
+        let liveness = LivenessInfo::compute(cfg);
+
+        for block in &mut cfg.blocks {
+            let mut live_now = liveness
+                .blocks
+                .get(&block.label)
+                .map(|b| b.live_out.clone())
+                .unwrap_or_default();
+
+            let mut retained = Vec::new();
+
+            for inst in block.instructions.drain(..).rev() {
+                let is_dead = is_pure_instruction(&inst)
+                    && inst.def_var().is_some_and(|dst| !live_now.contains(&dst));
+                if is_dead {
+                    // Dead instruction, eliminate it
+                    changed = true;
+                    any_changed = true;
+                    continue;
+                }
+
+                // Update live_now backwards: remove def, add uses
+                if let Some(dst) = inst.def_var() {
+                    live_now.remove(&dst);
+                }
+                for u in inst.use_vars() {
+                    live_now.insert(u);
+                }
+
+                retained.push(inst);
+            }
+
+            retained.reverse();
+            block.instructions = retained;
+        }
+    }
+
+    any_changed
+}
 
 pub fn dead_code_elimination(module: &mut IrModule) {
     let mut used_vars: HashSet<IrVar> = HashSet::new();
 
     for inst in &module.main.instructions {
-        match inst {
-            IrInst::Move { src, .. } => {
-                used_vars.insert(*src);
-            }
-            IrInst::BinOp { lhs, rhs, .. } => {
-                used_vars.insert(*lhs);
-                used_vars.insert(*rhs);
-            }
-            IrInst::UnOp { src, .. } => {
-                used_vars.insert(*src);
-            }
-            IrInst::GetTable { table, key, .. } => {
-                used_vars.insert(*table);
-                used_vars.insert(*key);
-            }
-            IrInst::SetTable { table, key, val } => {
-                used_vars.insert(*table);
-                used_vars.insert(*key);
-                used_vars.insert(*val);
-            }
-            IrInst::AppendArray { table, src } => {
-                used_vars.insert(*table);
-                used_vars.insert(*src);
-            }
-            IrInst::SetGlobal { src, .. } => {
-                used_vars.insert(*src);
-            }
-            IrInst::Call { callee, args, .. } => {
-                used_vars.insert(*callee);
-                for arg in args {
-                    used_vars.insert(*arg);
-                }
-            }
-            IrInst::Return(vars) => {
-                for v in vars {
-                    used_vars.insert(*v);
-                }
-            }
-            IrInst::JumpIfFalse { cond, .. } => {
-                used_vars.insert(*cond);
-            }
-            _ => {}
+        for u in inst.use_vars() {
+            used_vars.insert(u);
         }
     }
 

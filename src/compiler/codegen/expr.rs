@@ -1,10 +1,10 @@
 // Expression and function prototype bytecode code generator.
 
-use num_bigint::BigInt;
-use std::str::FromStr;
+use num_traits::ToPrimitive;
 
 use super::Compiler;
 use super::state::FuncState;
+use crate::ast::op::{BinOp, UnOp};
 use crate::bytecode::instruction::Instruction;
 use crate::bytecode::proto::Constant;
 use crate::parser::{Expr, InterpPart, Param, Stmt};
@@ -14,39 +14,33 @@ impl Compiler {
         let dst = target.unwrap_or_else(|| self.current_mut().alloc_reg());
 
         match expr {
-            Expr::Literal(val) => match val.as_str() {
-                "nil" => {
+            Expr::Literal { value: lit, .. } => match lit {
+                crate::ast::Literal::Nil => {
                     self.current_mut().emit(Instruction::LoadNil { dst });
                 }
-                "true" => {
+                crate::ast::Literal::Bool(val) => {
                     self.current_mut()
-                        .emit(Instruction::LoadBool { dst, val: true });
+                        .emit(Instruction::LoadBool { dst, val: *val });
                 }
-                "false" => {
-                    self.current_mut()
-                        .emit(Instruction::LoadBool { dst, val: false });
-                }
-                s => {
-                    if let Ok(i) = s.parse::<i32>() {
+                crate::ast::Literal::Int(bi) => {
+                    if let Some(i) = bi.to_i32() {
                         self.current_mut()
                             .emit(Instruction::LoadInt { dst, val: i });
-                    } else if let Ok(bi) = BigInt::from_str(s) {
-                        let k = self.add_constant(Constant::Int(bi));
-                        self.current_mut().emit(Instruction::LoadK { dst, k });
-                    } else if let Ok(f) = s.parse::<f64>() {
-                        let k = self.add_constant(Constant::Float(f));
-                        self.current_mut().emit(Instruction::LoadK { dst, k });
                     } else {
-                        let k = self.add_constant(Constant::String(s.to_string()));
+                        let k = self.add_constant(Constant::Int(bi.clone()));
                         self.current_mut().emit(Instruction::LoadK { dst, k });
                     }
                 }
+                crate::ast::Literal::Float(f) => {
+                    let k = self.add_constant(Constant::Float(*f));
+                    self.current_mut().emit(Instruction::LoadK { dst, k });
+                }
+                crate::ast::Literal::String(s) => {
+                    let k = self.add_constant(Constant::String(s.clone()));
+                    self.current_mut().emit(Instruction::LoadK { dst, k });
+                }
             },
-            Expr::Str(s) => {
-                let k = self.add_constant(Constant::String(s.clone()));
-                self.current_mut().emit(Instruction::LoadK { dst, k });
-            }
-            Expr::Interp(parts) => {
+            Expr::Interp { parts, .. } => {
                 if parts.is_empty() {
                     let k = self.add_constant(Constant::String(String::new()));
                     self.current_mut().emit(Instruction::LoadK { dst, k });
@@ -107,7 +101,7 @@ impl Compiler {
                     }
                 }
             }
-            Expr::Variable(name) => {
+            Expr::Variable { name, .. } => {
                 let (is_local, reg_or_upval) = self.resolve_variable(name);
                 if is_local {
                     let local_reg = reg_or_upval.unwrap();
@@ -126,11 +120,11 @@ impl Compiler {
                         .emit(Instruction::GetGlobal { dst, name_k });
                 }
             }
-            Expr::Vararg => {
+            Expr::Vararg { .. } => {
                 self.current_mut()
                     .emit(Instruction::Vararg { dst, count: 1 });
             }
-            Expr::Member { object, field } => {
+            Expr::Member { object, field, .. } => {
                 let obj_reg = self.compile_expr(object, None);
                 let key_k = self.add_constant(Constant::String(field.clone()));
                 self.current_mut().emit(Instruction::GetTableK {
@@ -140,7 +134,7 @@ impl Compiler {
                 });
                 self.current_mut().free_reg(obj_reg);
             }
-            Expr::Index { object, index } => {
+            Expr::Index { object, index, .. } => {
                 let obj_reg = self.compile_expr(object, None);
                 let idx_reg = self.compile_expr(index, None);
                 self.current_mut().emit(Instruction::GetTable {
@@ -151,7 +145,7 @@ impl Compiler {
                 self.current_mut().free_reg(idx_reg);
                 self.current_mut().free_reg(obj_reg);
             }
-            Expr::Table(entries) => {
+            Expr::Table { entries, .. } => {
                 self.current_mut().emit(Instruction::NewTable { dst });
                 let mut array_regs = Vec::new();
                 for entry in entries {
@@ -206,22 +200,20 @@ impl Compiler {
                     }
                 }
             }
-            Expr::Unary { op, expr } => {
+            Expr::Unary { op, expr, .. } => {
                 let src = self.compile_expr(expr, None);
-                match op.as_str() {
-                    "-" => self.current_mut().emit(Instruction::Unm { dst, src }),
-                    "not" => self.current_mut().emit(Instruction::Not { dst, src }),
-                    "#" => self.current_mut().emit(Instruction::Len { dst, src }),
-                    "~" => self.current_mut().emit(Instruction::BitNot { dst, src }),
-                    _ => {
-                        self.emit_error("unsupported operator");
-                        0
-                    }
+                match op {
+                    UnOp::Neg => self.current_mut().emit(Instruction::Unm { dst, src }),
+                    UnOp::Not => self.current_mut().emit(Instruction::Not { dst, src }),
+                    UnOp::Len => self.current_mut().emit(Instruction::Len { dst, src }),
+                    UnOp::BitNot => self.current_mut().emit(Instruction::BitNot { dst, src }),
                 };
                 self.current_mut().free_reg(src);
             }
-            Expr::Binary { left, op, right } => match op.as_str() {
-                "and" => {
+            Expr::Binary {
+                left, op, right, ..
+            } => match op {
+                BinOp::And => {
                     self.compile_expr(left, Some(dst));
                     let false_jump = self.current_mut().emit(Instruction::Test {
                         reg: dst,
@@ -230,7 +222,7 @@ impl Compiler {
                     self.compile_expr(right, Some(dst));
                     self.patch_jump(false_jump);
                 }
-                "or" => {
+                BinOp::Or => {
                     self.compile_expr(left, Some(dst));
                     let false_jump = self.current_mut().emit(Instruction::Test {
                         reg: dst,
@@ -241,43 +233,43 @@ impl Compiler {
                     self.compile_expr(right, Some(dst));
                     self.patch_jump(end_jump);
                 }
-                "??" => {
+                BinOp::Coalesce => {
                     let a = self.compile_expr(left, None);
                     let b = self.compile_expr(right, None);
                     self.current_mut().emit(Instruction::Coalesce { dst, a, b });
                     self.current_mut().free_reg(b);
                     self.current_mut().free_reg(a);
                 }
-                "==" | "!=" | "<" | "<=" | ">" | ">=" => {
+                BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                     let a = self.compile_expr(left, None);
                     let b = self.compile_expr(right, None);
-                    let false_jump = match op.as_str() {
-                        "==" => self.current_mut().emit(Instruction::Eq {
+                    let false_jump = match op {
+                        BinOp::Eq => self.current_mut().emit(Instruction::Eq {
                             a,
                             b,
                             jump_if_false: 0,
                         }),
-                        "!=" => self.current_mut().emit(Instruction::Ne {
+                        BinOp::Ne => self.current_mut().emit(Instruction::Ne {
                             a,
                             b,
                             jump_if_false: 0,
                         }),
-                        "<" => self.current_mut().emit(Instruction::Lt {
+                        BinOp::Lt => self.current_mut().emit(Instruction::Lt {
                             a,
                             b,
                             jump_if_false: 0,
                         }),
-                        "<=" => self.current_mut().emit(Instruction::Le {
+                        BinOp::Le => self.current_mut().emit(Instruction::Le {
                             a,
                             b,
                             jump_if_false: 0,
                         }),
-                        ">" => self.current_mut().emit(Instruction::Gt {
+                        BinOp::Gt => self.current_mut().emit(Instruction::Gt {
                             a,
                             b,
                             jump_if_false: 0,
                         }),
-                        ">=" => self.current_mut().emit(Instruction::Ge {
+                        BinOp::Ge => self.current_mut().emit(Instruction::Ge {
                             a,
                             b,
                             jump_if_false: 0,
@@ -297,32 +289,29 @@ impl Compiler {
                 _ => {
                     let a = self.compile_expr(left, None);
                     let b = self.compile_expr(right, None);
-                    match op.as_str() {
-                        "+" => self.current_mut().emit(Instruction::Add { dst, a, b }),
-                        "-" => self.current_mut().emit(Instruction::Sub { dst, a, b }),
-                        "*" => self.current_mut().emit(Instruction::Mul { dst, a, b }),
-                        "/" => self.current_mut().emit(Instruction::Div { dst, a, b }),
-                        "//" => self.current_mut().emit(Instruction::IDiv { dst, a, b }),
-                        "%" => self.current_mut().emit(Instruction::Mod { dst, a, b }),
-                        "^" => self.current_mut().emit(Instruction::Pow { dst, a, b }),
-                        "&" => self.current_mut().emit(Instruction::BitAnd { dst, a, b }),
-                        "|" => self.current_mut().emit(Instruction::BitOr { dst, a, b }),
-                        "~" => self.current_mut().emit(Instruction::BitXor { dst, a, b }),
-                        "<<" => self.current_mut().emit(Instruction::Shl { dst, a, b }),
-                        ">>" => self.current_mut().emit(Instruction::Shr { dst, a, b }),
-                        "<<<" => self.current_mut().emit(Instruction::LShl { dst, a, b }),
-                        ">>>" => self.current_mut().emit(Instruction::LShr { dst, a, b }),
-                        ".." => self.current_mut().emit(Instruction::Concat { dst, a, b }),
-                        _ => {
-                            self.emit_error("unsupported operator");
-                            0
-                        }
+                    match op {
+                        BinOp::Add => self.current_mut().emit(Instruction::Add { dst, a, b }),
+                        BinOp::Sub => self.current_mut().emit(Instruction::Sub { dst, a, b }),
+                        BinOp::Mul => self.current_mut().emit(Instruction::Mul { dst, a, b }),
+                        BinOp::Div => self.current_mut().emit(Instruction::Div { dst, a, b }),
+                        BinOp::IDiv => self.current_mut().emit(Instruction::IDiv { dst, a, b }),
+                        BinOp::Mod => self.current_mut().emit(Instruction::Mod { dst, a, b }),
+                        BinOp::Pow => self.current_mut().emit(Instruction::Pow { dst, a, b }),
+                        BinOp::BitAnd => self.current_mut().emit(Instruction::BitAnd { dst, a, b }),
+                        BinOp::BitOr => self.current_mut().emit(Instruction::BitOr { dst, a, b }),
+                        BinOp::BitXor => self.current_mut().emit(Instruction::BitXor { dst, a, b }),
+                        BinOp::Shl => self.current_mut().emit(Instruction::Shl { dst, a, b }),
+                        BinOp::Shr => self.current_mut().emit(Instruction::Shr { dst, a, b }),
+                        BinOp::LShl => self.current_mut().emit(Instruction::LShl { dst, a, b }),
+                        BinOp::LShr => self.current_mut().emit(Instruction::LShr { dst, a, b }),
+                        BinOp::Concat => self.current_mut().emit(Instruction::Concat { dst, a, b }),
+                        _ => unreachable!(),
                     };
                     self.current_mut().free_reg(b);
                     self.current_mut().free_reg(a);
                 }
             },
-            Expr::Call { callee, args } => {
+            Expr::Call { callee, args, .. } => {
                 let func_reg = self.current_mut().alloc_reg();
                 self.compile_expr(callee, Some(func_reg));
                 let mut arg_regs = Vec::new();
@@ -349,6 +338,7 @@ impl Compiler {
                 object,
                 method,
                 args,
+                ..
             } => {
                 let func_reg = self.current_mut().alloc_reg();
                 let arg0 = self.current_mut().alloc_reg();
@@ -380,7 +370,7 @@ impl Compiler {
                 self.current_mut().free_reg(arg0);
                 self.current_mut().free_reg(func_reg);
             }
-            Expr::Function { params, body } => {
+            Expr::Function { params, body, .. } => {
                 let proto_idx = self.compile_function(None, params, body);
                 self.current_mut()
                     .emit(Instruction::Closure { dst, proto_idx });

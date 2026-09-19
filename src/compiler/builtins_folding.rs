@@ -4,6 +4,7 @@ use num_bigint::BigInt;
 use num_traits::{Signed, ToPrimitive};
 use std::str::FromStr;
 
+use crate::ast::Literal;
 use crate::parser::Expr;
 
 pub fn fold_builtin_call(callee: &Expr, args: &[Expr]) -> Option<Expr> {
@@ -16,8 +17,8 @@ pub fn fold_builtin_call_scoped(
     shadowed: &std::collections::HashSet<String>,
 ) -> Option<Expr> {
     let (mod_name, func_name) = match callee {
-        Expr::Member { object, field } => match &**object {
-            Expr::Variable(name) => {
+        Expr::Member { object, field, .. } => match &**object {
+            Expr::Variable { name, .. } => {
                 if shadowed.contains(name.as_str()) {
                     return None;
                 }
@@ -25,7 +26,7 @@ pub fn fold_builtin_call_scoped(
             }
             _ => return None,
         },
-        Expr::Variable(name) => {
+        Expr::Variable { name, .. } => {
             if shadowed.contains(name.as_str()) {
                 return None;
             }
@@ -59,21 +60,34 @@ pub fn fold_builtin_call_scoped(
 
 fn get_int(expr: &Expr) -> Option<BigInt> {
     match expr {
-        Expr::Literal(s) => BigInt::from_str(s).ok(),
+        Expr::Literal {
+            value: Literal::Int(i),
+            ..
+        } => Some(i.clone()),
         _ => None,
     }
 }
 
 fn get_float(expr: &Expr) -> Option<f64> {
     match expr {
-        Expr::Literal(s) => s.parse::<f64>().ok(),
+        Expr::Literal {
+            value: Literal::Float(f),
+            ..
+        } => Some(*f),
+        Expr::Literal {
+            value: Literal::Int(i),
+            ..
+        } => i.to_f64(),
         _ => None,
     }
 }
 
 fn get_str(expr: &Expr) -> Option<&str> {
     match expr {
-        Expr::Str(s) => Some(s.as_str()),
+        Expr::Literal {
+            value: Literal::String(s),
+            ..
+        } => Some(s.as_str()),
         _ => None,
     }
 }
@@ -81,10 +95,10 @@ fn get_str(expr: &Expr) -> Option<&str> {
 fn fold_math_abs(args: &[Expr]) -> Option<Expr> {
     let arg = args.first()?;
     if let Some(i) = get_int(arg) {
-        return Some(Expr::Literal(i.abs().to_string()));
+        return Some(Expr::int(i.abs()));
     }
     if let Some(f) = get_float(arg) {
-        return Some(Expr::Literal(f.abs().to_string()));
+        return Some(Expr::float(f.abs()));
     }
     None
 }
@@ -92,10 +106,10 @@ fn fold_math_abs(args: &[Expr]) -> Option<Expr> {
 fn fold_math_floor(args: &[Expr]) -> Option<Expr> {
     let arg = args.first()?;
     if let Some(i) = get_int(arg) {
-        return Some(Expr::Literal(i.to_string()));
+        return Some(Expr::int(i));
     }
     if let Some(f) = get_float(arg) {
-        return Some(Expr::Literal(f.floor().to_string()));
+        return Some(Expr::float(f.floor()));
     }
     None
 }
@@ -103,10 +117,10 @@ fn fold_math_floor(args: &[Expr]) -> Option<Expr> {
 fn fold_math_ceil(args: &[Expr]) -> Option<Expr> {
     let arg = args.first()?;
     if let Some(i) = get_int(arg) {
-        return Some(Expr::Literal(i.to_string()));
+        return Some(Expr::int(i));
     }
     if let Some(f) = get_float(arg) {
-        return Some(Expr::Literal(f.ceil().to_string()));
+        return Some(Expr::float(f.ceil()));
     }
     None
 }
@@ -115,7 +129,7 @@ fn fold_math_sqrt(args: &[Expr]) -> Option<Expr> {
     let arg = args.first()?;
     let f = get_float(arg)?;
     if f >= 0.0 {
-        Some(Expr::Literal(f.sqrt().to_string()))
+        Some(Expr::float(f.sqrt()))
     } else {
         None
     }
@@ -132,7 +146,7 @@ fn fold_math_min(args: &[Expr]) -> Option<Expr> {
             min_val = f;
         }
     }
-    Some(Expr::Literal(min_val.to_string()))
+    Some(Expr::float(min_val))
 }
 
 fn fold_math_max(args: &[Expr]) -> Option<Expr> {
@@ -146,7 +160,7 @@ fn fold_math_max(args: &[Expr]) -> Option<Expr> {
             max_val = f;
         }
     }
-    Some(Expr::Literal(max_val.to_string()))
+    Some(Expr::float(max_val))
 }
 
 fn fold_math_pow(args: &[Expr]) -> Option<Expr> {
@@ -154,7 +168,7 @@ fn fold_math_pow(args: &[Expr]) -> Option<Expr> {
     let b = get_float(args.get(1)?)?;
     let res = a.powf(b);
     if res.is_finite() {
-        Some(Expr::Literal(res.to_string()))
+        Some(Expr::float(res))
     } else {
         None
     }
@@ -163,25 +177,25 @@ fn fold_math_pow(args: &[Expr]) -> Option<Expr> {
 fn fold_bit_band(args: &[Expr]) -> Option<Expr> {
     let a = get_int(args.first()?)?;
     let b = get_int(args.get(1)?)?;
-    Some(Expr::Literal((a & b).to_string()))
+    Some(Expr::int(a & b))
 }
 
 fn fold_bit_bor(args: &[Expr]) -> Option<Expr> {
     let a = get_int(args.first()?)?;
     let b = get_int(args.get(1)?)?;
-    Some(Expr::Literal((a | b).to_string()))
+    Some(Expr::int(a | b))
 }
 
 fn fold_bit_bxor(args: &[Expr]) -> Option<Expr> {
     let a = get_int(args.first()?)?;
     let b = get_int(args.get(1)?)?;
-    Some(Expr::Literal((a ^ b).to_string()))
+    Some(Expr::int(a ^ b))
 }
 
 fn fold_bit_bnot(args: &[Expr]) -> Option<Expr> {
     let a = get_int(args.first()?)?;
     let u = a.to_u32().unwrap_or(0);
-    Some(Expr::Literal((!u as i64).to_string()))
+    Some(Expr::int(BigInt::from(!u as i64)))
 }
 
 fn fold_bit_lshift(args: &[Expr]) -> Option<Expr> {
@@ -189,9 +203,9 @@ fn fold_bit_lshift(args: &[Expr]) -> Option<Expr> {
     let b = get_int(args.get(1)?)?;
     let shift = b.to_usize()?;
     if shift <= 64 {
-        Some(Expr::Literal((a << shift).to_string()))
+        Some(Expr::int(a << shift))
     } else {
-        Some(Expr::Literal("0".to_string()))
+        Some(Expr::int(0))
     }
 }
 
@@ -200,37 +214,37 @@ fn fold_bit_rshift(args: &[Expr]) -> Option<Expr> {
     let b = get_int(args.get(1)?)?;
     let shift = b.to_usize()?;
     if shift <= 64 {
-        Some(Expr::Literal((a >> shift).to_string()))
+        Some(Expr::int(a >> shift))
     } else {
-        Some(Expr::Literal("0".to_string()))
+        Some(Expr::int(0))
     }
 }
 
 fn fold_string_len(args: &[Expr]) -> Option<Expr> {
     let s = get_str(args.first()?)?;
-    Some(Expr::Literal(s.len().to_string()))
+    Some(Expr::int(s.len()))
 }
 
 fn fold_string_lower(args: &[Expr]) -> Option<Expr> {
     let s = get_str(args.first()?)?;
-    Some(Expr::Str(s.to_lowercase()))
+    Some(Expr::string(s.to_lowercase()))
 }
 
 fn fold_string_upper(args: &[Expr]) -> Option<Expr> {
     let s = get_str(args.first()?)?;
-    Some(Expr::Str(s.to_uppercase()))
+    Some(Expr::string(s.to_uppercase()))
 }
 
 fn fold_builtin_int(args: &[Expr]) -> Option<Expr> {
     let arg = args.first()?;
     if let Some(i) = get_int(arg) {
-        return Some(Expr::Literal(i.to_string()));
+        return Some(Expr::int(i));
     }
     if let Some(f) = get_float(arg) {
-        return Some(Expr::Literal((f as i64).to_string()));
+        return Some(Expr::int(f as i64));
     }
     if let Some(i) = get_str(arg).and_then(|s| BigInt::from_str(s).ok()) {
-        return Some(Expr::Literal(i.to_string()));
+        return Some(Expr::int(i));
     }
     None
 }
@@ -238,44 +252,55 @@ fn fold_builtin_int(args: &[Expr]) -> Option<Expr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::NodeId;
 
     #[test]
     fn test_math_folding() {
         let abs_call = Expr::Member {
-            object: Box::new(Expr::Variable("math".to_string())),
+            object: Box::new(Expr::Variable {
+                name: "math".to_string(),
+                id: NodeId::next(),
+            }),
             field: "abs".to_string(),
+            id: NodeId::next(),
         };
-        let res = fold_builtin_call(&abs_call, &[Expr::Literal("-42".to_string())]);
-        assert_eq!(res, Some(Expr::Literal("42".to_string())));
+        let res = fold_builtin_call(&abs_call, &[Expr::int(-42)]);
+        assert_eq!(res, Some(Expr::int(42)));
 
         let sqrt_call = Expr::Member {
-            object: Box::new(Expr::Variable("math".to_string())),
+            object: Box::new(Expr::Variable {
+                name: "math".to_string(),
+                id: NodeId::next(),
+            }),
             field: "sqrt".to_string(),
+            id: NodeId::next(),
         };
-        let res = fold_builtin_call(&sqrt_call, &[Expr::Literal("16".to_string())]);
-        assert_eq!(res, Some(Expr::Literal("4".to_string())));
+        let res = fold_builtin_call(&sqrt_call, &[Expr::float(16.0)]);
+        assert_eq!(res, Some(Expr::float(4.0)));
     }
 
     #[test]
     fn test_bit_and_string_folding() {
         let band_call = Expr::Member {
-            object: Box::new(Expr::Variable("bit".to_string())),
+            object: Box::new(Expr::Variable {
+                name: "bit".to_string(),
+                id: NodeId::next(),
+            }),
             field: "band".to_string(),
+            id: NodeId::next(),
         };
-        let res = fold_builtin_call(
-            &band_call,
-            &[
-                Expr::Literal("15".to_string()),
-                Expr::Literal("7".to_string()),
-            ],
-        );
-        assert_eq!(res, Some(Expr::Literal("7".to_string())));
+        let res = fold_builtin_call(&band_call, &[Expr::int(15), Expr::int(7)]);
+        assert_eq!(res, Some(Expr::int(7)));
 
         let len_call = Expr::Member {
-            object: Box::new(Expr::Variable("string".to_string())),
+            object: Box::new(Expr::Variable {
+                name: "string".to_string(),
+                id: NodeId::next(),
+            }),
             field: "len".to_string(),
+            id: NodeId::next(),
         };
-        let res = fold_builtin_call(&len_call, &[Expr::Str("hello world".to_string())]);
-        assert_eq!(res, Some(Expr::Literal("11".to_string())));
+        let res = fold_builtin_call(&len_call, &[Expr::string("hello world")]);
+        assert_eq!(res, Some(Expr::int(11)));
     }
 }

@@ -10,6 +10,12 @@ pub struct IrVar(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct IrLabel(pub usize);
 
+impl IrLabel {
+    pub const fn new(id: usize) -> Self {
+        Self(id)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum IrConstant {
     Nil,
@@ -19,7 +25,7 @@ pub enum IrConstant {
     String(String),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum IrBinaryOp {
     Add,
     Sub,
@@ -45,7 +51,7 @@ pub enum IrBinaryOp {
     Coalesce,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum IrUnaryOp {
     Neg,
     Not,

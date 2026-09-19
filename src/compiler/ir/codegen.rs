@@ -64,6 +64,7 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
         ));
     }
     let mut proto = Proto::new(func.name.clone(), func.num_params, func.is_vararg);
+    proto.upvalues = func.upvalues.clone();
 
     let mut regs = RegAlloc::new(func.num_params);
     if regs.next_reg > proto.max_registers {
@@ -580,6 +581,22 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
                 );
                 jump_patches.push((ip, *target));
             }
+            IrInst::Phi { dst, incoming } => {
+                // Fallback if SSA deconstruction wasn't run explicitly: move first incoming value
+                if let Some((_, src)) = incoming.first() {
+                    let r_dst = regs.get(*dst, &mut proto);
+                    let r_src = regs.get(*src, &mut proto);
+                    if r_dst != r_src {
+                        proto.emit(
+                            Instruction::Move {
+                                dst: r_dst,
+                                src: r_src,
+                            },
+                            1,
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -601,7 +618,14 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
 
     // Lower nested function prototypes
     for child in &func.protos {
-        let child_proto = ir_function_to_proto(child, depth + 1)?;
+        let mut child_proto = ir_function_to_proto(child, depth + 1)?;
+        for updesc in &mut child_proto.upvalues {
+            if updesc.in_stack {
+                let parent_var = IrVar(updesc.index as u32);
+                let parent_reg = regs.get(parent_var, &mut proto);
+                updesc.index = parent_reg;
+            }
+        }
         proto.protos.push(child_proto);
     }
 

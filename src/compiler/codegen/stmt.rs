@@ -2,6 +2,8 @@
 
 use super::Compiler;
 use super::state::LoopContext;
+use crate::ast::node_id::NodeId;
+use crate::ast::pattern::AssignTarget;
 use crate::bytecode::instruction::Instruction;
 use crate::bytecode::proto::Constant;
 use crate::parser::{Expr, Stmt};
@@ -26,7 +28,7 @@ impl Compiler {
                 ..
             } => {
                 if initializers.len() == 1 && matches!(initializers[0], Expr::Call { .. }) {
-                    let Expr::Call { callee, args } = &initializers[0] else {
+                    let Expr::Call { callee, args, .. } = &initializers[0] else {
                         unreachable!()
                     };
                     let func_reg = self.current_mut().alloc_reg();
@@ -77,9 +79,11 @@ impl Compiler {
                 self.compile_assign(target, val_reg);
                 self.current_mut().free_reg(val_reg);
             }
-            Stmt::AssignMany { targets, values } => {
+            Stmt::AssignMany {
+                targets, values, ..
+            } => {
                 if values.len() == 1 && matches!(values[0], Expr::Call { .. }) {
-                    let Expr::Call { callee, args } = &values[0] else {
+                    let Expr::Call { callee, args, .. } = &values[0] else {
                         unreachable!()
                     };
                     let func_reg = self.current_mut().alloc_reg();
@@ -111,6 +115,7 @@ impl Compiler {
                         object,
                         method,
                         args,
+                        ..
                     } = &values[0]
                     else {
                         unreachable!()
@@ -166,8 +171,9 @@ impl Compiler {
                     }
                 }
             }
-            Stmt::Increment { target, amount } => {
-                let current = self.compile_expr(target, None);
+            Stmt::Increment { target, amount, .. } => {
+                let target_expr = target.to_expr();
+                let current = self.compile_expr(&target_expr, None);
                 let amount_reg = self.current_mut().alloc_reg();
                 self.current_mut().emit(Instruction::LoadInt {
                     dst: amount_reg,
@@ -196,14 +202,18 @@ impl Compiler {
                 if let Some(func_name) = name {
                     if func_name.contains('.') {
                         let parts: Vec<&str> = func_name.split('.').collect();
-                        let mut target = Expr::Variable(parts[0].to_string());
+                        let mut target = Expr::Variable {
+                            name: parts[0].to_string(),
+                            id: NodeId::next(),
+                        };
                         for field in &parts[1..parts.len() - 1] {
                             target = Expr::Member {
                                 object: Box::new(target),
                                 field: field.to_string(),
+                                id: NodeId::next(),
                             };
                         }
-                        let final_target = Expr::Member {
+                        let final_target = AssignTarget::Member {
                             object: Box::new(target),
                             field: parts.last().unwrap().to_string(),
                         };
@@ -237,6 +247,7 @@ impl Compiler {
                 then_branch,
                 else_if_branches,
                 else_branch,
+                ..
             } => {
                 let mut end_jumps = Vec::new();
 
@@ -280,7 +291,9 @@ impl Compiler {
                     self.patch_jump(j);
                 }
             }
-            Stmt::While { condition, body } => {
+            Stmt::While {
+                condition, body, ..
+            } => {
                 let loop_start = self.current().proto.instructions.len();
                 self.current_mut().loops.push(LoopContext {
                     _start_ip: loop_start,
@@ -321,7 +334,9 @@ impl Compiler {
                     }
                 }
             }
-            Stmt::Repeat { body, condition } => {
+            Stmt::Repeat {
+                body, condition, ..
+            } => {
                 let loop_start = self.current().proto.instructions.len();
                 self.current_mut().loops.push(LoopContext {
                     _start_ip: loop_start,
@@ -361,6 +376,7 @@ impl Compiler {
                 end,
                 step,
                 body,
+                ..
             } => {
                 self.current_mut().enter_scope();
                 let base = self.current_mut().alloc_reg();
@@ -423,10 +439,12 @@ impl Compiler {
 
                 self.current_mut().exit_scope();
             }
-            Stmt::For { vars, source, body } => {
+            Stmt::For {
+                vars, source, body, ..
+            } => {
                 self.current_mut().enter_scope();
                 let (base, state_reg, ctrl_reg) = match source {
-                    Expr::Call { callee, args } => {
+                    Expr::Call { callee, args, .. } => {
                         let func_reg = self.alloc_reg();
                         self.compile_expr(callee, Some(func_reg));
                         let mut arg_regs = Vec::new();
@@ -545,7 +563,7 @@ impl Compiler {
                 self.current_mut().free_reg(base);
                 self.current_mut().exit_scope();
             }
-            Stmt::Return(exprs) => {
+            Stmt::Return { values: exprs, .. } => {
                 if exprs.is_empty() {
                     let r = self.current_mut().alloc_reg();
                     self.current_mut().emit(Instruction::LoadNil { dst: r });
@@ -570,28 +588,29 @@ impl Compiler {
                     });
                 }
             }
-            Stmt::Break => {
+            Stmt::Break { .. } => {
                 let jump_ip = self.current_mut().emit(Instruction::Jump { offset: 0 });
                 if let Some(lp) = self.current_mut().loops.last_mut() {
                     lp.break_jumps.push(jump_ip);
                 }
             }
-            Stmt::Continue => {
+            Stmt::Continue { .. } => {
                 let jump_ip = self.current_mut().emit(Instruction::Jump { offset: 0 });
                 if let Some(lp) = self.current_mut().loops.last_mut() {
                     lp.continue_ips.push(jump_ip);
                 }
             }
-            Stmt::Expr(expr) => {
+            Stmt::Expr { expr, .. } => {
                 let r = self.compile_expr(expr, None);
                 self.current_mut().free_reg(r);
             }
+            Stmt::Goto { .. } | Stmt::Label { .. } => {}
         }
     }
 
-    pub(crate) fn compile_assign(&mut self, target: &Expr, val_reg: u8) {
+    pub(crate) fn compile_assign(&mut self, target: &AssignTarget, val_reg: u8) {
         match target {
-            Expr::Variable(name) => {
+            AssignTarget::Variable(name) => {
                 let (is_local, reg_or_upval) = self.resolve_variable(name);
                 if is_local {
                     let local_reg = reg_or_upval.unwrap();
@@ -612,7 +631,7 @@ impl Compiler {
                     });
                 }
             }
-            Expr::Member { object, field } => {
+            AssignTarget::Member { object, field } => {
                 let obj_reg = self.compile_expr(object, None);
                 let key_k = self.add_constant(Constant::String(field.clone()));
                 self.current_mut().emit(Instruction::SetTableK {
@@ -622,7 +641,7 @@ impl Compiler {
                 });
                 self.current_mut().free_reg(obj_reg);
             }
-            Expr::Index { object, index } => {
+            AssignTarget::Index { object, index } => {
                 let obj_reg = self.compile_expr(object, None);
                 let idx_reg = self.compile_expr(index, None);
                 self.current_mut().emit(Instruction::SetTable {
@@ -632,9 +651,6 @@ impl Compiler {
                 });
                 self.current_mut().free_reg(idx_reg);
                 self.current_mut().free_reg(obj_reg);
-            }
-            _ => {
-                self.emit_error("invalid assignment target in bytecode compiler");
             }
         }
     }

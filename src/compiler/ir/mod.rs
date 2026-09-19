@@ -6,20 +6,35 @@
 
 pub mod block;
 pub mod builder;
+pub mod cfg_builder;
 pub mod codegen;
+pub mod dom;
 pub mod inst;
+pub mod liveness;
 pub mod opt;
+pub mod pretty;
+pub mod regalloc;
+pub mod ssa;
 pub mod types;
+pub mod verify;
 
-#[allow(unused_imports)]
 pub use block::{BasicBlock, ControlFlowGraph, IrFunction, IrModule};
-#[allow(unused_imports)]
 pub use builder::{IrBuilder, ast_to_ir};
+pub use cfg_builder::build_cfg;
 pub use codegen::ir_to_bytecode;
+pub use dom::DominatorTree;
 pub use inst::IrInst;
-pub use opt::{constant_propagation, dead_code_elimination};
-#[allow(unused_imports)]
+pub use liveness::{LiveInterval, LivenessInfo};
+pub use opt::{
+    common_subexpression_elimination, common_subexpression_elimination_cfg, constant_propagation,
+    copy_propagation, copy_propagation_cfg, dead_code_elimination, dead_code_elimination_cfg,
+    inline_functions, loop_invariant_code_motion, optimize_cfg, simplify_cfg,
+};
+pub use pretty::{format_inst, print_cfg, print_function, print_module};
+pub use regalloc::{RegisterAllocation, allocate_registers};
+pub use ssa::{construct_ssa, destruct_ssa, ssa_constant_propagation};
 pub use types::{IrBinaryOp, IrConstant, IrLabel, IrUnaryOp, IrVar};
+pub use verify::{verify_cfg, verify_function, verify_module};
 
 #[cfg(test)]
 mod tests {
@@ -128,7 +143,6 @@ mod tests {
 
     #[test]
     fn test_ir_depth_limit_rejected() {
-        // Construct an IrModule with 65 levels of nested functions
         let mut curr = IrFunction::new(Some("level_65".to_string()), 0, false);
         for lvl in (0..65).rev() {
             let mut parent = IrFunction::new(Some(format!("level_{}", lvl)), 0, false);
@@ -163,5 +177,151 @@ mod tests {
         let mut vm = VM::new();
         let val = vm.execute(proto).expect("exec failed");
         assert_eq!(val.to_string(), "15");
+    }
+
+    #[test]
+    fn test_cfg_construction_and_dom_tree() {
+        let code = "local x = 10\nif x > 5 then x = 20 else x = 30 end\nreturn x";
+        let stmts = compile_source(code).expect("syntax error");
+        let ir_module = ast_to_ir(&stmts);
+        let cfg = build_cfg(&ir_module.main.instructions);
+
+        assert!(cfg.blocks.len() >= 3);
+        let dom = DominatorTree::build(&cfg);
+        // Entry dominates entry
+        assert!(dom.dominates(cfg.entry_label, cfg.entry_label));
+
+        let liveness = LivenessInfo::compute(&cfg);
+        let intervals = liveness.compute_live_intervals(&cfg);
+        assert!(!intervals.is_empty());
+
+        let reg_alloc = allocate_registers(&cfg, 0).expect("regalloc should succeed");
+        assert!(reg_alloc.max_registers < 255);
+    }
+
+    #[test]
+    fn test_ssa_construction_and_destruction() {
+        let code = "local x = 1\nif x == 1 then x = 2 else x = 3 end\nreturn x";
+        let stmts = compile_source(code).expect("syntax error");
+        let ir_module = ast_to_ir(&stmts);
+        let mut cfg = build_cfg(&ir_module.main.instructions);
+        let dom = DominatorTree::build(&cfg);
+
+        construct_ssa(&mut cfg, &dom);
+        destruct_ssa(&mut cfg);
+        let verify_result = verify_cfg(&cfg, 0);
+        assert!(
+            verify_result.is_ok(),
+            "CFG verification failed: {:?}",
+            verify_result
+        );
+    }
+
+    #[test]
+    fn test_cfg_optimizations() {
+        let code = "local a = 10\nlocal b = 20\nlocal c = a + b\nlocal d = a + b\nreturn c";
+        let stmts = compile_source(code).expect("syntax error");
+        let ir_module = ast_to_ir(&stmts);
+        let mut cfg = build_cfg(&ir_module.main.instructions);
+
+        common_subexpression_elimination_cfg(&mut cfg);
+        copy_propagation_cfg(&mut cfg);
+        dead_code_elimination_cfg(&mut cfg);
+        simplify_cfg(&mut cfg);
+
+        let pretty_out = {
+            let mut out = String::new();
+            print_cfg(&cfg, 0, &mut out);
+            out
+        };
+        assert!(!pretty_out.is_empty());
+    }
+
+    #[test]
+    fn test_ssa_constant_propagation() {
+        let code = "local x = 1\nif x == 1 then x = 42 else x = 42 end\nreturn x";
+        let stmts = compile_source(code).expect("syntax error");
+        let ir_module = ast_to_ir(&stmts);
+        let mut cfg = build_cfg(&ir_module.main.instructions);
+        let dom = DominatorTree::build(&cfg);
+
+        construct_ssa(&mut cfg, &dom);
+        let folded = ssa_constant_propagation(&mut cfg);
+        assert!(
+            folded,
+            "SSA constant propagation should have folded the phi"
+        );
+        destruct_ssa(&mut cfg);
+
+        let proto = ir_to_bytecode(&IrModule {
+            main: IrFunction {
+                name: Some("main".to_string()),
+                params: Vec::new(),
+                num_params: 0,
+                is_vararg: false,
+                instructions: cfg.to_flat_instructions(),
+                protos: Vec::new(),
+                upvalues: Vec::new(),
+                cfg: Some(cfg),
+            },
+        })
+        .expect("codegen failed");
+
+        let mut vm = VM::new();
+        let val = vm.execute(proto).expect("execution failed");
+        assert_eq!(val.to_string(), "42");
+    }
+
+    #[test]
+    fn test_cfg_fixpoint_optimization_driver() {
+        let code = "local a = 10\nlocal b = 20\nlocal c = a + b\nlocal d = a + b\nlocal e = d\nreturn c + e";
+        let stmts = compile_source(code).expect("syntax error");
+        let ir_module = ast_to_ir(&stmts);
+        let mut cfg = build_cfg(&ir_module.main.instructions);
+
+        optimize_cfg(&mut cfg);
+        let verify_result = verify_cfg(&cfg, 0);
+        assert!(verify_result.is_ok());
+    }
+
+    #[test]
+    fn test_complex_control_flow_3_level_loops_and_closures() {
+        let code = r#"
+            local total = 0
+            for i = 1, 3 do
+                for j = 1, 3 do
+                    local k = 1
+                    while k <= 2 do
+                        if k == 2 then
+                            break
+                        end
+                        local function add_k(val)
+                            return val + k + i + j
+                        end
+                        total = add_k(total)
+                        k = k + 1
+                    end
+                end
+            end
+            return total
+        "#;
+        let stmts = compile_source(code).expect("syntax error");
+        let ir_module = ast_to_ir(&stmts);
+        let mut cfg = build_cfg(&ir_module.main.instructions);
+
+        optimize_cfg(&mut cfg);
+        let verify_result = verify_cfg(&cfg, 0);
+        assert!(
+            verify_result.is_ok(),
+            "CFG verification failed: {:?}",
+            verify_result.err()
+        );
+
+        let proto = ir_to_bytecode(&ir_module).expect("ir codegen failed");
+        let mut vm = VM::new();
+        let val = vm.execute(proto).expect("execution failed");
+        // i: 1..3, j: 1..3 -> 9 iterations. In each: k=1, add_k(val) = val + 1 + i + j.
+        // sum(1 + i + j) for i in 1..3, j in 1..3 = 9*1 + 3*(1+2+3) + 3*(1+2+3) = 9 + 18 + 18 = 45.
+        assert_eq!(val.to_string(), "45");
     }
 }

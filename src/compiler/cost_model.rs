@@ -131,14 +131,17 @@ impl CostModel {
                 initializer.as_ref().map_or(1, |e| self.expr_cost(e) + 1)
             }
             Stmt::Assign { value, .. } => self.expr_cost(value) + 1,
-            Stmt::AssignMany { targets, values } => (targets.len() + values.len()) as u32 * 2,
+            Stmt::AssignMany {
+                targets, values, ..
+            } => (targets.len() + values.len()) as u32 * 2,
             Stmt::Increment { .. } => 2,
-            Stmt::Expr(e) => self.expr_cost(e),
+            Stmt::Expr { expr: e, .. } => self.expr_cost(e),
             Stmt::If {
                 condition,
                 then_branch,
                 else_if_branches,
                 else_branch,
+                ..
             } => {
                 let mut cost = self.expr_cost(condition) + self.branch_cost;
                 for s in then_branch {
@@ -157,14 +160,18 @@ impl CostModel {
                 }
                 cost
             }
-            Stmt::While { condition, body } => {
+            Stmt::While {
+                condition, body, ..
+            } => {
                 let mut cost = self.expr_cost(condition) + self.branch_cost * 2;
                 for s in body {
                     cost = cost.saturating_add(self.stmt_cost(s));
                 }
                 cost * 3 // Weighted higher for loop bodies
             }
-            Stmt::Repeat { body, condition } => {
+            Stmt::Repeat {
+                body, condition, ..
+            } => {
                 let mut cost = self.expr_cost(condition) + self.branch_cost;
                 for s in body {
                     cost = cost.saturating_add(self.stmt_cost(s));
@@ -185,14 +192,16 @@ impl CostModel {
                 }
                 cost
             }
-            Stmt::Return(exprs) => {
+            Stmt::Return { values: exprs, .. } => {
                 let mut cost = self.branch_cost;
                 for e in exprs {
                     cost = cost.saturating_add(self.expr_cost(e));
                 }
                 cost
             }
-            Stmt::Break | Stmt::Continue => self.branch_cost,
+            Stmt::Break { .. } | Stmt::Continue { .. } => self.branch_cost,
+            Stmt::Goto { .. } => self.branch_cost,
+            Stmt::Label { .. } => 0,
             Stmt::LocalMany { initializers, .. } => {
                 let mut cost = 2u32;
                 for e in initializers {
@@ -205,14 +214,14 @@ impl CostModel {
 
     pub fn expr_cost(&self, expr: &Expr) -> u32 {
         match expr {
-            Expr::Literal(_) | Expr::Str(_) | Expr::Variable(_) | Expr::Vararg => {
+            Expr::Literal { .. } | Expr::Variable { .. } | Expr::Vararg { .. } => {
                 self.const_load_cost
             }
             Expr::Binary { left, right, .. } => {
                 self.expr_cost(left) + self.expr_cost(right) + self.arithmetic_cost
             }
             Expr::Unary { expr, .. } => self.expr_cost(expr) + self.arithmetic_cost,
-            Expr::Call { callee, args } => {
+            Expr::Call { callee, args, .. } => {
                 let mut cost = self.expr_cost(callee) + self.call_cost;
                 for arg in args {
                     cost = cost.saturating_add(self.expr_cost(arg));
@@ -227,10 +236,10 @@ impl CostModel {
                 cost
             }
             Expr::Member { object, .. } => self.expr_cost(object) + self.table_access_cost,
-            Expr::Index { object, index } => {
+            Expr::Index { object, index, .. } => {
                 self.expr_cost(object) + self.expr_cost(index) + self.table_access_cost
             }
-            Expr::Table(entries) => {
+            Expr::Table { entries, .. } => {
                 let mut cost = self.closure_alloc_cost;
                 for entry in entries {
                     cost = cost.saturating_add(self.expr_cost(&entry.value));
@@ -244,7 +253,7 @@ impl CostModel {
                 }
                 cost
             }
-            Expr::Interp(parts) => parts.len() as u32 * 3,
+            Expr::Interp { parts, .. } => parts.len() as u32 * 3,
         }
     }
 }

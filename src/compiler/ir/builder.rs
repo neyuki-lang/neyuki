@@ -4,6 +4,8 @@ use num_bigint::BigInt;
 use std::collections::HashMap;
 use std::str::FromStr;
 
+use crate::ast::op::{BinOp, UnOp};
+use crate::ast::pattern::AssignTarget;
 use crate::ast::{Expr, InterpPart, Param, Stmt};
 use crate::compiler::ir::block::{IrFunction, IrModule};
 use crate::compiler::ir::inst::IrInst;
@@ -14,6 +16,8 @@ struct IrLoopContext {
     continue_label: IrLabel,
 }
 
+use crate::bytecode::proto::UpvalueDesc;
+
 pub struct IrBuilder {
     next_var: u32,
     next_label: usize,
@@ -21,6 +25,9 @@ pub struct IrBuilder {
     scopes: Vec<HashMap<String, IrVar>>,
     loops: Vec<IrLoopContext>,
     child_protos: Vec<IrFunction>,
+    named_labels: HashMap<String, IrLabel>,
+    parent_scopes: Vec<Vec<HashMap<String, IrVar>>>,
+    upvalues: Vec<UpvalueDesc>,
 }
 
 impl IrBuilder {
@@ -32,6 +39,19 @@ impl IrBuilder {
             scopes: vec![HashMap::new()],
             loops: Vec::new(),
             child_protos: Vec::new(),
+            named_labels: HashMap::new(),
+            parent_scopes: Vec::new(),
+            upvalues: Vec::new(),
+        }
+    }
+
+    pub fn get_or_alloc_label(&mut self, name: &str) -> IrLabel {
+        if let Some(&lbl) = self.named_labels.get(name) {
+            lbl
+        } else {
+            let lbl = self.alloc_label();
+            self.named_labels.insert(name.to_string(), lbl);
+            lbl
         }
     }
 
@@ -70,6 +90,58 @@ impl IrBuilder {
         None
     }
 
+    pub fn resolve_variable(&mut self, name: &str) -> (bool, Option<u8>, Option<IrVar>) {
+        if let Some(var) = self.resolve_local(name) {
+            return (true, None, Some(var));
+        }
+        if let Some(upval_idx) = self.resolve_upvalue(name) {
+            return (false, Some(upval_idx), None);
+        }
+        (false, None, None)
+    }
+
+    fn resolve_upvalue(&mut self, name: &str) -> Option<u8> {
+        let parent_frame = self.parent_scopes.last()?;
+        for scope in parent_frame.iter().rev() {
+            if let Some(&var) = scope.get(name) {
+                for (i, up) in self.upvalues.iter().enumerate() {
+                    if up.in_stack && up.index == var.0 as u8 {
+                        return Some(i as u8);
+                    }
+                }
+                let idx = self.upvalues.len() as u8;
+                self.upvalues.push(UpvalueDesc {
+                    in_stack: true,
+                    index: var.0 as u8,
+                });
+                return Some(idx);
+            }
+        }
+
+        let num_parents = self.parent_scopes.len();
+        if num_parents > 1 {
+            for p in (0..num_parents - 1).rev() {
+                for scope in self.parent_scopes[p].iter().rev() {
+                    if let Some(&var) = scope.get(name) {
+                        for (i, up) in self.upvalues.iter().enumerate() {
+                            if !up.in_stack && up.index == var.0 as u8 {
+                                return Some(i as u8);
+                            }
+                        }
+                        let idx = self.upvalues.len() as u8;
+                        self.upvalues.push(UpvalueDesc {
+                            in_stack: false,
+                            index: var.0 as u8,
+                        });
+                        return Some(idx);
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
     pub fn emit(&mut self, inst: IrInst) {
         self.instructions.push(inst);
     }
@@ -78,53 +150,36 @@ impl IrBuilder {
         let dst = target.unwrap_or_else(|| self.alloc_var());
 
         match expr {
-            Expr::Literal(s) => match s.as_str() {
-                "nil" => {
+            Expr::Literal { value: lit, .. } => match lit {
+                crate::ast::Literal::Nil => {
                     self.emit(IrInst::LoadNil { dst });
                 }
-                "true" => {
+                crate::ast::Literal::Bool(b) => {
                     self.emit(IrInst::LoadConst {
                         dst,
-                        val: IrConstant::Bool(true),
+                        val: IrConstant::Bool(*b),
                     });
                 }
-                "false" => {
+                crate::ast::Literal::Int(bi) => {
                     self.emit(IrInst::LoadConst {
                         dst,
-                        val: IrConstant::Bool(false),
+                        val: IrConstant::Int(bi.clone()),
                     });
                 }
-                lit => {
-                    if let Ok(i) = lit.parse::<i64>() {
-                        self.emit(IrInst::LoadConst {
-                            dst,
-                            val: IrConstant::Int(BigInt::from(i)),
-                        });
-                    } else if let Ok(bi) = BigInt::from_str(lit) {
-                        self.emit(IrInst::LoadConst {
-                            dst,
-                            val: IrConstant::Int(bi),
-                        });
-                    } else if let Ok(f) = lit.parse::<f64>() {
-                        self.emit(IrInst::LoadConst {
-                            dst,
-                            val: IrConstant::Float(f),
-                        });
-                    } else {
-                        self.emit(IrInst::LoadConst {
-                            dst,
-                            val: IrConstant::String(lit.to_string()),
-                        });
-                    }
+                crate::ast::Literal::Float(f) => {
+                    self.emit(IrInst::LoadConst {
+                        dst,
+                        val: IrConstant::Float(*f),
+                    });
+                }
+                crate::ast::Literal::String(s) => {
+                    self.emit(IrInst::LoadConst {
+                        dst,
+                        val: IrConstant::String(s.clone()),
+                    });
                 }
             },
-            Expr::Str(s) => {
-                self.emit(IrInst::LoadConst {
-                    dst,
-                    val: IrConstant::String(s.clone()),
-                });
-            }
-            Expr::Interp(parts) => {
+            Expr::Interp { parts, .. } => {
                 if parts.is_empty() {
                     self.emit(IrInst::LoadConst {
                         dst,
@@ -162,14 +217,20 @@ impl IrBuilder {
                     }
                 }
             }
-            Expr::Vararg => {
+            Expr::Vararg { .. } => {
                 self.emit(IrInst::Vararg { dst, count: 1 });
             }
-            Expr::Variable(name) => {
-                if let Some(local_var) = self.resolve_local(name) {
+            Expr::Variable { name, .. } => {
+                let (is_local, upval, local_var) = self.resolve_variable(name);
+                if is_local {
                     self.emit(IrInst::Move {
                         dst,
-                        src: local_var,
+                        src: local_var.unwrap(),
+                    });
+                } else if let Some(upval_idx) = upval {
+                    self.emit(IrInst::GetUpval {
+                        dst,
+                        index: upval_idx,
                     });
                 } else {
                     self.emit(IrInst::GetGlobal {
@@ -178,7 +239,9 @@ impl IrBuilder {
                     });
                 }
             }
-            Expr::Binary { left, op, right } if op == "and" => {
+            Expr::Binary {
+                left, op, right, ..
+            } if *op == BinOp::And => {
                 let l_var = self.compile_expr(left, Some(dst));
                 if l_var != dst {
                     self.emit(IrInst::Move { dst, src: l_var });
@@ -194,7 +257,9 @@ impl IrBuilder {
                 }
                 self.emit(IrInst::Label(end_label));
             }
-            Expr::Binary { left, op, right } if op == "or" => {
+            Expr::Binary {
+                left, op, right, ..
+            } if *op == BinOp::Or => {
                 let l_var = self.compile_expr(left, Some(dst));
                 if l_var != dst {
                     self.emit(IrInst::Move { dst, src: l_var });
@@ -213,32 +278,34 @@ impl IrBuilder {
                 }
                 self.emit(IrInst::Label(end_label));
             }
-            Expr::Binary { left, op, right } => {
+            Expr::Binary {
+                left, op, right, ..
+            } => {
                 let lhs = self.compile_expr(left, None);
                 let rhs = self.compile_expr(right, None);
-                let ir_op = match op.as_str() {
-                    "+" => IrBinaryOp::Add,
-                    "-" => IrBinaryOp::Sub,
-                    "*" => IrBinaryOp::Mul,
-                    "/" => IrBinaryOp::Div,
-                    "//" => IrBinaryOp::IDiv,
-                    "%" => IrBinaryOp::Mod,
-                    "^" => IrBinaryOp::Pow,
-                    "&" => IrBinaryOp::BitAnd,
-                    "|" => IrBinaryOp::BitOr,
-                    "~" => IrBinaryOp::BitXor,
-                    "<<" => IrBinaryOp::Shl,
-                    ">>" => IrBinaryOp::Shr,
-                    "<<<" => IrBinaryOp::LShl,
-                    ">>>" => IrBinaryOp::LShr,
-                    ".." => IrBinaryOp::Concat,
-                    "==" => IrBinaryOp::Eq,
-                    "!=" => IrBinaryOp::Ne,
-                    "<" => IrBinaryOp::Lt,
-                    "<=" => IrBinaryOp::Le,
-                    ">" => IrBinaryOp::Gt,
-                    ">=" => IrBinaryOp::Ge,
-                    "??" => IrBinaryOp::Coalesce,
+                let ir_op = match op {
+                    BinOp::Add => IrBinaryOp::Add,
+                    BinOp::Sub => IrBinaryOp::Sub,
+                    BinOp::Mul => IrBinaryOp::Mul,
+                    BinOp::Div => IrBinaryOp::Div,
+                    BinOp::IDiv => IrBinaryOp::IDiv,
+                    BinOp::Mod => IrBinaryOp::Mod,
+                    BinOp::Pow => IrBinaryOp::Pow,
+                    BinOp::BitAnd => IrBinaryOp::BitAnd,
+                    BinOp::BitOr => IrBinaryOp::BitOr,
+                    BinOp::BitXor => IrBinaryOp::BitXor,
+                    BinOp::Shl => IrBinaryOp::Shl,
+                    BinOp::Shr => IrBinaryOp::Shr,
+                    BinOp::LShl => IrBinaryOp::LShl,
+                    BinOp::LShr => IrBinaryOp::LShr,
+                    BinOp::Concat => IrBinaryOp::Concat,
+                    BinOp::Eq => IrBinaryOp::Eq,
+                    BinOp::Ne => IrBinaryOp::Ne,
+                    BinOp::Lt => IrBinaryOp::Lt,
+                    BinOp::Le => IrBinaryOp::Le,
+                    BinOp::Gt => IrBinaryOp::Gt,
+                    BinOp::Ge => IrBinaryOp::Ge,
+                    BinOp::Coalesce => IrBinaryOp::Coalesce,
                     _ => IrBinaryOp::Add,
                 };
                 self.emit(IrInst::BinOp {
@@ -248,14 +315,13 @@ impl IrBuilder {
                     rhs,
                 });
             }
-            Expr::Unary { op, expr } => {
+            Expr::Unary { op, expr, .. } => {
                 let src = self.compile_expr(expr, None);
-                let ir_op = match op.as_str() {
-                    "-" => IrUnaryOp::Neg,
-                    "not" => IrUnaryOp::Not,
-                    "#" => IrUnaryOp::Len,
-                    "~" => IrUnaryOp::BitNot,
-                    _ => IrUnaryOp::Neg,
+                let ir_op = match op {
+                    UnOp::Neg => IrUnaryOp::Neg,
+                    UnOp::Not => IrUnaryOp::Not,
+                    UnOp::Len => IrUnaryOp::Len,
+                    UnOp::BitNot => IrUnaryOp::BitNot,
                 };
                 self.emit(IrInst::UnOp {
                     dst,
@@ -263,7 +329,7 @@ impl IrBuilder {
                     src,
                 });
             }
-            Expr::Call { callee, args } => {
+            Expr::Call { callee, args, .. } => {
                 let callee_var = self.compile_expr(callee, None);
                 let mut arg_vars = Vec::new();
                 for arg in args {
@@ -280,6 +346,7 @@ impl IrBuilder {
                 object,
                 method,
                 args,
+                ..
             } => {
                 let tbl = self.compile_expr(object, None);
                 let key = self.alloc_var();
@@ -305,7 +372,7 @@ impl IrBuilder {
                     retc: 1,
                 });
             }
-            Expr::Table(entries) => {
+            Expr::Table { entries, .. } => {
                 self.emit(IrInst::NewTable { dst });
                 for entry in entries {
                     if let Some(ref k) = entry.key {
@@ -329,7 +396,7 @@ impl IrBuilder {
                     }
                 }
             }
-            Expr::Index { object, index } => {
+            Expr::Index { object, index, .. } => {
                 let tbl = self.compile_expr(object, None);
                 let key = self.compile_expr(index, None);
                 self.emit(IrInst::GetTable {
@@ -338,7 +405,7 @@ impl IrBuilder {
                     key,
                 });
             }
-            Expr::Member { object, field } => {
+            Expr::Member { object, field, .. } => {
                 let tbl = self.compile_expr(object, None);
                 let key = self.alloc_var();
                 self.emit(IrInst::LoadConst {
@@ -351,7 +418,7 @@ impl IrBuilder {
                     key,
                 });
             }
-            Expr::Function { params, body } => {
+            Expr::Function { params, body, .. } => {
                 let proto_idx = self.compile_sub_function(None, params, body);
                 self.emit(IrInst::Closure { dst, proto_idx });
             }
@@ -369,6 +436,8 @@ impl IrBuilder {
         let num_params = params.iter().filter(|p| !p.variadic).count() as u8;
 
         let mut sub_builder = IrBuilder::new();
+        sub_builder.parent_scopes = self.parent_scopes.clone();
+        sub_builder.parent_scopes.push(self.scopes.clone());
         sub_builder.enter_scope();
         for param in params {
             if !param.variadic {
@@ -396,6 +465,8 @@ impl IrBuilder {
             is_vararg,
             instructions: sub_builder.instructions,
             protos: sub_builder.child_protos,
+            upvalues: sub_builder.upvalues,
+            cfg: None,
         });
         proto_idx
     }
@@ -432,7 +503,9 @@ impl IrBuilder {
                 let val_var = self.compile_expr(value, None);
                 self.compile_assign(target, val_var);
             }
-            Stmt::AssignMany { targets, values } => {
+            Stmt::AssignMany {
+                targets, values, ..
+            } => {
                 let mut val_vars = Vec::new();
                 for val in values {
                     val_vars.push(self.compile_expr(val, None));
@@ -446,8 +519,9 @@ impl IrBuilder {
                     self.compile_assign(target, *val_var);
                 }
             }
-            Stmt::Increment { target, amount } => {
-                let current = self.compile_expr(target, None);
+            Stmt::Increment { target, amount, .. } => {
+                let target_expr = target.to_expr();
+                let current = self.compile_expr(&target_expr, None);
                 let amount_var = self.alloc_var();
                 self.emit(IrInst::LoadConst {
                     dst: amount_var,
@@ -503,6 +577,7 @@ impl IrBuilder {
                 then_branch,
                 else_if_branches,
                 else_branch,
+                ..
             } => {
                 let cond_var = self.compile_expr(condition, None);
                 let else_label = self.alloc_label();
@@ -547,7 +622,9 @@ impl IrBuilder {
 
                 self.emit(IrInst::Label(end_label));
             }
-            Stmt::While { condition, body } => {
+            Stmt::While {
+                condition, body, ..
+            } => {
                 let start_label = self.alloc_label();
                 let exit_label = self.alloc_label();
 
@@ -574,7 +651,9 @@ impl IrBuilder {
 
                 self.loops.pop();
             }
-            Stmt::Repeat { body, condition } => {
+            Stmt::Repeat {
+                body, condition, ..
+            } => {
                 let start_label = self.alloc_label();
                 let exit_label = self.alloc_label();
                 let cond_label = self.alloc_label();
@@ -608,6 +687,7 @@ impl IrBuilder {
                 end,
                 step,
                 body,
+                ..
             } => {
                 self.enter_scope();
                 let base = self.alloc_var();
@@ -661,14 +741,16 @@ impl IrBuilder {
                 self.loops.pop();
                 self.exit_scope();
             }
-            Stmt::For { vars, source, body } => {
+            Stmt::For {
+                vars, source, body, ..
+            } => {
                 self.enter_scope();
                 let base = self.alloc_var();
                 let state_var = self.alloc_var();
                 let ctrl_var = self.alloc_var();
 
                 match source {
-                    Expr::Call { callee, args } => {
+                    Expr::Call { callee, args, .. } => {
                         let callee_var = self.compile_expr(callee, Some(base));
                         let mut arg_vars = Vec::new();
                         for arg in args {
@@ -727,35 +809,49 @@ impl IrBuilder {
                 self.loops.pop();
                 self.exit_scope();
             }
-            Stmt::Break => {
+            Stmt::Break { .. } => {
                 if let Some(lp) = self.loops.last() {
                     self.emit(IrInst::Jump(lp.break_label));
                 }
             }
-            Stmt::Continue => {
+            Stmt::Continue { .. } => {
                 if let Some(lp) = self.loops.last() {
                     self.emit(IrInst::Jump(lp.continue_label));
                 }
             }
-            Stmt::Return(exprs) => {
+            Stmt::Return { values: exprs, .. } => {
                 let mut ret_vars = Vec::new();
                 for e in exprs {
                     ret_vars.push(self.compile_expr(e, None));
                 }
                 self.emit(IrInst::Return(ret_vars));
             }
-            Stmt::Expr(expr) => {
+            Stmt::Expr { expr, .. } => {
                 self.compile_expr(expr, None);
+            }
+            Stmt::Goto { label: lbl, .. } => {
+                let target = self.get_or_alloc_label(lbl);
+                self.emit(IrInst::Jump(target));
+            }
+            Stmt::Label { name: lbl, .. } => {
+                let target = self.get_or_alloc_label(lbl);
+                self.emit(IrInst::Label(target));
             }
         }
     }
 
-    fn compile_assign(&mut self, target: &Expr, val_var: IrVar) {
+    fn compile_assign(&mut self, target: &AssignTarget, val_var: IrVar) {
         match target {
-            Expr::Variable(name) => {
-                if let Some(local_var) = self.resolve_local(name) {
+            AssignTarget::Variable(name) => {
+                let (is_local, upval, local_var) = self.resolve_variable(name);
+                if is_local {
                     self.emit(IrInst::Move {
-                        dst: local_var,
+                        dst: local_var.unwrap(),
+                        src: val_var,
+                    });
+                } else if let Some(upval_idx) = upval {
+                    self.emit(IrInst::SetUpval {
+                        index: upval_idx,
                         src: val_var,
                     });
                 } else {
@@ -765,7 +861,7 @@ impl IrBuilder {
                     });
                 }
             }
-            Expr::Member { object, field } => {
+            AssignTarget::Member { object, field } => {
                 let tbl = self.compile_expr(object, None);
                 let key = self.alloc_var();
                 self.emit(IrInst::LoadConst {
@@ -778,7 +874,7 @@ impl IrBuilder {
                     val: val_var,
                 });
             }
-            Expr::Index { object, index } => {
+            AssignTarget::Index { object, index } => {
                 let tbl = self.compile_expr(object, None);
                 let key = self.compile_expr(index, None);
                 self.emit(IrInst::SetTable {
@@ -787,7 +883,6 @@ impl IrBuilder {
                     val: val_var,
                 });
             }
-            _ => {}
         }
     }
 }
@@ -812,6 +907,8 @@ pub fn ast_to_ir(stmts: &[Stmt]) -> IrModule {
             is_vararg: false,
             instructions: builder.instructions,
             protos: builder.child_protos,
+            upvalues: Vec::new(),
+            cfg: None,
         },
     }
 }

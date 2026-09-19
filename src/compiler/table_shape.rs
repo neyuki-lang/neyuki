@@ -93,13 +93,13 @@ impl TableShape {
 // Walks an expression tree to extract all table constructors and analyze their shapes
 pub fn analyze_expr_shapes(expr: &Expr, out: &mut Vec<TableShape>) {
     match expr {
-        Expr::Table(entries) => {
+        Expr::Table { entries, .. } => {
             out.push(TableShape::analyze(entries));
             for entry in entries {
                 analyze_expr_shapes(&entry.value, out);
             }
         }
-        Expr::Call { callee, args } => {
+        Expr::Call { callee, args, .. } => {
             analyze_expr_shapes(callee, out);
             for arg in args {
                 analyze_expr_shapes(arg, out);
@@ -121,7 +121,7 @@ pub fn analyze_expr_shapes(expr: &Expr, out: &mut Vec<TableShape>) {
         Expr::Member { object, .. } => {
             analyze_expr_shapes(object, out);
         }
-        Expr::Index { object, index } => {
+        Expr::Index { object, index, .. } => {
             analyze_expr_shapes(object, out);
             analyze_expr_shapes(index, out);
         }
@@ -138,15 +138,15 @@ mod tests {
         let entries = vec![
             TableEntry {
                 key: None,
-                value: Expr::Literal("1".to_string()),
+                value: Expr::int(1),
             },
             TableEntry {
                 key: None,
-                value: Expr::Literal("2".to_string()),
+                value: Expr::int(2),
             },
             TableEntry {
                 key: None,
-                value: Expr::Literal("3".to_string()),
+                value: Expr::int(3),
             },
         ];
         let shape = TableShape::analyze(&entries);
@@ -161,11 +161,11 @@ mod tests {
         let entries = vec![
             TableEntry {
                 key: Some("name".to_string()),
-                value: Expr::Str("Neyuki".to_string()),
+                value: Expr::string("Neyuki"),
             },
             TableEntry {
                 key: Some("version".to_string()),
-                value: Expr::Literal("1".to_string()),
+                value: Expr::int(1),
             },
         ];
         let shape = TableShape::analyze(&entries);
@@ -183,11 +183,11 @@ mod tests {
         let entries = vec![
             TableEntry {
                 key: Some("a".to_string()),
-                value: Expr::Literal("1".to_string()),
+                value: Expr::int(1),
             },
             TableEntry {
                 key: Some("a".to_string()),
-                value: Expr::Literal("2".to_string()),
+                value: Expr::int(2),
             },
         ];
         let shape = TableShape::analyze(&entries);

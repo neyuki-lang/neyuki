@@ -20,7 +20,8 @@ pub use constant_fold::fold_program;
 pub fn compile_source(source: &str) -> Result<Vec<Stmt>, String> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut parser = Parser::new(source);
-        parser.parse_program()
+        let (stmts, _pool) = parser.parse_program()?;
+        Ok(stmts)
     }))
     .map_err(|payload| {
         if let Some(s) = payload.downcast_ref::<&str>() {
@@ -34,7 +35,6 @@ pub fn compile_source(source: &str) -> Result<Vec<Stmt>, String> {
 }
 
 // Read and parse source file into AST statements
-#[allow(dead_code)]
 pub fn compile_file(path: &str) -> Result<Vec<Stmt>, String> {
     let source =
         fs::read_to_string(path).map_err(|err| format!("failed to read {}: {}", path, err))?;
@@ -61,6 +61,26 @@ pub fn try_compile_to_proto(statements: &[Stmt]) -> Result<Proto, String> {
             .collect::<Vec<_>>()
             .join("\n")
     })
+}
+
+// Compile AST statements through full IR pipeline: AST -> IR -> CFG -> optimize_cfg -> bytecode Proto
+pub fn try_compile_to_proto_via_ir(statements: &[Stmt]) -> Result<Proto, String> {
+    let diags = crate::sema::analyze(statements, "");
+    if let Some(err) = diags
+        .iter()
+        .find(|d| d.severity == crate::diagnostics::severity::Severity::Error)
+    {
+        return Err(format!("semantic error: {}", err.message));
+    }
+    let optimized_stmts = fold_program(statements.to_vec());
+    let mut ir_module = ir::ast_to_ir(&optimized_stmts);
+
+    let mut cfg = ir::build_cfg(&ir_module.main.instructions);
+    ir::optimize_cfg(&mut cfg);
+    ir_module.main.instructions = cfg.to_flat_instructions();
+    ir_module.main.cfg = Some(cfg);
+
+    ir::ir_to_bytecode(&ir_module)
 }
 
 // Compile AST function (with parameters and body statements) into a register-based Proto
@@ -132,6 +152,27 @@ pub fn compile_file_to_bytecode(path: &str) -> Result<Vec<u8>, String> {
     compile_source_to_bytecode(&source)
 }
 
+// Compile source directly into binary bytecode via IR pipeline
+pub fn compile_source_to_bytecode_via_ir(source: &str) -> Result<Vec<u8>, String> {
+    let stmts = compile_source(source)?;
+    let diags = crate::sema::analyze(&stmts, source);
+    if let Some(err) = diags
+        .iter()
+        .find(|d| d.severity == crate::diagnostics::severity::Severity::Error)
+    {
+        return Err(format!("semantic error: {}", err.message));
+    }
+    let proto = try_compile_to_proto_via_ir(&stmts)?;
+    Ok(serialize(&proto))
+}
+
+// Compile file to bytecode binary via IR pipeline
+pub fn compile_file_to_bytecode_via_ir(path: &str) -> Result<Vec<u8>, String> {
+    let source =
+        fs::read_to_string(path).map_err(|err| format!("failed to read {}: {}", path, err))?;
+    compile_source_to_bytecode_via_ir(&source)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,5 +207,21 @@ mod tests {
         let res2 = compile_source(code2);
         assert!(res2.is_err());
         assert!(res2.unwrap_err().contains("exactly one expression"));
+    }
+
+    #[test]
+    fn test_compile_via_ir_parity_with_direct_compiler() {
+        let code = "local a = 10\nlocal b = 20\nreturn a + b";
+        let stmts = compile_source(code).expect("syntax error");
+        let direct_proto = try_compile_to_proto(&stmts).expect("direct compilation failed");
+        let ir_proto = try_compile_to_proto_via_ir(&stmts).expect("IR compilation failed");
+
+        let mut vm_direct = crate::vm::machine::VM::new();
+        let res_direct = vm_direct.execute(direct_proto).expect("direct exec failed");
+
+        let mut vm_ir = crate::vm::machine::VM::new();
+        let res_ir = vm_ir.execute(ir_proto).expect("IR exec failed");
+
+        assert_eq!(res_direct.to_string(), res_ir.to_string());
     }
 }
