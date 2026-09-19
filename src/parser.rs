@@ -7,6 +7,7 @@ pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
     depth: usize,
+    span_pool: SpanPool,
 }
 
 impl Parser {
@@ -17,10 +18,21 @@ impl Parser {
             tokens,
             pos: 0,
             depth: 0,
+            span_pool: SpanPool::new(),
         }
     }
 
-    pub fn parse_program(&mut self) -> Result<Vec<Stmt>, String> {
+    fn current_loc(&self) -> SourceLocation {
+        let tok = &self.tokens[self.pos.min(self.tokens.len().saturating_sub(1))];
+        SourceLocation::new(tok.line as u32, tok.col as u32)
+    }
+
+    fn record_span(&mut self, id: NodeId, start: SourceLocation) {
+        let end = self.current_loc();
+        self.span_pool.insert(id, Span::new(start, end));
+    }
+
+    pub fn parse_program(&mut self) -> Result<(Vec<Stmt>, SpanPool), String> {
         let mut program = Vec::new();
         while !self.is_eof() {
             if self.check_keyword("end")
@@ -39,10 +51,17 @@ impl Parser {
             program.push(self.parse_statement()?);
             self.consume_semicolon_if_any();
         }
-        Ok(program)
+        Ok((program, std::mem::take(&mut self.span_pool)))
     }
 
     fn parse_statement(&mut self) -> Result<Stmt, String> {
+        let start = self.current_loc();
+        let stmt = self.parse_statement_inner()?;
+        self.record_span(stmt.node_id(), start);
+        Ok(stmt)
+    }
+
+    fn parse_statement_inner(&mut self) -> Result<Stmt, String> {
         if self.check_keyword("local")
             || self.check_keyword("const")
             || self.check_keyword("global")
@@ -80,64 +99,98 @@ impl Parser {
             } else {
                 Vec::new()
             };
-            return Ok(Stmt::Return(expr));
+            return Ok(Stmt::Return {
+                id: NodeId::next(),
+                values: expr,
+            });
         }
         if self.check_keyword("break") {
             self.pos += 1;
-            return Ok(Stmt::Break);
+            return Ok(Stmt::Break { id: NodeId::next() });
         }
         if self.check_keyword("continue") {
             self.pos += 1;
-            return Ok(Stmt::Continue);
+            return Ok(Stmt::Continue { id: NodeId::next() });
         }
 
         let expr = self.parse_expr()?;
         if self.match_symbol("++") {
+            let target = AssignTarget::from_expr(expr)?;
             return Ok(Stmt::Increment {
-                target: expr,
+                id: NodeId::next(),
+                target,
                 amount: 1,
             });
         }
         if self.match_symbol("--") {
+            let target = AssignTarget::from_expr(expr)?;
             return Ok(Stmt::Increment {
-                target: expr,
+                id: NodeId::next(),
+                target,
                 amount: -1,
             });
         }
         if self.match_symbol("=") {
+            let target = AssignTarget::from_expr(expr)?;
             let value = self.parse_expr()?;
             return Ok(Stmt::Assign {
-                target: expr,
+                id: NodeId::next(),
+                target,
                 value,
                 is_const: false,
             });
         }
         if self.check_symbol(",") {
-            let mut targets = vec![expr];
+            let mut targets = vec![AssignTarget::from_expr(expr)?];
             while self.match_symbol(",") {
-                targets.push(self.parse_expr()?);
+                let next_expr = self.parse_expr()?;
+                targets.push(AssignTarget::from_expr(next_expr)?);
             }
             self.expect_symbol("=")?;
             let mut values = vec![self.parse_expr()?];
             while self.match_symbol(",") {
                 values.push(self.parse_expr()?);
             }
-            return Ok(Stmt::AssignMany { targets, values });
+            return Ok(Stmt::AssignMany {
+                id: NodeId::next(),
+                targets,
+                values,
+            });
         }
         if let Some(op) = self.match_compound_assignment() {
+            let target = AssignTarget::from_expr_ref(&expr)?;
             let right = self.parse_expr()?;
+            let bin_op = BinOp::parse_str(&op).ok_or_else(|| {
+                format!(
+                    "[line {}] unknown compound operator '{}'",
+                    self.peek().line,
+                    op
+                )
+            })?;
+            let bin_start = self
+                .span_pool
+                .get(expr.node_id())
+                .map(|s| s.start)
+                .unwrap_or_else(|| self.current_loc());
+            let bin_expr = Expr::Binary {
+                id: NodeId::next(),
+                left: Box::new(expr),
+                op: bin_op,
+                right: Box::new(right),
+            };
+            self.record_span(bin_expr.node_id(), bin_start);
             return Ok(Stmt::Assign {
-                target: expr.clone(),
-                value: Expr::Binary {
-                    left: Box::new(expr),
-                    op,
-                    right: Box::new(right),
-                },
+                id: NodeId::next(),
+                target,
+                value: bin_expr,
                 is_const: false,
             });
         }
         self.consume_bracket_attributes();
-        Ok(Stmt::Expr(expr))
+        Ok(Stmt::Expr {
+            id: NodeId::next(),
+            expr,
+        })
     }
 
     fn parse_binding(&mut self) -> Result<Stmt, String> {
@@ -161,15 +214,21 @@ impl Parser {
         }
         if name.contains('.') {
             self.expect_symbol("=")?;
-            let mut target = Expr::Variable(name.split('.').next().unwrap().to_string());
+            let mut target = Expr::Variable {
+                id: NodeId::next(),
+                name: name.split('.').next().unwrap().to_string(),
+            };
             for field in name.split('.').skip(1) {
                 target = Expr::Member {
+                    id: NodeId::next(),
                     object: Box::new(target),
                     field: field.to_string(),
                 };
             }
+            let assign_target = AssignTarget::from_expr(target)?;
             return Ok(Stmt::Assign {
-                target,
+                id: NodeId::next(),
+                target: assign_target,
                 value: self.parse_expr()?,
                 is_const,
             });
@@ -185,6 +244,7 @@ impl Parser {
                 initializers.push(self.parse_expr()?);
             }
             return Ok(Stmt::LocalMany {
+                id: NodeId::next(),
                 names,
                 is_const,
                 initializers,
@@ -203,6 +263,7 @@ impl Parser {
         };
 
         Ok(Stmt::Local {
+            id: NodeId::next(),
             name,
             is_const,
             type_name,
@@ -239,6 +300,7 @@ impl Parser {
         let body = self.parse_block_until("end")?;
         self.expect_keyword("end")?;
         Ok(Stmt::Function {
+            id: NodeId::next(),
             name,
             is_const,
             params,
@@ -272,6 +334,7 @@ impl Parser {
         self.expect_keyword("end")?;
 
         Ok(Stmt::If {
+            id: NodeId::next(),
             condition,
             then_branch,
             else_if_branches,
@@ -295,6 +358,7 @@ impl Parser {
             let body = self.parse_block_until("end")?;
             self.expect_keyword("end")?;
             return Ok(Stmt::NumericFor {
+                id: NodeId::next(),
                 var: first_name,
                 start,
                 end,
@@ -312,7 +376,12 @@ impl Parser {
         self.expect_keyword("do")?;
         let body = self.parse_block_until("end")?;
         self.expect_keyword("end")?;
-        Ok(Stmt::For { vars, source, body })
+        Ok(Stmt::For {
+            id: NodeId::next(),
+            vars,
+            source,
+            body,
+        })
     }
 
     fn parse_while(&mut self) -> Result<Stmt, String> {
@@ -321,7 +390,11 @@ impl Parser {
         self.expect_keyword("do")?;
         let body = self.parse_block_until("end")?;
         self.expect_keyword("end")?;
-        Ok(Stmt::While { condition, body })
+        Ok(Stmt::While {
+            id: NodeId::next(),
+            condition,
+            body,
+        })
     }
 
     fn parse_repeat(&mut self) -> Result<Stmt, String> {
@@ -329,7 +402,11 @@ impl Parser {
         let body = self.parse_block_until("until")?;
         self.expect_keyword("until")?;
         let condition = self.parse_expr()?;
-        Ok(Stmt::Repeat { body, condition })
+        Ok(Stmt::Repeat {
+            id: NodeId::next(),
+            body,
+            condition,
+        })
     }
 
     fn parse_param_list(&mut self) -> Result<Vec<Param>, String> {
@@ -415,12 +492,26 @@ impl Parser {
             self.pos += 1;
             let next_min = prec + 1;
             let right = self.parse_precedence(next_min)?;
-            let op = if op == "~=" { "!=".to_string() } else { op };
-            left = Expr::Binary {
+            let bin_op = BinOp::parse_str(&op).ok_or_else(|| {
+                format!(
+                    "[line {}] unknown binary operator '{}'",
+                    self.peek().line,
+                    op
+                )
+            })?;
+            let start = self
+                .span_pool
+                .get(left.node_id())
+                .map(|s| s.start)
+                .unwrap_or_else(|| self.current_loc());
+            let bin_expr = Expr::Binary {
+                id: NodeId::next(),
                 left: Box::new(left),
-                op,
+                op: bin_op,
                 right: Box::new(right),
             };
+            self.record_span(bin_expr.node_id(), start);
+            left = bin_expr;
         }
 
         Ok(left)
@@ -441,6 +532,7 @@ impl Parser {
     }
 
     fn parse_prefix_inner(&mut self) -> Result<Expr, String> {
+        let start = self.current_loc();
         if self.check_keyword("function") {
             self.expect_keyword("function")?;
             self.expect_symbol("(")?;
@@ -450,7 +542,13 @@ impl Parser {
             }
             let body = self.parse_block_until("end")?;
             self.expect_keyword("end")?;
-            return Ok(Expr::Function { params, body });
+            let expr = Expr::Function {
+                id: NodeId::next(),
+                params,
+                body,
+            };
+            self.record_span(expr.node_id(), start);
+            return Ok(expr);
         }
 
         if self.check_symbol("(") {
@@ -466,36 +564,54 @@ impl Parser {
 
         if self.check_keyword("not") {
             self.pos += 1;
-            return Ok(Expr::Unary {
-                op: "not".to_string(),
-                expr: Box::new(self.parse_prefix()?),
-            });
+            let inner = self.parse_prefix()?;
+            let expr = Expr::Unary {
+                id: NodeId::next(),
+                op: UnOp::Not,
+                expr: Box::new(inner),
+            };
+            self.record_span(expr.node_id(), start);
+            return Ok(expr);
         }
 
         if self.check_symbol("-") {
             self.pos += 1;
-            return Ok(Expr::Unary {
-                op: "-".to_string(),
-                expr: Box::new(self.parse_prefix()?),
-            });
+            let inner = self.parse_prefix()?;
+            let expr = Expr::Unary {
+                id: NodeId::next(),
+                op: UnOp::Neg,
+                expr: Box::new(inner),
+            };
+            self.record_span(expr.node_id(), start);
+            return Ok(expr);
         }
         if self.check_symbol("#") {
             self.pos += 1;
-            return Ok(Expr::Unary {
-                op: "#".to_string(),
-                expr: Box::new(self.parse_prefix()?),
-            });
+            let inner = self.parse_prefix()?;
+            let expr = Expr::Unary {
+                id: NodeId::next(),
+                op: UnOp::Len,
+                expr: Box::new(inner),
+            };
+            self.record_span(expr.node_id(), start);
+            return Ok(expr);
         }
         if self.check_symbol("~") {
             self.pos += 1;
-            return Ok(Expr::Unary {
-                op: "~".to_string(),
-                expr: Box::new(self.parse_prefix()?),
-            });
+            let inner = self.parse_prefix()?;
+            let expr = Expr::Unary {
+                id: NodeId::next(),
+                op: UnOp::BitNot,
+                expr: Box::new(inner),
+            };
+            self.record_span(expr.node_id(), start);
+            return Ok(expr);
         }
 
         if self.match_symbol("...") {
-            return Ok(Expr::Vararg);
+            let expr = Expr::Vararg { id: NodeId::next() };
+            self.record_span(expr.node_id(), start);
+            return Ok(expr);
         }
 
         let token = self.peek().clone();
@@ -503,23 +619,59 @@ impl Parser {
             "name" | "keyword" => {
                 self.pos += 1;
                 let expr = match token.value.as_str() {
-                    "true" | "false" | "nil" => Expr::Literal(token.value),
-                    _ => Expr::Variable(token.value),
+                    "true" => Expr::Literal {
+                        id: NodeId::next(),
+                        value: Literal::Bool(true),
+                    },
+                    "false" => Expr::Literal {
+                        id: NodeId::next(),
+                        value: Literal::Bool(false),
+                    },
+                    "nil" => Expr::Literal {
+                        id: NodeId::next(),
+                        value: Literal::Nil,
+                    },
+                    _ => Expr::Variable {
+                        id: NodeId::next(),
+                        name: token.value,
+                    },
                 };
+                self.record_span(expr.node_id(), start);
                 self.parse_postfix(expr)
             }
             "string" => {
                 self.pos += 1;
-                Ok(Expr::Str(token.value))
+                let expr = Expr::Literal {
+                    id: NodeId::next(),
+                    value: Literal::String(token.value),
+                };
+                self.record_span(expr.node_id(), start);
+                Ok(expr)
             }
             "interp" => {
                 self.pos += 1;
                 let parts = parse_interp_parts(&token.value)?;
-                Ok(Expr::Interp(parts))
+                let expr = Expr::Interp {
+                    id: NodeId::next(),
+                    parts,
+                };
+                self.record_span(expr.node_id(), start);
+                Ok(expr)
             }
             "number" => {
                 self.pos += 1;
-                Ok(Expr::Literal(token.value))
+                let lit = Literal::parse_number(&token.value).ok_or_else(|| {
+                    format!(
+                        "[line {}] invalid number literal '{}'",
+                        token.line, token.value
+                    )
+                })?;
+                let expr = Expr::Literal {
+                    id: NodeId::next(),
+                    value: lit,
+                };
+                self.record_span(expr.node_id(), start);
+                Ok(expr)
             }
             _ => Err(format!(
                 "[line {}] unexpected token in expression: {:?}",
@@ -532,28 +684,42 @@ impl Parser {
     /// suffixes to an already parsed expression.
     fn parse_postfix(&mut self, mut expr: Expr) -> Result<Expr, String> {
         loop {
+            let start = self
+                .span_pool
+                .get(expr.node_id())
+                .map(|s| s.start)
+                .unwrap_or_else(|| self.current_loc());
             if self.match_symbol(".") {
                 let field = self.expect_name()?;
-                expr = Expr::Member {
+                let node = Expr::Member {
+                    id: NodeId::next(),
                     object: Box::new(expr),
                     field,
                 };
+                self.record_span(node.node_id(), start);
+                expr = node;
             } else if self.match_symbol("(") {
                 let args = self.parse_call_args()?;
-                expr = Expr::Call {
+                let node = Expr::Call {
+                    id: NodeId::next(),
                     callee: Box::new(expr),
                     args,
                 };
+                self.record_span(node.node_id(), start);
+                expr = node;
             } else if self.check_method_call() {
                 self.pos += 1;
                 let method = self.expect_name()?;
                 self.expect_symbol("(")?;
                 let args = self.parse_call_args()?;
-                expr = Expr::MethodCall {
+                let node = Expr::MethodCall {
+                    id: NodeId::next(),
                     object: Box::new(expr),
                     method,
                     args,
                 };
+                self.record_span(node.node_id(), start);
+                expr = node;
             } else if self.match_symbol("[") {
                 if self.peek().kind == "name" && self.peek().value == "cite" {
                     while !self.is_eof() && !self.check_symbol("]") {
@@ -564,10 +730,13 @@ impl Parser {
                 }
                 let field = self.parse_expr()?;
                 self.expect_symbol("]")?;
-                expr = Expr::Index {
+                let node = Expr::Index {
+                    id: NodeId::next(),
                     object: Box::new(expr),
                     index: Box::new(field),
                 };
+                self.record_span(node.node_id(), start);
+                expr = node;
             } else {
                 break;
             }
@@ -576,6 +745,7 @@ impl Parser {
     }
 
     fn parse_table(&mut self) -> Result<Expr, String> {
+        let start = self.current_loc();
         self.expect_symbol("{")?;
         let mut entries = Vec::new();
         if !self.check_symbol("}") {
@@ -623,7 +793,12 @@ impl Parser {
             }
         }
         self.expect_symbol("}")?;
-        Ok(Expr::Table(entries))
+        let expr = Expr::Table {
+            id: NodeId::next(),
+            entries,
+        };
+        self.record_span(expr.node_id(), start);
+        Ok(expr)
     }
 
     fn read_type_annotation(&mut self) -> String {
@@ -873,7 +1048,7 @@ fn parse_interp_parts(value: &str) -> Result<Vec<InterpPart>, String> {
         };
         let expression = &after_start[..end];
         let mut parser = Parser::new(expression);
-        let statements = parser.parse_program()?;
+        let (statements, _pool) = parser.parse_program()?;
         if statements.len() != 1 {
             return Err(format!(
                 "syntax error: string interpolation must contain exactly one expression: {:?}",
@@ -881,7 +1056,7 @@ fn parse_interp_parts(value: &str) -> Result<Vec<InterpPart>, String> {
             ));
         }
         match statements.into_iter().next().unwrap() {
-            Stmt::Expr(expr) => {
+            Stmt::Expr { expr, .. } => {
                 parts.push(InterpPart::Expr(expr));
             }
             _ => {
@@ -901,26 +1076,37 @@ fn parse_interp_parts(value: &str) -> Result<Vec<InterpPart>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Expr, Parser, Stmt};
+    use super::{AssignTarget, BinOp, Expr, NodeId, Parser, Stmt};
 
     #[test]
     fn parses_local_assignment_and_call() {
         let mut parser = Parser::new("local msg = \"hello\"\nprint(msg)");
-        let program = parser.parse_program().expect("failed to parse");
+        let (program, _pool) = parser.parse_program().expect("failed to parse");
 
         assert_eq!(
             program,
             vec![
                 Stmt::Local {
+                    id: NodeId::next(),
                     name: "msg".to_string(),
                     is_const: false,
                     type_name: None,
-                    initializer: Some(Expr::Str("hello".to_string())),
+                    initializer: Some(Expr::string("hello")),
                 },
-                Stmt::Expr(Expr::Call {
-                    callee: Box::new(Expr::Variable("print".to_string())),
-                    args: vec![Expr::Variable("msg".to_string())],
-                }),
+                Stmt::Expr {
+                    id: NodeId::next(),
+                    expr: Expr::Call {
+                        id: NodeId::next(),
+                        callee: Box::new(Expr::Variable {
+                            id: NodeId::next(),
+                            name: "print".to_string(),
+                        }),
+                        args: vec![Expr::Variable {
+                            id: NodeId::next(),
+                            name: "msg".to_string(),
+                        }],
+                    },
+                },
             ]
         );
     }
@@ -930,15 +1116,16 @@ mod tests {
         let mut parser = Parser::new(
             "local small: int = 2\nconst function divide(a: int, b: int): int\n    return a // b\nend",
         );
-        let program = parser.parse_program().expect("failed to parse");
+        let (program, _pool) = parser.parse_program().expect("failed to parse");
 
         assert_eq!(
             program[0],
             Stmt::Local {
+                id: NodeId::next(),
                 name: "small".to_string(),
                 is_const: false,
                 type_name: Some("int".to_string()),
-                initializer: Some(Expr::Literal("2".to_string())),
+                initializer: Some(Expr::int(2)),
             }
         );
 
@@ -948,16 +1135,20 @@ mod tests {
     #[test]
     fn parses_dotted_const_binding_as_assignment() {
         let mut parser = Parser::new("const math.e = 1");
-        let program = parser.parse_program().expect("failed to parse");
+        let (program, _pool) = parser.parse_program().expect("failed to parse");
 
         assert_eq!(
             program,
             vec![Stmt::Assign {
-                target: Expr::Member {
-                    object: Box::new(Expr::Variable("math".to_string())),
+                id: NodeId::next(),
+                target: AssignTarget::Member {
+                    object: Box::new(Expr::Variable {
+                        id: NodeId::next(),
+                        name: "math".to_string(),
+                    }),
                     field: "e".to_string(),
                 },
-                value: Expr::Literal("1".to_string()),
+                value: Expr::int(1),
                 is_const: true,
             }]
         );
@@ -966,7 +1157,7 @@ mod tests {
     #[test]
     fn parses_immediately_invoked_function_expression() {
         let mut parser = Parser::new("local value = (function() return 1 end)()");
-        let program = parser.parse_program().expect("failed to parse");
+        let (program, _pool) = parser.parse_program().expect("failed to parse");
 
         assert!(matches!(
             program.first(),
@@ -980,16 +1171,21 @@ mod tests {
     #[test]
     fn parses_compound_and_multiple_assignment() {
         let mut parser = Parser::new("n += 2\na, b = b, a");
-        let program = parser.parse_program().expect("failed to parse");
+        let (program, _pool) = parser.parse_program().expect("failed to parse");
 
         assert_eq!(
             program[0],
             Stmt::Assign {
-                target: Expr::Variable("n".to_string()),
+                id: NodeId::next(),
+                target: AssignTarget::Variable("n".to_string()),
                 value: Expr::Binary {
-                    left: Box::new(Expr::Variable("n".to_string())),
-                    op: "+".to_string(),
-                    right: Box::new(Expr::Literal("2".to_string())),
+                    id: NodeId::next(),
+                    left: Box::new(Expr::Variable {
+                        id: NodeId::next(),
+                        name: "n".to_string(),
+                    }),
+                    op: BinOp::Add,
+                    right: Box::new(Expr::int(2)),
                 },
                 is_const: false,
             }
@@ -997,13 +1193,20 @@ mod tests {
         assert_eq!(
             program[1],
             Stmt::AssignMany {
+                id: NodeId::next(),
                 targets: vec![
-                    Expr::Variable("a".to_string()),
-                    Expr::Variable("b".to_string())
+                    AssignTarget::Variable("a".to_string()),
+                    AssignTarget::Variable("b".to_string()),
                 ],
                 values: vec![
-                    Expr::Variable("b".to_string()),
-                    Expr::Variable("a".to_string())
+                    Expr::Variable {
+                        id: NodeId::next(),
+                        name: "b".to_string(),
+                    },
+                    Expr::Variable {
+                        id: NodeId::next(),
+                        name: "a".to_string(),
+                    },
                 ],
             }
         );
@@ -1014,27 +1217,31 @@ mod tests {
         let mut parser = Parser::new(
             "function math.random(min: number, max: number): number\n    return 1\nend",
         );
-        let program = parser.parse_program().expect("failed to parse");
+        let (program, _pool) = parser.parse_program().expect("failed to parse");
 
         assert_eq!(
             program[0],
             Stmt::Function {
+                id: NodeId::next(),
                 name: Some("math.random".to_string()),
                 is_const: false,
                 params: vec![
                     super::Param {
                         name: "min".to_string(),
                         type_name: Some("number".to_string()),
-                        variadic: false
+                        variadic: false,
                     },
                     super::Param {
                         name: "max".to_string(),
                         type_name: Some("number".to_string()),
-                        variadic: false
+                        variadic: false,
                     },
                 ],
                 return_type: Some("number".to_string()),
-                body: vec![Stmt::Return(vec![Expr::Literal("1".to_string())])],
+                body: vec![Stmt::Return {
+                    id: NodeId::next(),
+                    values: vec![Expr::int(1)],
+                }],
             }
         );
     }
@@ -1044,7 +1251,7 @@ mod tests {
         let mut parser = Parser::new(
             "function collect(first: number, ...: number): number\n    local total = first\n    total++\n    total--\n    return total\nend",
         );
-        let program = parser.parse_program().expect("failed to parse");
+        let (program, _pool) = parser.parse_program().expect("failed to parse");
 
         let Stmt::Function { params, body, .. } = &program[0] else {
             panic!("expected function");
@@ -1054,7 +1261,7 @@ mod tests {
             super::Param {
                 name: "...".to_string(),
                 type_name: Some("number".to_string()),
-                variadic: true
+                variadic: true,
             }
         );
         assert!(matches!(body[1], Stmt::Increment { amount: 1, .. }));
@@ -1064,7 +1271,7 @@ mod tests {
     #[test]
     fn parses_numeric_for_loop() {
         let mut parser = Parser::new("for i = 1, 10, 2 do\n    print(i)\nend");
-        let program = parser.parse_program().expect("failed to parse");
+        let (program, _pool) = parser.parse_program().expect("failed to parse");
 
         assert!(matches!(
             &program[0],
@@ -1080,13 +1287,15 @@ mod tests {
     #[test]
     fn parses_anonymous_function_expression() {
         let mut parser = Parser::new("table.sort(numbers, function(a, b) return a < b end)");
-        let program = parser.parse_program().expect("failed to parse");
+        let (program, _pool) = parser.parse_program().expect("failed to parse");
 
         assert!(matches!(
             &program[0],
-            Stmt::Expr(Expr::Call { args, .. })
-                if matches!(args.get(1), Some(Expr::Function { params, body })
-                    if params.len() == 2 && body.len() == 1)
+            Stmt::Expr {
+                expr: Expr::Call { args, .. },
+                ..
+            } if matches!(args.get(1), Some(Expr::Function { params, body, .. })
+                if params.len() == 2 && body.len() == 1)
         ));
     }
 
@@ -1113,5 +1322,14 @@ mod tests {
 
         let mut p3 = Parser::new("for i in do end");
         assert!(p3.parse_program().is_err());
+    }
+
+    #[test]
+    fn parse_program_produces_real_spans() {
+        let mut parser = Parser::new("local x = 42");
+        let (program, pool) = parser.parse_program().expect("parse ok");
+        let span = pool.get_or_dummy(program[0].node_id());
+        assert_eq!(span.start.line, 1);
+        assert_eq!(span.start.column, 1);
     }
 }

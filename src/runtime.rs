@@ -8,6 +8,10 @@ use num_integer::Integer as _;
 use num_traits::{FromPrimitive, ToPrimitive, Zero};
 use rand::{Rng, RngCore};
 
+use crate::ast::literal::Literal;
+use crate::ast::node_id::NodeId;
+use crate::ast::op::{BinOp, UnOp};
+use crate::ast::pattern::AssignTarget;
 use crate::parser::{Expr, Param, Stmt};
 
 const BUNDLED_LIBRARIES: &[(&str, &str)] =
@@ -592,6 +596,7 @@ impl Runtime {
                 names,
                 is_const,
                 initializers,
+                ..
             } => {
                 let mut values = Vec::new();
                 for expr in initializers {
@@ -614,6 +619,7 @@ impl Runtime {
                 target,
                 value,
                 is_const,
+                ..
             } => {
                 let value = first_value(self.eval(value, env.clone())?);
                 self.assign(target, value, env.clone())?;
@@ -621,7 +627,9 @@ impl Runtime {
                     self.protect_member(target, env)?;
                 }
             }
-            Stmt::AssignMany { targets, values } => {
+            Stmt::AssignMany {
+                targets, values, ..
+            } => {
                 let mut evaluated = Vec::new();
                 for expr in values {
                     match self.eval(expr, env.clone())? {
@@ -634,10 +642,14 @@ impl Runtime {
                     self.assign(target, value, env.clone())?;
                 }
             }
-            Stmt::Increment { target, amount } => {
-                let current = self.eval(target, env.clone())?;
-                let value =
-                    self.numeric(current, "+", Value::Integer(Int::from(*amount as i64)))?;
+            Stmt::Increment { target, amount, .. } => {
+                let target_expr = target.to_expr();
+                let current = self.eval(&target_expr, env.clone())?;
+                let value = self.numeric(
+                    current,
+                    BinOp::Add,
+                    Value::Integer(Int::from(*amount as i64)),
+                )?;
                 self.assign(target, value, env)?;
             }
             Stmt::Function {
@@ -654,16 +666,25 @@ impl Runtime {
                     env: env.clone(),
                 }));
                 if name.contains('.') {
-                    let mut target = Expr::Variable(name.split('.').next().unwrap().to_string());
-                    for field in name.split('.').skip(1) {
+                    let parts: Vec<&str> = name.split('.').collect();
+                    let mut target = Expr::Variable {
+                        id: NodeId::next(),
+                        name: parts[0].to_string(),
+                    };
+                    for field in &parts[1..parts.len() - 1] {
                         target = Expr::Member {
+                            id: NodeId::next(),
                             object: Box::new(target),
                             field: field.to_string(),
                         };
                     }
-                    self.assign(&target, value, env.clone())?;
+                    let final_target = AssignTarget::Member {
+                        object: Box::new(target),
+                        field: parts.last().unwrap().to_string(),
+                    };
+                    self.assign(&final_target, value, env.clone())?;
                     if *is_const {
-                        self.protect_member(&target, env)?;
+                        self.protect_member(&final_target, env)?;
                     }
                 } else {
                     let mut env = env.borrow_mut();
@@ -676,10 +697,10 @@ impl Runtime {
             Stmt::Function { name: None, .. } => {
                 return Err("anonymous function is only valid as an expression".to_string());
             }
-            Stmt::Expr(expr) => {
+            Stmt::Expr { expr, .. } => {
                 self.eval(expr, env)?;
             }
-            Stmt::Return(exprs) => {
+            Stmt::Return { values: exprs, .. } => {
                 let mut values = Vec::new();
                 for expr in exprs {
                     match self.eval(expr, env.clone())? {
@@ -697,6 +718,7 @@ impl Runtime {
                 then_branch,
                 else_if_branches,
                 else_branch,
+                ..
             } => {
                 if self.eval(condition, env.clone())?.truthy_bool()? {
                     return self.exec_block(then_branch, child(&env));
@@ -710,7 +732,9 @@ impl Runtime {
                     return self.exec_block(branch, child(&env));
                 }
             }
-            Stmt::While { condition, body } => {
+            Stmt::While {
+                condition, body, ..
+            } => {
                 while self.eval(condition, env.clone())?.truthy_bool()? {
                     match self.exec_block(body, child(&env))? {
                         Flow::Normal | Flow::Continue => {}
@@ -719,7 +743,9 @@ impl Runtime {
                     }
                 }
             }
-            Stmt::Repeat { body, condition } => loop {
+            Stmt::Repeat {
+                body, condition, ..
+            } => loop {
                 match self.exec_block(body, child(&env))? {
                     Flow::Normal | Flow::Continue => {}
                     Flow::Break => break,
@@ -729,7 +755,9 @@ impl Runtime {
                     break;
                 }
             },
-            Stmt::For { vars, source, body } => {
+            Stmt::For {
+                vars, source, body, ..
+            } => {
                 let table = first_value(self.eval(source, env.clone())?);
                 if let Value::Function(_) = table {
                     // Iterator function: call it until its first result is nil.
@@ -796,6 +824,7 @@ impl Runtime {
                 end,
                 step,
                 body,
+                ..
             } => {
                 let mut current = number(self.eval(start, env.clone())?)?;
                 let limit = number(self.eval(end, env.clone())?)?;
@@ -824,21 +853,27 @@ impl Runtime {
                     current += increment;
                 }
             }
-            Stmt::Break => return Ok(Flow::Break),
-            Stmt::Continue => return Ok(Flow::Continue),
+            Stmt::Break { .. } => return Ok(Flow::Break),
+            Stmt::Continue { .. } => return Ok(Flow::Continue),
+            Stmt::Goto { .. } | Stmt::Label { .. } => {}
         }
         Ok(Flow::Normal)
     }
 
     fn eval(&self, expr: &Expr, env: EnvRef) -> Result<Value, String> {
         match expr {
-            Expr::Literal(value) => parse_literal(value),
-            Expr::Str(value) => Ok(Value::String(value.clone())),
-            Expr::Interp(value) => self.interpolate(value, env),
-            Expr::Variable(name) => {
+            Expr::Literal { value: lit, .. } => match lit {
+                Literal::Nil => Ok(Value::Nil),
+                Literal::Bool(b) => Ok(Value::Bool(*b)),
+                Literal::Int(i) => Ok(Value::Integer(Int::from_bigint(i.clone()))),
+                Literal::Float(f) => Ok(Value::Number(*f)),
+                Literal::String(s) => Ok(Value::String(s.clone())),
+            },
+            Expr::Interp { parts: value, .. } => self.interpolate(value, env),
+            Expr::Variable { name, .. } => {
                 lookup(&env, name).ok_or_else(|| format!("undefined name `{}`", name))
             }
-            Expr::Vararg => {
+            Expr::Vararg { .. } => {
                 let values = lookup(&env, "__varargs")
                     .ok_or_else(|| "vararg expression outside a variadic function".to_string())?;
                 match values {
@@ -846,13 +881,13 @@ impl Runtime {
                     _ => Ok(values),
                 }
             }
-            Expr::Member { object, field } => {
+            Expr::Member { object, field, .. } => {
                 self.index(&self.eval(object, env)?, &Value::String(field.clone()))
             }
-            Expr::Index { object, index } => {
+            Expr::Index { object, index, .. } => {
                 self.index(&self.eval(object, env.clone())?, &self.eval(index, env)?)
             }
-            Expr::Table(entries) => {
+            Expr::Table { entries, .. } => {
                 let mut table = Table {
                     array: Vec::new(),
                     fields: HashMap::new(),
@@ -861,7 +896,7 @@ impl Runtime {
                     metatable: None,
                 };
                 for entry in entries {
-                    if matches!(entry.value, Expr::Vararg) {
+                    if matches!(entry.value, Expr::Vararg { .. }) {
                         if let Some(Value::Table(values)) = lookup(&env, "__varargs") {
                             table.array.extend(values.borrow().array.iter().cloned());
                         }
@@ -887,13 +922,13 @@ impl Runtime {
                 }
                 Ok(Value::Table(Rc::new(RefCell::new(table))))
             }
-            Expr::Unary { op, expr } => {
+            Expr::Unary { op, expr, .. } => {
                 let value = first_value(self.eval(expr, env)?);
-                match op.as_str() {
-                    "not" => Ok(Value::Bool(!value.truthy_bool()?)),
-                    "-" => self.number_unary(value, true),
-                    "#" => self.length(value),
-                    "~" => match value {
+                match op {
+                    UnOp::Not => Ok(Value::Bool(!value.truthy_bool()?)),
+                    UnOp::Neg => self.number_unary(value, true),
+                    UnOp::Len => self.length(value),
+                    UnOp::BitNot => match value {
                         Value::Integer(i) => match i {
                             Int::Small(s) => Ok(Value::Integer(Int::Small(!s))),
                             Int::Big(b) => Ok(Value::Integer(Int::from_bigint(!(*b).clone()))),
@@ -904,11 +939,12 @@ impl Runtime {
                         }
                         _ => Err("bitwise not expects an integer".to_string()),
                     },
-                    _ => Err(format!("unsupported unary operator {}", op)),
                 }
             }
-            Expr::Binary { left, op, right } => self.binary(left, op, right, env),
-            Expr::Call { callee, args } => {
+            Expr::Binary {
+                left, op, right, ..
+            } => self.binary(left, *op, right, env),
+            Expr::Call { callee, args, .. } => {
                 let function = self.eval(callee, env.clone())?;
                 let values = self.eval_args(args, env)?;
                 self.call(function, values).map(collapse_values)
@@ -917,6 +953,7 @@ impl Runtime {
                 object,
                 method,
                 args,
+                ..
             } => {
                 // `object:method(args)` looks `method` up on the object and
                 // passes the object itself as the first argument.
@@ -936,7 +973,7 @@ impl Runtime {
                 values.extend(self.eval_args(args, env)?);
                 self.call(function, values).map(collapse_values)
             }
-            Expr::Function { params, body } => Ok(Value::Function(Rc::new(Function::User {
+            Expr::Function { params, body, .. } => Ok(Value::Function(Rc::new(Function::User {
                 name: None,
                 params: params.clone(),
                 body: body.clone(),
@@ -948,7 +985,7 @@ impl Runtime {
     fn eval_args(&self, args: &[Expr], env: EnvRef) -> Result<Vec<Value>, String> {
         let mut values = Vec::new();
         for arg in args {
-            if matches!(arg, Expr::Vararg) {
+            if matches!(arg, Expr::Vararg { .. }) {
                 if let Some(Value::Table(varargs)) = lookup(&env, "__varargs") {
                     values.extend(varargs.borrow().array.iter().cloned());
                 }
@@ -1238,11 +1275,11 @@ impl Runtime {
         Ok(Value::String(output))
     }
 
-    fn binary(&self, left: &Expr, op: &str, right: &Expr, env: EnvRef) -> Result<Value, String> {
+    fn binary(&self, left: &Expr, op: BinOp, right: &Expr, env: EnvRef) -> Result<Value, String> {
         let left = first_value(self.eval(left, env.clone())?);
-        if op == "and" || op == "or" {
+        if op == BinOp::And || op == BinOp::Or {
             let a = left.truthy_bool()?;
-            if (op == "and" && !a) || (op == "or" && a) {
+            if (op == BinOp::And && !a) || (op == BinOp::Or && a) {
                 return Ok(Value::Bool(a));
             }
             return Ok(Value::Bool(
@@ -1252,17 +1289,17 @@ impl Runtime {
         let right = first_value(self.eval(right, env)?);
 
         let metamethod_name = match op {
-            "+" => Some("__add"),
-            "-" => Some("__sub"),
-            "*" => Some("__mul"),
-            "/" => Some("__div"),
-            "//" => Some("__idiv"),
-            "%" => Some("__mod"),
-            "^" => Some("__pow"),
-            ".." => Some("__concat"),
-            "==" => Some("__eq"),
-            "<" => Some("__lt"),
-            "<=" => Some("__le"),
+            BinOp::Add => Some("__add"),
+            BinOp::Sub => Some("__sub"),
+            BinOp::Mul => Some("__mul"),
+            BinOp::Div => Some("__div"),
+            BinOp::IDiv => Some("__idiv"),
+            BinOp::Mod => Some("__mod"),
+            BinOp::Pow => Some("__pow"),
+            BinOp::Concat => Some("__concat"),
+            BinOp::Eq => Some("__eq"),
+            BinOp::Lt => Some("__lt"),
+            BinOp::Le => Some("__le"),
             _ => None,
         };
 
@@ -1284,40 +1321,52 @@ impl Runtime {
         }
 
         match op {
-            "??" => {
+            BinOp::Coalesce => {
                 if matches!(left, Value::Nil) {
                     Ok(right)
                 } else {
                     Ok(left)
                 }
             }
-            ".." => Ok(Value::String(format!(
+            BinOp::Concat => Ok(Value::String(format!(
                 "{}{}",
                 require_string(left)?,
                 require_string(right)?
             ))),
-            "+" | "-" | "*" | "/" | "//" | "%" | "^" => self.numeric(left, op, right),
-            "==" => Ok(Value::Bool(equal(&left, &right))),
-            "!=" => Ok(Value::Bool(!equal(&left, &right))),
-            "<" | "<=" | ">" | ">=" => compare(left, op, right),
-            "&" | "|" | "~" | "<<" | ">>" | "<<<" | ">>>" => bitwise(left, op, right),
-            _ => Err(format!("unsupported operator {}", op)),
+            BinOp::Add
+            | BinOp::Sub
+            | BinOp::Mul
+            | BinOp::Div
+            | BinOp::IDiv
+            | BinOp::Mod
+            | BinOp::Pow => self.numeric(left, op, right),
+            BinOp::Eq => Ok(Value::Bool(equal(&left, &right))),
+            BinOp::Ne => Ok(Value::Bool(!equal(&left, &right))),
+            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => compare(left, op, right),
+            BinOp::BitAnd
+            | BinOp::BitOr
+            | BinOp::BitXor
+            | BinOp::Shl
+            | BinOp::Shr
+            | BinOp::LShl
+            | BinOp::LShr => bitwise(left, op, right),
+            BinOp::And | BinOp::Or => unreachable!(),
         }
     }
 
-    fn numeric(&self, left: Value, op: &str, right: Value) -> Result<Value, String> {
+    fn numeric(&self, left: Value, op: BinOp, right: Value) -> Result<Value, String> {
         if let (Value::Integer(a), Value::Integer(b)) = (&left, &right) {
-            if (op == "//" || op == "%") && b.is_zero() {
+            if (op == BinOp::IDiv || op == BinOp::Mod) && b.is_zero() {
                 return Err("division by zero".to_string());
             }
             return match op {
-                "+" => Ok(Value::Integer(a + b)),
-                "-" => Ok(Value::Integer(a - b)),
-                "*" => Ok(Value::Integer(a * b)),
-                "/" => Ok(Value::Number(number(left)? / number(right)?)),
-                "//" => Ok(Value::Integer(a.checked_div_floor(b))),
-                "%" => Ok(Value::Integer(a.mod_floor(b))),
-                "^" if !b.is_negative() => {
+                BinOp::Add => Ok(Value::Integer(a + b)),
+                BinOp::Sub => Ok(Value::Integer(a - b)),
+                BinOp::Mul => Ok(Value::Integer(a * b)),
+                BinOp::Div => Ok(Value::Number(number(left)? / number(right)?)),
+                BinOp::IDiv => Ok(Value::Integer(a.checked_div_floor(b))),
+                BinOp::Mod => Ok(Value::Integer(a.mod_floor(b))),
+                BinOp::Pow if !b.is_negative() => {
                     let exponent = b
                         .to_u32()
                         .ok_or_else(|| "integer exponent is too large".to_string())?;
@@ -1328,19 +1377,19 @@ impl Runtime {
         }
         let a = number(left)?;
         let b = number(right)?;
-        if (op == "//" || op == "%") && b == 0.0 {
+        if (op == BinOp::IDiv || op == BinOp::Mod) && b == 0.0 {
             return Err("division by zero".to_string());
         }
-        if op == "/" {
+        if op == BinOp::Div {
             return Ok(Value::Number(a / b));
         }
         let result = match op {
-            "+" => a + b,
-            "-" => a - b,
-            "*" => a * b,
-            "//" => (a / b).floor(),
-            "%" => a - (a / b).floor() * b,
-            "^" => a.powf(b),
+            BinOp::Add => a + b,
+            BinOp::Sub => a - b,
+            BinOp::Mul => a * b,
+            BinOp::IDiv => (a / b).floor(),
+            BinOp::Mod => a - (a / b).floor() * b,
+            BinOp::Pow => a.powf(b),
             _ => unreachable!(),
         };
         if result.fract() == 0.0 && result.is_finite() {
@@ -1428,20 +1477,19 @@ impl Runtime {
             _ => Err("value is not indexable".to_string()),
         }
     }
-    fn assign(&self, target: &Expr, value: Value, env: EnvRef) -> Result<(), String> {
+    fn assign(&self, target: &AssignTarget, value: Value, env: EnvRef) -> Result<(), String> {
         match target {
-            Expr::Variable(name) => assign_env(&env, name, value),
-            Expr::Member { object, field } => self.assign_index(
+            AssignTarget::Variable(name) => assign_env(&env, name, value),
+            AssignTarget::Member { object, field } => self.assign_index(
                 &self.eval(object, env)?,
                 Value::String(field.clone()),
                 value,
             ),
-            Expr::Index { object, index } => self.assign_index(
+            AssignTarget::Index { object, index } => self.assign_index(
                 &self.eval(object, env.clone())?,
                 self.eval(index, env)?,
                 value,
             ),
-            _ => Err("invalid assignment target".to_string()),
         }
     }
     fn assign_index(&self, object: &Value, index: Value, value: Value) -> Result<(), String> {
@@ -1535,8 +1583,8 @@ impl Runtime {
         }
     }
 
-    fn protect_member(&self, target: &Expr, env: EnvRef) -> Result<(), String> {
-        let Expr::Member { object, field } = target else {
+    fn protect_member(&self, target: &AssignTarget, env: EnvRef) -> Result<(), String> {
+        let AssignTarget::Member { object, field } = target else {
             return Err("invalid const function target".to_string());
         };
         let value = self.eval(object, env)?;
@@ -1611,34 +1659,6 @@ fn assign_env(env: &EnvRef, name: &str, value: Value) -> Result<(), String> {
         }
     }
 }
-fn parse_literal(value: &str) -> Result<Value, String> {
-    match value {
-        "nil" => Ok(Value::Nil),
-        "true" => Ok(Value::Bool(true)),
-        "false" => Ok(Value::Bool(false)),
-        _ => {
-            let normalized = value.replace('_', "");
-            let integer = if let Some(value) = normalized.strip_prefix("0x") {
-                BigInt::parse_bytes(value.as_bytes(), 16)
-            } else if let Some(value) = normalized.strip_prefix("0X") {
-                BigInt::parse_bytes(value.as_bytes(), 16)
-            } else if let Some(value) = normalized.strip_prefix("0b") {
-                BigInt::parse_bytes(value.as_bytes(), 2)
-            } else if let Some(value) = normalized.strip_prefix("0B") {
-                BigInt::parse_bytes(value.as_bytes(), 2)
-            } else {
-                BigInt::parse_bytes(normalized.as_bytes(), 10)
-            };
-            if let Some(value) = integer {
-                Ok(Value::Integer(Int::from_bigint(value)))
-            } else if let Ok(value) = normalized.parse::<f64>() {
-                Ok(Value::Number(value))
-            } else {
-                Ok(Value::String(value.to_string()))
-            }
-        }
-    }
-}
 pub(crate) fn number(value: Value) -> Result<f64, String> {
     match value {
         Value::Integer(value) => value
@@ -1672,7 +1692,7 @@ fn equal(left: &Value, right: &Value) -> bool {
         _ => false,
     }
 }
-fn compare(left: Value, op: &str, right: Value) -> Result<Value, String> {
+fn compare(left: Value, op: BinOp, right: Value) -> Result<Value, String> {
     let result = match (&left, &right) {
         (Value::String(a), Value::String(b)) => a.cmp(b),
         (Value::Integer(a), Value::Integer(b)) => a.cmp(b),
@@ -1681,14 +1701,14 @@ fn compare(left: Value, op: &str, right: Value) -> Result<Value, String> {
             .ok_or_else(|| "values are not comparable".to_string())?,
     };
     Ok(Value::Bool(match op {
-        "<" => result.is_lt(),
-        "<=" => result.is_le(),
-        ">" => result.is_gt(),
-        ">=" => result.is_ge(),
+        BinOp::Lt => result.is_lt(),
+        BinOp::Le => result.is_le(),
+        BinOp::Gt => result.is_gt(),
+        BinOp::Ge => result.is_ge(),
         _ => false,
     }))
 }
-fn bitwise(left: Value, op: &str, right: Value) -> Result<Value, String> {
+fn bitwise(left: Value, op: BinOp, right: Value) -> Result<Value, String> {
     let a = match left {
         Value::Integer(value) => value,
         value => Int::from_bigint(
@@ -1704,10 +1724,10 @@ fn bitwise(left: Value, op: &str, right: Value) -> Result<Value, String> {
         ),
     };
     Ok(Value::Integer(match op {
-        "&" => &a & &b,
-        "|" => &a | &b,
-        "~" => &a ^ &b,
-        "<<" => {
+        BinOp::BitAnd => &a & &b,
+        BinOp::BitOr => &a | &b,
+        BinOp::BitXor => &a ^ &b,
+        BinOp::Shl => {
             if let Some(shift) = b.to_i64() {
                 if shift < 0 {
                     let u = shift.unsigned_abs();
@@ -1729,7 +1749,7 @@ fn bitwise(left: Value, op: &str, right: Value) -> Result<Value, String> {
                 return Err("shift is too large".to_string());
             }
         }
-        ">>" => {
+        BinOp::Shr => {
             if let Some(shift) = b.to_i64() {
                 if shift < 0 {
                     let u = shift.unsigned_abs();
@@ -1751,14 +1771,14 @@ fn bitwise(left: Value, op: &str, right: Value) -> Result<Value, String> {
                 return Err("shift is too large".to_string());
             }
         }
-        "<<<" | ">>>" => {
+        BinOp::LShl | BinOp::LShr => {
             // Logical shifts act on the low 64 bits as an unsigned word, so
             // the result is always in 0..2^64 and shifting by 64+ yields 0.
             let word = a.low_u64();
             let bits = b.to_usize().unwrap_or(usize::MAX);
             Int::from_u64(match (op, bits) {
                 (_, 64..) => 0,
-                ("<<<", _) => word << bits,
+                (BinOp::LShl, _) => word << bits,
                 (_, _) => word >> bits,
             })
         }
