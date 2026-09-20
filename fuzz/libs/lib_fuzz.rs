@@ -5,7 +5,6 @@
 // and security restrictions across all standard library modules.
 
 use crate::compiler::{compile_source, compile_to_proto};
-use crate::vm::libs::crypto::sha256;
 use crate::vm::libs::json::decode_from_str;
 use crate::vm::libs::os::is_env_var_allowed;
 use crate::vm::machine::VM;
@@ -171,35 +170,52 @@ pub fn fuzz_number_parsing_and_radix() {
     assert!(execute_source(&cap_script).is_ok());
 }
 
-pub fn fuzz_crypto_sha256_boundaries() {
-    // Test SHA-256 padding boundary edge cases (55, 56, 63, 64, 65, 128 bytes)
+pub fn fuzz_crypto_boundaries() {
+    // SHA-256 padding boundaries (55, 56, 63, 64, 65, 128 bytes) through the
+    // bundled module, plus a few known answers.
     for len in [0, 1, 55, 56, 63, 64, 65, 119, 120, 127, 128, 512, 1024] {
-        let msg = vec![b'a'; len];
-        let hash = sha256(&msg);
-        assert_eq!(hash.len(), 64, "SHA-256 hash must be 64 hex characters");
+        let script = format!(
+            "local crypto = require(\"@neyuki/crypto\")
+return crypto.hash(string.rep(\"a\", {}))",
+            len
+        );
+        let hash = execute_source(&script).expect("hash should succeed");
+        assert_eq!(
+            hash.to_string().len(),
+            64,
+            "SHA-256 hash must be 64 hex characters"
+        );
     }
 
-    // Known test vectors:
-    // empty string -> e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-    assert_eq!(
-        sha256(b""),
-        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    );
-    // "abc" -> ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
-    assert_eq!(
-        sha256(b"abc"),
-        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-    );
-
-    // Crypto script via VM
     let crypto_script = r#"
         local crypto = require("@neyuki/crypto")
-        local h = crypto.hash("abc", "sha256")
-        assert(h == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        assert(crypto.hash("") == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        assert(crypto.hash("abc", "sha256") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
 
-        -- Unknown algorithm must error
-        local ok, _ = pcall(crypto.hash, "abc", "md5")
-        assert(ok == false)
+        -- Unknown algorithms and encodings must error, not panic
+        assert(pcall(crypto.hash, "abc", "rot13") == false)
+        assert(pcall(crypto.hash, "abc", "sha256", "base32") == false)
+
+        -- Malformed ciphertexts, keys and signatures must error, not panic
+        local key = crypto.generateKey()
+        for _, bad in {"", "!", "AAAA", crypto.randomBytes(5), crypto.randomBytes(64)} do
+            assert(pcall(crypto.decrypt, bad, key) == false)
+            assert(pcall(crypto.encrypt, "x", bad) == false)
+        end
+        local pair = crypto.generateKeyPair()
+        for _, bad in {"", "!", "AAAA", crypto.randomBytes(64), crypto.randomBytes(100)} do
+            assert(crypto.verify("x", bad, pair.publicKey) == false)
+        end
+        for _, bad in {"", "-----BEGIN PUBLIC KEY-----
+AAAA
+-----END PUBLIC KEY-----
+", pair.publicKey .. "x"} do
+            assert(pcall(crypto.sign, "x", bad) == false)
+            assert(pcall(crypto.verify, "x", "AAAA", bad) == false)
+        end
+        assert(pcall(crypto.verifyPassword, "x", "$argon2id$garbage") == false)
+        assert(pcall(crypto.verifyPassword, "x", "$2b$garbage") == false)
+        assert(pcall(crypto.verifyPassword, "x", "plain") == false)
     "#;
     assert!(execute_source(crypto_script).is_ok());
 }
@@ -252,7 +268,7 @@ mod tests {
         fuzz_json_parser_and_nesting();
         fuzz_string_and_utf8_edge_cases();
         fuzz_number_parsing_and_radix();
-        fuzz_crypto_sha256_boundaries();
+        fuzz_crypto_boundaries();
         fuzz_os_getenv_sandbox_leakage();
     }
 }

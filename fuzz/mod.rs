@@ -43,7 +43,7 @@ pub fn run_all_fuzz_tests() {
     libs::lib_fuzz::fuzz_json_parser_and_nesting();
     libs::lib_fuzz::fuzz_string_and_utf8_edge_cases();
     libs::lib_fuzz::fuzz_number_parsing_and_radix();
-    libs::lib_fuzz::fuzz_crypto_sha256_boundaries();
+    libs::lib_fuzz::fuzz_crypto_boundaries();
     libs::lib_fuzz::fuzz_os_getenv_sandbox_leakage();
 
     println!("=== All Fuzz Tests Passed Cleanly ===");

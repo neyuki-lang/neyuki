@@ -1,142 +1,359 @@
 local table = require("@neyuki/table")
-local string = require("@neyuki/string")
 
 local crypto = {}
 
-const MASK32 = 0xffffffff
+-- Every primitive here is native (src/crypto_lib.rs, on the RustCrypto and
+-- dalek crates); this module validates arguments and fills in defaults.
+--
+-- Binary values are strings in an `encoding`: "hex", "base64" or
+-- "base64url". Digests default to hex, everything else (keys, ciphertexts,
+-- signatures, random bytes) to base64. Asymmetric keys are PEM strings.
 
--- SHA-256 [FIPS 180-4]
--- Neyuki integers are arbitrary-precision, so every operation that can grow
--- past 32 bits (addition, left shift) is masked back down with `& MASK32`.
+const ENCODINGS = { hex = true, base64 = true, base64url = true }
 
--- round constants [§4.2.2]
-const K = {
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
-}
-
--- initial hash value [§5.3.3]
-const H0 = {
-    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
-}
-
-function rotr(x: int, n: int): int
-    return ((x >> n) | (x << (32 - n))) & MASK32
+function checkString(s: string, name: string)
+    if (s == nil) then error(name .. " must be provided") end
+    if (type(s) != "string") then error(name .. " must be a string") end
 end
 
--- logical functions [§4.1.2]
-function ch(x: int, y: int, z: int): int
-    return (x & y) ~ ((x ~ MASK32) & z)
+function checkOptionalString(s: string?, name: string)
+    if (s != nil) then checkString(s, name) end
 end
 
-function maj(x: int, y: int, z: int): int
-    return (x & y) ~ (x & z) ~ (y & z)
+function checkOptionalNumber(n: number?, name: string)
+    if (n != nil and type(n) != "number") then error(name .. " must be a number") end
 end
 
-function bigSigma0(x: int): int
-    return rotr(x, 2) ~ rotr(x, 13) ~ rotr(x, 22)
+function checkOptionalTable(t: {any}?, name: string)
+    if (t != nil and type(t) != "table") then error(name .. " must be a table") end
 end
 
-function bigSigma1(x: int): int
-    return rotr(x, 6) ~ rotr(x, 11) ~ rotr(x, 25)
-end
-
-function smallSigma0(x: int): int
-    return rotr(x, 7) ~ rotr(x, 18) ~ (x >> 3)
-end
-
-function smallSigma1(x: int): int
-    return rotr(x, 17) ~ rotr(x, 19) ~ (x >> 10)
-end
-
-function sha256(msg: string): string
-    -- PREPROCESSING [§5.1.1]: work on the UTF-8 bytes of msg; append 0x80,
-    -- zero-pad to 56 mod 64 bytes, then the original length in bits as a
-    -- 64-bit big-endian integer
-    const bitLength = #msg * 8
-    -- (appending via `bytes[#bytes + 1]` rather than table.insert, which
-    -- rescans the table to find its length and would make this quadratic)
-    local bytes = {}
-    for offset = 1, #msg, 4096 do
-        for _, byte in {string.byte(msg, offset, offset + 4095)} do
-            bytes[#bytes + 1] = byte
-        end
+function checkEncoding(encoding: string, name: string)
+    checkString(encoding, name)
+    if (ENCODINGS[encoding] == nil) then
+        error(name .. " must be hex, base64 or base64url")
     end
-    bytes[#bytes + 1] = 0x80
-    while (#bytes % 64 != 56) do
-        bytes[#bytes + 1] = 0
-    end
-    for shift = 56, 0, -8 do
-        bytes[#bytes + 1] = (bitLength >> shift) & 0xff
-    end
-
-    local H = table.clone(H0)
-    local W = {}
-
-    -- HASH COMPUTATION [§6.2.2], one 64-byte block at a time
-    for offset = 0, #bytes - 1, 64 do
-        -- 1 - prepare message schedule W (big-endian words)
-        for t = 1, 16 do
-            const i = offset + (t - 1) * 4
-            W[t] = (bytes[i + 1] << 24) | (bytes[i + 2] << 16) | (bytes[i + 3] << 8) | bytes[i + 4]
-        end
-        for t = 17, 64 do
-            W[t] = (smallSigma1(W[t - 2]) + W[t - 7] + smallSigma0(W[t - 15]) + W[t - 16]) & MASK32
-        end
-
-        -- 2 - initialise working variables with the previous hash value
-        local a, b, c, d, e, f, g, h = H[1], H[2], H[3], H[4], H[5], H[6], H[7], H[8]
-
-        -- 3 - main loop
-        for t = 1, 64 do
-            const T1 = (h + bigSigma1(e) + ch(e, f, g) + K[t] + W[t]) & MASK32
-            const T2 = (bigSigma0(a) + maj(a, b, c)) & MASK32
-            h = g
-            g = f
-            f = e
-            e = (d + T1) & MASK32
-            d = c
-            c = b
-            b = a
-            a = (T1 + T2) & MASK32
-        end
-
-        -- 4 - compute the new intermediate hash value
-        H[1] = (H[1] + a) & MASK32
-        H[2] = (H[2] + b) & MASK32
-        H[3] = (H[3] + c) & MASK32
-        H[4] = (H[4] + d) & MASK32
-        H[5] = (H[5] + e) & MASK32
-        H[6] = (H[6] + f) & MASK32
-        H[7] = (H[7] + g) & MASK32
-        H[8] = (H[8] + h) & MASK32
-    end
-
-    -- hex digest, 8 zero-padded digits per word
-    local parts = {}
-    for i, word in H do
-        parts[i] = string.format("%08x", word)
-    end
-    return table.concat(parts, "")
 end
 
-function crypto.hash(s: string, algorithm: "sha256"): string
-    if (s == nil) then error("s must be provided") end
-    if (type(s) != "string") then error("s must be a string") end
-    if (algorithm == nil) then error("algorithm must be provided") end
-    if (type(algorithm) != "string") then error("algorithm must be a string") end
-
-    if (algorithm == "sha256") then
-        return sha256(s)
+-- Reads `options[key]` with a default, checking its type against the
+-- default's type when both are present.
+function option(options: {[string]: any}, key: string, default: any): any
+    local value = options[key]
+    if (value == nil) then return default end
+    if (default != nil and type(value) != type(default)) then
+        error(key .. " must be a " .. type(default))
     end
+    return value
+end
 
-    error("unknown algorithm, '" .. algorithm .. "'")
+function encodingOption(options: {[string]: any}, default: string): string
+    local encoding = option(options, "encoding", default)
+    checkEncoding(encoding, "encoding")
+    return encoding
+end
+
+-- HASHING ------------------------------------------------------------------
+
+-- Digest of the UTF-8 bytes of `s`. Algorithms: sha256 (default), sha224,
+-- sha384, sha512, sha3-256, sha3-512, blake2b, blake2s, sha1 and md5 (the
+-- last two only for interoperability; do not use them for anything new).
+function crypto.hash(s: string, algorithm: string?, encoding: string?): string
+    checkString(s, "s")
+    checkOptionalString(algorithm, "algorithm")
+    if (encoding != nil) then checkEncoding(encoding, "encoding") end
+    return __crypto_hash(algorithm ?? "sha256", s, encoding ?? "hex")
+end
+
+-- Keyed digest (HMAC) of `s`. Takes the same algorithms as `hash` except
+-- blake2b and blake2s.
+function crypto.hmac(s: string, key: string, algorithm: string?, encoding: string?): string
+    checkString(s, "s")
+    checkString(key, "key")
+    checkOptionalString(algorithm, "algorithm")
+    if (encoding != nil) then checkEncoding(encoding, "encoding") end
+    return __crypto_hmac(algorithm ?? "sha256", key, s, encoding ?? "hex")
+end
+
+-- Compares two strings in constant time. Use it for MACs, tokens and
+-- password reset codes, where `==` would leak how much of a guess matched.
+function crypto.equals(a: string, b: string): boolean
+    checkString(a, "a")
+    checkString(b, "b")
+    return __crypto_equals(a, b)
+end
+
+-- KEY DERIVATION -------------------------------------------------------------
+
+-- Stretches a password into a key with PBKDF2. `options` may hold:
+--   algorithm   the HMAC digest (default "sha256")
+--   iterations  the work factor (default 600000, per OWASP for sha256)
+--   length      key length in bytes (default 32)
+--   encoding    of the result (default "base64")
+-- Prefer `hashPassword` for storing passwords; pbkdf2 is for deriving keys
+-- and for matching systems that already use it.
+function crypto.pbkdf2(password: string, salt: string, options: {[string]: any}?): string
+    checkString(password, "password")
+    checkString(salt, "salt")
+    checkOptionalTable(options, "options")
+    options = options ?? {}
+    return __crypto_pbkdf2(
+        option(options, "algorithm", "sha256"),
+        password,
+        salt,
+        option(options, "iterations", 600000),
+        option(options, "length", 32),
+        encodingOption(options, "base64")
+    )
+end
+
+-- Derives a key from key material that is already random (a shared secret,
+-- a master key) with HKDF. `options` may hold `algorithm` (default
+-- "sha256"), `salt`, `info` (what the key is for, so different purposes get
+-- different keys), `length` (default 32) and `encoding` (default "base64"),
+-- which applies to both `key` and the result.
+function crypto.hkdf(key: string, options: {[string]: any}?): string
+    checkString(key, "key")
+    checkOptionalTable(options, "options")
+    options = options ?? {}
+    return __crypto_hkdf(
+        option(options, "algorithm", "sha256"),
+        key,
+        option(options, "salt", ""),
+        option(options, "info", ""),
+        option(options, "length", 32),
+        encodingOption(options, "base64")
+    )
+end
+
+-- PASSWORDS ----------------------------------------------------------------
+
+-- Hashes a password for storage, salted, into a self-describing string that
+-- `verifyPassword` checks later. `options` may hold:
+--   algorithm    "argon2id" (default) or "bcrypt"
+--   cost         argon2 iterations (default 2) or bcrypt log2 rounds (default 12)
+--   memory       argon2 memory in KiB (default 19456)
+--   parallelism  argon2 lanes (default 1)
+-- bcrypt only reads the first 72 bytes of a password, so longer ones are
+-- rejected rather than silently truncated.
+function crypto.hashPassword(password: string, options: {[string]: any}?): string
+    checkString(password, "password")
+    checkOptionalTable(options, "options")
+    options = options ?? {}
+    local algorithm = option(options, "algorithm", "argon2id")
+    local defaultCost = 2
+    if (algorithm == "bcrypt") then defaultCost = 12 end
+    return __crypto_password_hash(
+        algorithm,
+        password,
+        option(options, "cost", defaultCost),
+        option(options, "memory", 19456),
+        option(options, "parallelism", 1)
+    )
+end
+
+-- Checks a password against a hash from `hashPassword` (or any other
+-- argon2 / bcrypt implementation). Returns false on a mismatch and errors
+-- only when `hash` is not a recognisable hash.
+function crypto.verifyPassword(password: string, hash: string): boolean
+    checkString(password, "password")
+    checkString(hash, "hash")
+    return __crypto_password_verify(password, hash)
+end
+
+-- SYMMETRIC ENCRYPTION -------------------------------------------------------
+
+-- Makes a random key for `encrypt`. Ciphers: aes-256-gcm (default),
+-- aes-128-gcm, chacha20-poly1305 and xchacha20-poly1305. `options` may hold
+-- the key's `encoding` (default "base64"); pass the same encoding to
+-- `encrypt` and `decrypt`.
+function crypto.generateKey(algorithm: string?, options: {[string]: any}?): string
+    checkOptionalString(algorithm, "algorithm")
+    checkOptionalTable(options, "options")
+    return __crypto_generate_key(algorithm ?? "aes-256-gcm", encodingOption(options ?? {}, "base64"))
+end
+
+-- Encrypts and authenticates `s` with a key from `generateKey` (or
+-- `pbkdf2` / `hkdf`). A fresh random nonce is generated every call and
+-- stored with the ciphertext, so the same input never encrypts the same
+-- way twice. `options` may hold:
+--   algorithm  the cipher (default "aes-256-gcm")
+--   aad        extra data that is authenticated but not encrypted, such as
+--              a record id; `decrypt` must be given the same value
+--   encoding   of the key and ciphertext (default "base64")
+function crypto.encrypt(s: string, key: string, options: {[string]: any}?): string
+    checkString(s, "s")
+    checkString(key, "key")
+    checkOptionalTable(options, "options")
+    options = options ?? {}
+    return __crypto_encrypt(
+        option(options, "algorithm", "aes-256-gcm"),
+        key,
+        s,
+        option(options, "aad", ""),
+        encodingOption(options, "base64")
+    )
+end
+
+-- Reverses `encrypt`, taking the same options. Errors if the key is wrong,
+-- the data was tampered with or the `aad` differs.
+function crypto.decrypt(s: string, key: string, options: {[string]: any}?): string
+    checkString(s, "s")
+    checkString(key, "key")
+    checkOptionalTable(options, "options")
+    options = options ?? {}
+    return __crypto_decrypt(
+        option(options, "algorithm", "aes-256-gcm"),
+        key,
+        s,
+        option(options, "aad", ""),
+        encodingOption(options, "base64")
+    )
+end
+
+-- ASYMMETRIC KEYS ------------------------------------------------------------
+
+-- Generates a key pair as `{ publicKey, privateKey }` PEM strings (PKCS#8
+-- and SPKI, so OpenSSL and other languages read them). Algorithms:
+--   ed25519  (default) signing; small, fast keys
+--   x25519   key agreement with `sharedSecret`
+--   rsa      signing and `publicEncrypt`; `options.bits` defaults to 2048
+function crypto.generateKeyPair(algorithm: string?, options: {[string]: any}?): KeyPair
+    checkOptionalString(algorithm, "algorithm")
+    checkOptionalTable(options, "options")
+    local privateKey, publicKey = __crypto_generate_keypair(
+        algorithm ?? "ed25519",
+        option(options ?? {}, "bits", 2048)
+    )
+    return table.freeze({ publicKey = publicKey, privateKey = privateKey })
+end
+
+-- The public half of a private key PEM.
+function crypto.publicKey(privateKey: string): string
+    checkString(privateKey, "privateKey")
+    return __crypto_public_key(privateKey)
+end
+
+-- Signs `s` with an ed25519 or RSA private key. `options` may hold
+-- `encoding` of the signature (default "base64") and, for RSA, `hash`
+-- (default "sha256") and `padding` ("pss", the default, or "pkcs1" for
+-- older systems).
+function crypto.sign(s: string, privateKey: string, options: {[string]: any}?): string
+    checkString(s, "s")
+    checkString(privateKey, "privateKey")
+    checkOptionalTable(options, "options")
+    options = options ?? {}
+    return __crypto_sign(
+        privateKey,
+        s,
+        option(options, "hash", "sha256"),
+        option(options, "padding", "pss"),
+        encodingOption(options, "base64")
+    )
+end
+
+-- Checks a signature from `sign`, taking the same options. Returns false
+-- for a bad or malformed signature. Accepts a private key in place of the
+-- public one.
+function crypto.verify(s: string, signature: string, publicKey: string, options: {[string]: any}?): boolean
+    checkString(s, "s")
+    checkString(signature, "signature")
+    checkString(publicKey, "publicKey")
+    checkOptionalTable(options, "options")
+    options = options ?? {}
+    return __crypto_verify(
+        publicKey,
+        s,
+        signature,
+        option(options, "hash", "sha256"),
+        option(options, "padding", "pss"),
+        encodingOption(options, "base64")
+    )
+end
+
+-- Encrypts a short message (at most the key size minus overhead, 190 bytes
+-- for a 2048-bit key) to an RSA public key with OAEP. To send anything
+-- larger, encrypt it with `encrypt` and wrap only that key here. `options`
+-- may hold `hash` (default "sha256") and `encoding` (default "base64").
+function crypto.publicEncrypt(s: string, publicKey: string, options: {[string]: any}?): string
+    checkString(s, "s")
+    checkString(publicKey, "publicKey")
+    checkOptionalTable(options, "options")
+    options = options ?? {}
+    return __crypto_public_encrypt(
+        publicKey,
+        s,
+        option(options, "hash", "sha256"),
+        encodingOption(options, "base64")
+    )
+end
+
+-- Reverses `publicEncrypt` with the matching private key.
+function crypto.privateDecrypt(s: string, privateKey: string, options: {[string]: any}?): string
+    checkString(s, "s")
+    checkString(privateKey, "privateKey")
+    checkOptionalTable(options, "options")
+    options = options ?? {}
+    return __crypto_private_decrypt(
+        privateKey,
+        s,
+        option(options, "hash", "sha256"),
+        encodingOption(options, "base64")
+    )
+end
+
+-- X25519 key agreement: both sides get the same secret from their own
+-- private key and the other's public key. Run it through `hkdf` (with an
+-- `info` naming the purpose) before using it as an encryption key.
+function crypto.sharedSecret(privateKey: string, publicKey: string, options: {[string]: any}?): string
+    checkString(privateKey, "privateKey")
+    checkString(publicKey, "publicKey")
+    checkOptionalTable(options, "options")
+    return __crypto_shared_secret(privateKey, publicKey, encodingOption(options ?? {}, "base64"))
+end
+
+-- RANDOMNESS -----------------------------------------------------------------
+
+-- `n` bytes from the operating system's secure generator (default encoding
+-- "base64"). Use this, not `math.random`, for tokens, salts and keys.
+function crypto.randomBytes(n: number, encoding: string?): string
+    if (type(n) != "number") then error("n must be a number") end
+    if (encoding != nil) then checkEncoding(encoding, "encoding") end
+    return __crypto_random_bytes(n, encoding ?? "base64")
+end
+
+-- A secure random integer, following `math.random`: `randomInt(n)` is in
+-- [1, n] and `randomInt(min, max)` in [min, max].
+function crypto.randomInt(min: number, max: number?): number
+    if (type(min) != "number") then error("min must be a number") end
+    if (max == nil) then
+        if (min < 1) then error("n must be greater than or equal to 1") end
+        return __crypto_random_int(1, min)
+    end
+    if (type(max) != "number") then error("max must be a number") end
+    if (min > max) then error("min must be less than or equal to max") end
+    return __crypto_random_int(min, max)
+end
+
+-- A random UUID (version 4), like "1b4e28ba-2fa1-4d3b-9c0e-3f6a1e2d5b7c".
+function crypto.uuid(): string
+    return __crypto_uuid()
+end
+
+-- ENCODING -------------------------------------------------------------------
+
+-- Encodes the bytes of `s` as "hex", "base64" or "base64url".
+function crypto.encode(s: string, encoding: string): string
+    checkString(s, "s")
+    checkEncoding(encoding, "encoding")
+    return __crypto_encode(encoding, s)
+end
+
+-- Reverses `encode`. The decoded bytes must be text (UTF-8); decoded keys
+-- and ciphertexts should stay encoded instead.
+function crypto.decode(s: string, encoding: string): string
+    checkString(s, "s")
+    checkEncoding(encoding, "encoding")
+    return __crypto_decode(encoding, s)
 end
 
 return table.freeze(crypto)

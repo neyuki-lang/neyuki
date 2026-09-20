@@ -6,6 +6,7 @@ pub mod ast;
 mod bench;
 mod bytecode;
 mod compiler;
+mod crypto_lib;
 pub mod diagnostics;
 mod fs_lib;
 #[path = "../fuzz/mod.rs"]

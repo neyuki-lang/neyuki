@@ -294,10 +294,10 @@ pub fn builtin_require(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String
         "@neyuki/debug" | "debug" => "debug",
         "@neyuki/json" | "json" => "json",
         "@neyuki/utf8" | "utf8" => "utf8",
-        "@neyuki/crypto" | "crypto" => "crypto",
         other => {
-            // Modules with no Rust counterpart in the VM (http, fs, io) are the
-            // bundled `lib/*.nyk` sources, run on top of the bridged natives.
+            // Modules with no Rust counterpart in the VM (http, fs, io, crypto)
+            // are the bundled `lib/*.nyk` sources, run on top of the bridged
+            // natives.
             if let Some(val) = load_bundled_module(vm, other)? {
                 return Ok(vec![val]);
             }

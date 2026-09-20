@@ -1,0 +1,240 @@
+local crypto = require("@neyuki/crypto")
+local string = require("@neyuki/string")
+
+-- HASHING ------------------------------------------------------------------
+
+-- SHA-256 known-answer tests (FIPS 180-4 examples plus a few common ones)
+local vectors = {
+    {"", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+    {"abc", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"},
+    {"test", "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"},
+    -- 55 bytes: message + 0x80 exactly fills one block, no room for the length
+    {string.rep("a", 55), "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318"},
+    -- 56 bytes: padding must spill into a second block
+    {"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq", "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"},
+    -- exactly one block
+    {string.rep("a", 64), "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb"},
+    {"The quick brown fox jumps over the lazy dog", "d7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592"},
+    -- hashes the UTF-8 bytes, matching `printf '...' | sha256sum`
+    {"héllo wörld ✓", "c2a59c71097b678dc5af2eb1f98ddc575b63948b0fa6740071a945673aaada4d"},
+    {string.rep("a", 1000), "41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3"}
+}
+
+for _, vector in vectors do
+    local got = crypto.hash(vector[1], "sha256")
+    assert(got == vector[2], "sha256 mismatch for input of " .. #vector[1] .. " bytes: got " .. got)
+end
+assert(crypto.hash("abc") == crypto.hash("abc", "sha256"), "sha256 should be the default algorithm")
+
+-- one known answer per remaining algorithm (from the respective RFC / FIPS
+-- examples, or `openssl dgst`)
+local abc = {
+    md5 = "900150983cd24fb0d6963f7d28e17f72",
+    sha1 = "a9993e364706816aba3e25717850c26c9cd0d89d",
+    sha224 = "23097d223405d8228642a477bda255b32aadbce4bda0b3f7e36c9da7",
+    sha384 = "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7",
+    sha512 = "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f",
+    ["sha3-256"] = "3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532",
+    ["sha3-512"] = "b751850b1a57168a5693cd924b6b096e08f621827444f70d884f5d0240d2712e10e116e9192af3c91a7ec57647e3934057340b4cf408d5a56592f8274eec53f0",
+    blake2b = "ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d17d87c5392aab792dc252d5de4533cc9518d38aa8dbf1925ab92386edd4009923",
+    blake2s = "508c5e8c327c14e2e1a72ba34eeb452f37458b209ed63a294d999b4c86675982"
+}
+for algorithm, expected in abc do
+    assert(crypto.hash("abc", algorithm) == expected, algorithm .. " mismatch")
+end
+
+-- other output encodings
+assert(crypto.hash("abc", "md5", "base64") == "kAFQmDzST7DWlj99KOF/cg==", "md5 base64")
+assert(crypto.hash("abc", "md5", "base64url") == "kAFQmDzST7DWlj99KOF_cg", "md5 base64url has no padding and is url-safe")
+
+-- HMAC: RFC 4231 test case 2 and a Python cross-check
+assert(crypto.hmac("what do ya want for nothing?", "Jefe") == "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843", "hmac-sha256")
+assert(crypto.hmac("what do ya want for nothing?", "Jefe", "sha512") == "164b7a7bfcf819e2e395fbe73b56e0a387bd64222e831fd610270cd7ea2505549758bf75c05a994a6d034f65f8f0e6fdcaeab1a34d4a6b4b636e070a38bce737", "hmac-sha512")
+assert(crypto.hmac("abc", "key", "sha256", "base64url") == "nBluMtwBdfhvSxy4konWYZ3mvuaZ5MN45oMJ7Zehpqs", "hmac base64url")
+assert(not try(crypto.hmac, "abc", "key", "blake2b"), "blake2 has no hmac")
+
+-- constant-time comparison
+assert(crypto.equals("abc", "abc"), "equal strings")
+assert(not crypto.equals("abc", "abd"), "different strings")
+assert(not crypto.equals("abc", "abcd"), "different lengths")
+
+-- argument validation
+assert(not try(crypto.hash, "abc", "rot13"), "unknown algorithm must error")
+assert(not try(crypto.hash, 123, "sha256"), "non-string input must error")
+assert(not try(crypto.hash, "abc", "sha256", "base32"), "unknown encoding must error")
+assert(not try(crypto.hash), "missing input must error")
+
+print("[pass] crypto.hash / hmac / equals")
+
+-- KEY DERIVATION -------------------------------------------------------------
+
+-- RFC 6070 (PBKDF2-HMAC-SHA1) and a Python hashlib cross-check for sha256
+assert(crypto.pbkdf2("password", "salt", { algorithm = "sha1", iterations = 2, length = 20, encoding = "hex" }) == "ea6c014dc72d6f8ccd1ed92ace1d41f0d8de8957", "pbkdf2-sha1 rfc 6070")
+assert(crypto.pbkdf2("pw", "salt", { iterations = 1000, encoding = "hex" }) == "0a38253555ce37f5c72a6b703f996814ebf241f203af146e93dcdeb031c5567e", "pbkdf2-sha256")
+assert(#crypto.pbkdf2("pw", "salt", { iterations = 1 }) == 44, "32 bytes is 44 base64 characters")
+assert(not try(crypto.pbkdf2, "pw", "salt", { iterations = 0 }), "zero iterations must error")
+
+-- RFC 5869 test case 3 (the key material is hex, like the output)
+assert(crypto.hkdf("0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b", { length = 42, encoding = "hex" })
+    == "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d9d201395faa4b61a96c8", "hkdf rfc 5869")
+local master = crypto.randomBytes(32)
+assert(crypto.hkdf(master, { info = "a" }) != crypto.hkdf(master, { info = "b" }), "info separates keys")
+assert(#crypto.hkdf(master, { info = "a" }) == 44, "hkdf output is 32 bytes by default")
+assert(not try(crypto.hkdf, master, { length = 10000 }), "hkdf output is bounded")
+assert(not try(crypto.hkdf, "not base64!"), "key must be encoded")
+
+print("[pass] crypto.pbkdf2 / hkdf")
+
+-- PASSWORDS ----------------------------------------------------------------
+
+-- (low costs keep the test quick; the defaults are the production values)
+local hash = crypto.hashPassword("correct horse battery staple", { memory = 1024 })
+assert(string.sub(hash, 1, 10) == "$argon2id$", "argon2id is the default: " .. hash)
+assert(crypto.verifyPassword("correct horse battery staple", hash), "argon2 verify")
+assert(not crypto.verifyPassword("correct horse battery stapler", hash), "argon2 reject")
+assert(crypto.hashPassword("x", { memory = 1024 }) != crypto.hashPassword("x", { memory = 1024 }), "each hash gets its own salt")
+
+local bhash = crypto.hashPassword("hunter2", { algorithm = "bcrypt", cost = 4 })
+assert(string.sub(bhash, 1, 4) == "$2b$", "bcrypt prefix: " .. bhash)
+assert(crypto.verifyPassword("hunter2", bhash), "bcrypt verify")
+assert(not crypto.verifyPassword("hunter3", bhash), "bcrypt reject")
+assert(not try(crypto.hashPassword, string.rep("a", 73), { algorithm = "bcrypt", cost = 4 }), "bcrypt truncation is refused")
+assert(not try(crypto.hashPassword, "x", { algorithm = "bcrypt", cost = 99 }), "bcrypt cost is bounded")
+
+-- hashes made by other implementations (`openssl kdf argon2id`, PHP's password_hash)
+assert(crypto.verifyPassword("password", "$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQxMjM0NTY3OA$ZNOIrrAHtmQzbCNX391HxJY0DBLY7ofdM/Ba6SOqVxg"), "external argon2 hash")
+assert(not crypto.verifyPassword("Password", "$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQxMjM0NTY3OA$ZNOIrrAHtmQzbCNX391HxJY0DBLY7ofdM/Ba6SOqVxg"), "external argon2 hash, wrong password")
+assert(crypto.verifyPassword("password", "$2y$05$bvIG6Nmid91Mu9RcmmWZfO5HJIMCT8riNW0hEp8f6/FuA2/mHZFpe"), "external bcrypt hash")
+assert(not try(crypto.verifyPassword, "x", "not a hash"), "unrecognised hash must error")
+assert(not try(crypto.verifyPassword, "x", "$argon2id$garbage"), "malformed hash must error")
+
+print("[pass] crypto.hashPassword / verifyPassword")
+
+-- SYMMETRIC ENCRYPTION -------------------------------------------------------
+
+for _, algorithm in {"aes-256-gcm", "aes-128-gcm", "chacha20-poly1305", "xchacha20-poly1305"} do
+    local key = crypto.generateKey(algorithm)
+    local options = { algorithm = algorithm }
+    local sealed = crypto.encrypt("attack at dawn ✓", key, options)
+    assert(crypto.decrypt(sealed, key, options) == "attack at dawn ✓", algorithm .. " round trip")
+    assert(crypto.encrypt("x", key, options) != crypto.encrypt("x", key, options), algorithm .. " uses a fresh nonce")
+    assert(not try(crypto.decrypt, sealed, crypto.generateKey(algorithm), options), algorithm .. " wrong key must error")
+    assert(not try(crypto.decrypt, crypto.generateKey(algorithm), key, options), algorithm .. " garbage must error")
+    assert(not try(crypto.decrypt, string.sub(sealed, 1, -2) .. "A", key, options), algorithm .. " tampering must error")
+end
+
+local key = crypto.generateKey()
+assert(#key == 44, "aes-256 keys are 32 bytes")
+local sealed = crypto.encrypt("row data", key, { aad = "row:42" })
+assert(crypto.decrypt(sealed, key, { aad = "row:42" }) == "row data", "aad round trip")
+assert(not try(crypto.decrypt, sealed, key, { aad = "row:43" }), "different aad must error")
+assert(not try(crypto.decrypt, sealed, key), "missing aad must error")
+assert(crypto.decrypt(crypto.encrypt("", key), key) == "", "empty plaintext")
+
+local hexKey = crypto.generateKey("aes-128-gcm", { encoding = "hex" })
+assert(#hexKey == 32, "hex encoded 16-byte key")
+local hexSealed = crypto.encrypt("hi", hexKey, { algorithm = "aes-128-gcm", encoding = "hex" })
+assert(crypto.decrypt(hexSealed, hexKey, { algorithm = "aes-128-gcm", encoding = "hex" }) == "hi", "hex round trip")
+assert(not try(crypto.encrypt, "hi", hexKey), "a 16-byte key is wrong for aes-256")
+assert(not try(crypto.generateKey, "des"), "unknown cipher must error")
+
+-- keys derived from passwords work as encryption keys
+local derived = crypto.pbkdf2("passphrase", "unique salt", { iterations = 1000 })
+assert(crypto.decrypt(crypto.encrypt("hello", derived), derived) == "hello", "pbkdf2 key")
+
+print("[pass] crypto.encrypt / decrypt")
+
+-- ASYMMETRIC -----------------------------------------------------------------
+
+local ed = crypto.generateKeyPair()
+assert(string.sub(ed.privateKey, 1, 27) == "-----BEGIN PRIVATE KEY-----", "pkcs#8 private key")
+assert(string.sub(ed.publicKey, 1, 26) == "-----BEGIN PUBLIC KEY-----", "spki public key")
+assert(crypto.publicKey(ed.privateKey) == ed.publicKey, "publicKey derives the public half")
+local signature = crypto.sign("message", ed.privateKey)
+assert(#signature == 88, "ed25519 signatures are 64 bytes")
+assert(crypto.verify("message", signature, ed.publicKey), "ed25519 verify")
+assert(crypto.verify("message", signature, ed.privateKey), "verify accepts the private key too")
+assert(not crypto.verify("massage", signature, ed.publicKey), "ed25519 reject")
+assert(not crypto.verify("message", signature, crypto.generateKeyPair().publicKey), "wrong key")
+assert(not crypto.verify("message", "not base64!", ed.publicKey), "malformed signature is just invalid")
+assert(crypto.sign("message", ed.privateKey) == signature, "ed25519 is deterministic")
+assert(not try(crypto.publicEncrypt, "x", ed.publicKey), "ed25519 cannot encrypt")
+
+-- RFC 8032 §7.1 test 1: a known ed25519 key and its signature over ""
+local rfcPrivate = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIJ1hsZ3v/VpguoRK9JLsLMREScVpezJpGXA7rAMcrn9g\n-----END PRIVATE KEY-----\n"
+assert(crypto.sign("", rfcPrivate, { encoding = "hex" }) == "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b", "rfc 8032 signature")
+assert(crypto.publicKey(rfcPrivate) == "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\n-----END PUBLIC KEY-----\n", "rfc 8032 public key")
+
+-- (1024-bit keys keep the test quick; the default is 2048)
+local rsa = crypto.generateKeyPair("rsa", { bits = 1024 })
+local pss = crypto.sign("message", rsa.privateKey)
+assert(crypto.verify("message", pss, rsa.publicKey), "rsa-pss verify")
+assert(crypto.sign("message", rsa.privateKey) != pss, "pss is randomised")
+assert(not crypto.verify("message", pss, rsa.publicKey, { padding = "pkcs1" }), "padding must match")
+local pkcs1 = crypto.sign("message", rsa.privateKey, { padding = "pkcs1", hash = "sha512" })
+assert(crypto.verify("message", pkcs1, rsa.publicKey, { padding = "pkcs1", hash = "sha512" }), "rsa pkcs#1 v1.5 verify")
+assert(not crypto.verify("message", pkcs1, rsa.publicKey, { padding = "pkcs1" }), "hash must match")
+assert(not try(crypto.sign, "message", rsa.privateKey, { padding = "none" }), "unknown padding must error")
+assert(not try(crypto.sign, "message", rsa.privateKey, { hash = "md5" }), "md5 is not accepted for signatures")
+
+local wrapped = crypto.publicEncrypt("session key", rsa.publicKey)
+assert(crypto.privateDecrypt(wrapped, rsa.privateKey) == "session key", "rsa-oaep round trip")
+assert(crypto.publicEncrypt("x", rsa.publicKey) != crypto.publicEncrypt("x", rsa.publicKey), "oaep is randomised")
+assert(not try(crypto.privateDecrypt, wrapped, crypto.generateKeyPair("rsa", { bits = 1024 }).privateKey), "wrong rsa key must error")
+assert(not try(crypto.publicEncrypt, string.rep("a", 200), rsa.publicKey), "oaep messages are bounded by the key size")
+assert(not try(crypto.generateKeyPair, "rsa", { bits = 512 }), "tiny rsa keys are refused")
+
+local alice = crypto.generateKeyPair("x25519")
+local bob = crypto.generateKeyPair("x25519")
+local shared = crypto.sharedSecret(alice.privateKey, bob.publicKey)
+assert(shared == crypto.sharedSecret(bob.privateKey, alice.publicKey), "both sides agree")
+assert(shared != crypto.sharedSecret(crypto.generateKeyPair("x25519").privateKey, bob.publicKey), "a third party does not")
+assert(#crypto.hkdf(shared, { info = "chat v1" }) == 44, "shared secret feeds hkdf")
+assert(not try(crypto.sharedSecret, ed.privateKey, bob.publicKey), "sharedSecret needs x25519 keys")
+assert(not try(crypto.sign, "m", alice.privateKey), "x25519 keys cannot sign")
+assert(not try(crypto.generateKeyPair, "dsa"), "unknown key algorithm must error")
+assert(not try(crypto.sign, "m", "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n"), "garbage pem must error")
+
+-- RFC 7748 §6.1 test vector: Alice's private key against Bob's public key
+local rfcAlice = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VuBCIEIHcHbQpzGKV9PBbBclGyZkXfTC+H68CZKrF3+6UduSwq\n-----END PRIVATE KEY-----\n"
+local rfcBob = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VuAyEA3p7bfXt9wbTTW2HC7OQ1Nz+DQ8hbeGdNrfx+FG+IK08=\n-----END PUBLIC KEY-----\n"
+assert(crypto.sharedSecret(rfcAlice, rfcBob, { encoding = "hex" }) == "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742", "rfc 7748 shared secret")
+
+print("[pass] crypto.generateKeyPair / sign / verify / publicEncrypt / sharedSecret")
+
+-- RANDOMNESS AND ENCODING ----------------------------------------------------
+
+assert(#crypto.randomBytes(16, "hex") == 32, "hex random bytes")
+assert(#crypto.randomBytes(16) == 24, "base64 random bytes")
+assert(crypto.randomBytes(16) != crypto.randomBytes(16), "random bytes differ")
+assert(crypto.randomBytes(0) == "", "zero random bytes")
+for _ = 1, 50 do
+    local n = crypto.randomInt(6)
+    assert(n >= 1 and n <= 6, "randomInt(n) is in [1, n]")
+    local m = crypto.randomInt(-3, 3)
+    assert(m >= -3 and m <= 3, "randomInt(min, max) is in [min, max]")
+end
+assert(crypto.randomInt(7, 7) == 7, "single-value range")
+assert(not try(crypto.randomInt, 5, 1), "inverted range must error")
+assert(not try(crypto.randomInt, 0), "randomInt(0) must error")
+
+local uuid = crypto.uuid()
+assert(#uuid == 36, "uuid length")
+assert(string.match(uuid, "^%x%x%x%x%x%x%x%x%-%x%x%x%x%-4%x%x%x%-[89ab]%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$") != nil, "uuid v4 shape: " .. uuid)
+assert(crypto.uuid() != uuid, "uuids differ")
+
+assert(crypto.encode("hi there", "base64") == "aGkgdGhlcmU=", "base64 encode")
+assert(crypto.encode("hi there", "base64url") == "aGkgdGhlcmU", "base64url encode")
+assert(crypto.encode("hi", "hex") == "6869", "hex encode")
+assert(crypto.decode("aGkgdGhlcmU=", "base64") == "hi there", "base64 decode")
+assert(crypto.decode("aGkgdGhlcmU", "base64") == "hi there", "base64 decode tolerates missing padding")
+assert(crypto.decode("aGkgdGhlcmU", "base64url") == "hi there", "base64url decode")
+assert(crypto.decode("6869", "hex") == "hi", "hex decode")
+assert(crypto.decode(crypto.encode("✓ ünïcödé", "base64"), "base64") == "✓ ünïcödé", "utf-8 round trip")
+assert(not try(crypto.decode, "686", "hex"), "odd hex must error")
+assert(not try(crypto.decode, "zz", "hex"), "non-hex must error")
+assert(not try(crypto.decode, "!!!", "base64"), "non-base64 must error")
+assert(not try(crypto.decode, "gA==", "base64"), "bytes that are not utf-8 must error")
+assert(not try(crypto.encode, "x", "base32"), "unknown encoding must error")
+
+print("[pass] crypto.randomBytes / randomInt / uuid / encode / decode")

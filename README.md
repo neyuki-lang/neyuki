@@ -10,6 +10,7 @@ The project currently includes:
 - a small runtime with builtins like `print`, `assert`, `try`, and `require`
 - a bundled library example (`@neyuki/math`)
 - an HTTP client and server (`@neyuki/http`)
+- hashing, password hashing, authenticated encryption and signatures (`@neyuki/crypto`)
 - a VS Code extension for syntax highlighting in the sibling `editor-extensions/neyuki` folder
 
 ## Why Neyuki?

@@ -8,9 +8,9 @@ use crate::vm::frame::CallFrame;
 use crate::vm::gc::GcTracker;
 use crate::vm::hash::{FxHashMap, new_map};
 use crate::vm::libs::{
-    create_bit_lib, create_buffer_lib, create_coroutine_lib, create_crypto_lib, create_debug_lib,
-    create_json_lib, create_math_lib, create_os_lib, create_string_lib, create_table_lib,
-    create_utf8_lib, register_bridged_natives,
+    create_bit_lib, create_buffer_lib, create_coroutine_lib, create_debug_lib, create_json_lib,
+    create_math_lib, create_os_lib, create_string_lib, create_table_lib, create_utf8_lib,
+    register_bridged_natives,
 };
 use crate::vm::ops;
 use crate::vm::value::{NativeDef, Upvalue, Value, VmClosure, VmTable};
@@ -114,7 +114,6 @@ impl VM {
         self.set_global("debug", create_debug_lib());
         self.set_global("json", create_json_lib());
         self.set_global("utf8", create_utf8_lib());
-        self.set_global("crypto", create_crypto_lib());
 
         register_bridged_natives(self);
     }

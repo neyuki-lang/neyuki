@@ -134,6 +134,7 @@ macro_rules! bridged {
 
 bridged!(core_primitive, crate::runtime::PRIMITIVES);
 bridged!(string_primitive, crate::string_lib::NATIVES);
+bridged!(crypto_primitive, crate::crypto_lib::NATIVES);
 bridged!(http_primitive, crate::http_lib::NATIVES);
 bridged!(fs_primitive, crate::fs_lib::NATIVES);
 bridged!(io_primitive, crate::io_lib::NATIVES);
@@ -175,6 +176,14 @@ pub fn register_bridged_natives(vm: &mut VM) {
         string_primitive,
         crate::string_lib::NATIVES,
         [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+    );
+    register!(
+        vm,
+        crypto_primitive,
+        crate::crypto_lib::NATIVES,
+        [
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21
+        ]
     );
     register!(
         vm,

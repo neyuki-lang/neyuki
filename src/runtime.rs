@@ -503,6 +503,7 @@ impl Runtime {
         for (name, call) in PRIMITIVES
             .iter()
             .chain(crate::string_lib::NATIVES)
+            .chain(crate::crypto_lib::NATIVES)
             .chain(crate::fs_lib::NATIVES)
             .chain(crate::http_lib::NATIVES)
             .chain(crate::io_lib::NATIVES)

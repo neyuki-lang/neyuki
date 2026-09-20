@@ -20,7 +20,7 @@ Programs go through the optimizing IR pipeline by default. `run --tree-walker` e
 
 The base runtime provides `print`, `tostring`, `type`, `typeof`, `assert`, `int`, `float`, `try`, and `require`. `type` groups integers and floats as `number`; `typeof` reports `bigint` for arbitrary-precision integers and `float` for floating-point values.
 
-`try(function, ...)` returns a leading boolean followed by the function result or an error message. The bundled `@neyuki/fs`, `@neyuki/http`, `@neyuki/io`, `@neyuki/math`, `@neyuki/string` and `@neyuki/table` modules can be loaded with `require`.
+`try(function, ...)` returns a leading boolean followed by the function result or an error message. The bundled `@neyuki/crypto`, `@neyuki/fs`, `@neyuki/http`, `@neyuki/io`, `@neyuki/math`, `@neyuki/string` and `@neyuki/table` modules can be loaded with `require`.
 
 ```lua
 local math = require("@neyuki/math")
@@ -84,6 +84,33 @@ http.serve(8080, function(request: Request): any
     if (path == "/hello") then return "hello " .. (params.name ?? "world") end
     return { status = 404, body = "not found" }
 end)
+```
+
+`@neyuki/crypto` is built on the RustCrypto and dalek crates rather than Neyuki code, so keys do not leak through timing and bulk encryption runs at native speed. Binary values are strings in an *encoding*, `"hex"`, `"base64"` or `"base64url"`: digests default to hex and everything else (keys, ciphertexts, signatures, random bytes) to base64. Asymmetric keys are PEM strings (PKCS#8 private, SPKI public) that OpenSSL and other languages read; PKCS#1 `RSA PRIVATE KEY` files are accepted too. `encode(s, encoding)` and `decode(s, encoding)` convert; `decode` errors if the bytes are not UTF-8 text, so keys and ciphertexts should stay encoded.
+
+- `hash(s, algorithm?, encoding?)` digests `s` with `sha256` (default), `sha224`, `sha384`, `sha512`, `sha3-256`, `sha3-512`, `blake2b`, `blake2s`, `sha1` or `md5`. `hmac(s, key, algorithm?, encoding?)` is the keyed version (no blake2). `equals(a, b)` compares in constant time, for MACs and tokens.
+- `hashPassword(password, options?)` produces a salted, self-describing hash with `argon2id` (default; `cost`, `memory` in KiB and `parallelism` default to 2, 19456 and 1) or `bcrypt` (`cost` defaults to 12; passwords over 72 bytes are refused). `verifyPassword(password, hash)` checks either kind and returns `false` on a mismatch. `pbkdf2(password, salt, options?)` (`algorithm`, `iterations` default 600000, `length` default 32, `encoding`) and `hkdf(key, options?)` (`algorithm`, `salt`, `info`, `length`, `encoding`, which applies to `key` too) derive keys.
+- `generateKey(algorithm?, options?)` makes a key for `aes-256-gcm` (default), `aes-128-gcm`, `chacha20-poly1305` or `xchacha20-poly1305`. `encrypt(s, key, options?)` seals `s` with a fresh random nonce and returns `nonce || ciphertext || tag`; `decrypt(s, key, options?)` reverses it and errors on a wrong key or tampered data. `options` may hold `algorithm`, `aad` (data that is authenticated but not encrypted, which `decrypt` must be given again) and `encoding` (of the key and the ciphertext). Only authenticated ciphers are offered.
+- `generateKeyPair(algorithm?, options?)` returns `{ publicKey, privateKey }` for `ed25519` (default), `x25519` or `rsa` (`options.bits` defaults to 2048). `publicKey(privateKey)` extracts the public half. `sign(s, privateKey, options?)` and `verify(s, signature, publicKey, options?)` use Ed25519 or RSA, where `options` may set `hash` (default `sha256`) and `padding` (`pss`, the default, or `pkcs1`); `verify` returns `false` for a bad or malformed signature and accepts a private key in place of the public one. `publicEncrypt(s, publicKey, options?)` and `privateDecrypt(s, privateKey, options?)` are RSA-OAEP for short messages such as a symmetric key. `sharedSecret(privateKey, publicKey, options?)` is X25519 key agreement; run the result through `hkdf` with an `info` before using it as a key.
+- `randomBytes(n, encoding?)`, `randomInt(n)` / `randomInt(min, max)` (inclusive, like `math.random`) and `uuid()` draw from the operating system's secure generator.
+
+```lua
+local crypto = require("@neyuki/crypto")
+
+-- storing and checking a password
+local stored = crypto.hashPassword("correct horse battery staple")
+assert(crypto.verifyPassword("correct horse battery staple", stored))
+
+-- encrypting a record at rest, bound to its id
+local key = crypto.generateKey()
+local sealed = crypto.encrypt("card ending 4242", key, { aad = "user:42" })
+print(crypto.decrypt(sealed, key, { aad = "user:42" }))
+
+-- signing a token that another service verifies with the public key
+local keys = crypto.generateKeyPair("ed25519")
+local token = crypto.encode("user:42", "base64url")
+local signature = crypto.sign(token, keys.privateKey, { encoding = "base64url" })
+assert(crypto.verify(token, signature, keys.publicKey, { encoding = "base64url" }))
 ```
 
 ## Current boundaries

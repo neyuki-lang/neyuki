@@ -1,0 +1,60 @@
+local crypto = require("@neyuki/crypto")
+local http = require("@neyuki/http")
+local json = require("@neyuki/json")
+local string = require("@neyuki/string")
+
+-- A small login service: passwords are stored as argon2id hashes and
+-- sessions are HMAC-signed tokens, so the server keeps no session state.
+--
+--   curl -X POST localhost:8080/register -d '{"user":"ada","password":"hunter2"}'
+--   curl -X POST localhost:8080/login    -d '{"user":"ada","password":"hunter2"}'
+--   curl localhost:8080/me -H "authorization: Bearer <token>"
+
+const SESSION_KEY = crypto.randomBytes(32)
+local users = {}
+
+function issueToken(user: string): string
+    local payload = crypto.encode(json.encode({ user = user, id = crypto.uuid() }), "base64url")
+    return payload .. "." .. crypto.hmac(payload, SESSION_KEY, "sha256", "base64url")
+end
+
+function readToken(token: string): string?
+    local dot = string.find(token, ".", 1, true)
+    if (dot == nil) then return nil end
+    local payload = string.sub(token, 1, dot - 1)
+    local signature = string.sub(token, dot + 1)
+    -- `equals` rather than `==`, so a forged signature cannot be guessed
+    -- byte by byte from how long the comparison takes
+    if (not crypto.equals(signature, crypto.hmac(payload, SESSION_KEY, "sha256", "base64url"))) then
+        return nil
+    end
+    return json.decode(crypto.decode(payload, "base64url")).user
+end
+
+http.serve(8080, function(request: Request): any
+    if (request.method == "POST" and request.path == "/register") then
+        local body = json.decode(request.body)
+        users[body.user] = crypto.hashPassword(body.password)
+        return { status = 201, body = "registered " .. body.user .. "\n" }
+    end
+
+    if (request.method == "POST" and request.path == "/login") then
+        local body = json.decode(request.body)
+        local stored = users[body.user]
+        -- verify against a dummy hash when the user is unknown, so the
+        -- response time does not reveal which usernames exist
+        if (not crypto.verifyPassword(body.password, stored ?? crypto.hashPassword("-"))) or stored == nil then
+            return { status = 401, body = "bad credentials\n" }
+        end
+        return { headers = { ["content-type"] = "application/json" }, body = json.encode({ token = issueToken(body.user) }) }
+    end
+
+    if (request.path == "/me") then
+        local auth = request:header("authorization") ?? ""
+        local user = readToken(string.sub(auth, 8))
+        if (user == nil) then return { status = 401, body = "invalid token\n" } end
+        return "hello " .. user .. "\n"
+    end
+
+    return { status = 404, body = "not found\n" }
+end)
