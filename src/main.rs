@@ -19,6 +19,7 @@ mod parser;
 mod repl;
 mod runtime;
 pub mod sema;
+mod sql_lib;
 mod string_lib;
 mod tests;
 mod vm;
