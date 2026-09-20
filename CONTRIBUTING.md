@@ -2,6 +2,12 @@
 
 We accept contributions via pull requests from forks. Fork the repository, make your changes on a branch, and open a pull request against `main`.
 
+## Community
+
+Questions, ideas and design discussion happen on the Discord server: https://discord.gg/mvCB3KnAT4
+
+If you are planning a larger change, please bring it up there or in an issue first so we can agree on the approach before you invest the time.
+
 ## Before you open a pull request
 
 CI runs the following on every pull request. Run them locally first so your PR is green on the first push:
@@ -52,6 +58,7 @@ cargo test
 
 - Include the Neyuki version or commit, your OS, and a minimal `.nyk` script that reproduces the problem.
 - For crashes, paste the full output including any Rust panic message and backtrace (`RUST_BACKTRACE=1`).
+- **Security vulnerabilities are not GitHub issues.** Report them privately as described in [SECURITY.md](SECURITY.md).
 
 ## License
 
