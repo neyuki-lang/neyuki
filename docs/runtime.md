@@ -20,7 +20,7 @@ Programs go through the optimizing IR pipeline by default. `run --tree-walker` e
 
 The base runtime provides `print`, `tostring`, `type`, `typeof`, `assert`, `int`, `float`, `try`, and `require`. `type` groups integers and floats as `number`; `typeof` reports `bigint` for arbitrary-precision integers and `float` for floating-point values.
 
-`try(function, ...)` returns a leading boolean followed by the function result or an error message. The bundled `@neyuki/crypto`, `@neyuki/fs`, `@neyuki/http`, `@neyuki/io`, `@neyuki/math`, `@neyuki/string` and `@neyuki/table` modules can be loaded with `require`.
+`try(function, ...)` returns a leading boolean followed by the function result or an error message. The bundled `@neyuki/crypto`, `@neyuki/fs`, `@neyuki/http`, `@neyuki/io`, `@neyuki/math`, `@neyuki/sql`, `@neyuki/string` and `@neyuki/table` modules can be loaded with `require`.
 
 ```lua
 local math = require("@neyuki/math")
@@ -124,6 +124,34 @@ local keys = crypto.generateKeyPair("ed25519")
 local token = crypto.encode("user:42", "base64url")
 local signature = crypto.sign(token, keys.privateKey, { encoding = "base64url" })
 assert(crypto.verify(token, signature, keys.publicKey, { encoding = "base64url" }))
+```
+
+`@neyuki/sql` connects to PostgreSQL and to MySQL or MariaDB through the pure-Rust `postgres` and `mysql` drivers, with TLS through the platform's own library like `@neyuki/http`. `connect(target)` takes a URL (`"postgres://user:pass@host:5432/db"`, `"mysql://user:pass@host/db"`) or a table with `driver` (`"postgres"` or `"mysql"`) plus `host`, `port`, `user`, `password`, `database`, `ssl` (`true` to require TLS, `false` to refuse it) and `timeout` (seconds to wait for the connection); a table may also carry `url`, with the other fields overriding parts of it. It returns a `Connection` with a `driver` field and these methods, each of which raises on a server error with the message and its SQLSTATE:
+
+- `query(statement, params?)` runs a statement and returns its rows as an array of `{ column = value }` tables; `rows.columns` lists the column names in select order, and a NULL column is absent from its row (`row.note == nil`). `queryOne(statement, params?)` returns the first row or `nil`.
+- `execute(statement, params?)` runs a statement for its effect and returns the number of rows it touched, followed by the auto-increment id of a MySQL insert (`nil` on PostgreSQL, where `RETURNING id` with `query` does the same job). Without parameters the statement goes through the simple protocol, so `BEGIN` and DDL work everywhere.
+- `transaction(body)` runs `body(connection)` inside a transaction, committing when it returns and rolling back and re-raising when it errors; it returns what `body` returned. `begin()`, `commit()` and `rollback()` are the manual version.
+- `ping()` reports whether the server still answers, `close()` drops the connection (calling it again is harmless) and `isOpen()` says whether it has been closed.
+
+Parameters are positional, in the server's own syntax (`$1, $2` on PostgreSQL, `?` on MySQL), and are handed to the server separately from the SQL text, so values are never quoted or spliced; the count must match the placeholders. A parameter may be `nil` (NULL), a boolean, a number or a string; PostgreSQL parses each one as the type it inferred for the placeholder, so a `"2024-02-29"` string binds to a `date` column and `$1::int` casts an untyped one. Results keep their types: integers (including `bigint` and MySQL unsigned values) stay integers, floats stay floats, PostgreSQL booleans are booleans (MySQL's are tinyints, so `0` and `1`), text is a string and a PostgreSQL array is an array. `numeric`/`decimal` values come back as strings so no digit is rounded; `date`, `time`, `timestamp`, `uuid`, `json` and `jsonb` come back in their text form (`timestamptz` in UTC, as `2024-02-29 10:34:56+00`). Binary columns are read as UTF-8 with invalid bytes replaced by U+FFFD, so select real binary data as hex (`encode(col, 'hex')`, `HEX(col)`). A PostgreSQL type the module does not know (`interval`, `inet`, ranges, composites, multidimensional arrays) raises an error naming it; cast it to `text` in the query. Only the first result set of a statement is returned.
+
+```lua
+local sql = require("@neyuki/sql")
+local os = require("@neyuki/os")
+local db = sql.connect(os.getenv("DATABASE_URL"))
+
+db:execute("CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE)")
+local user = db:queryOne("INSERT INTO users (name, email) VALUES ($1, $2) RETURNING id", { "Ada", "ada@example.com" })
+
+for _, row in db:query("SELECT id, name FROM users WHERE id > $1 ORDER BY id", { 0 }) do
+    print(row.id, row.name)
+end
+
+db:transaction(function(tx: Connection)
+    tx:execute("UPDATE accounts SET balance = balance - $1 WHERE id = $2", { 25, 1 })
+    tx:execute("UPDATE accounts SET balance = balance + $1 WHERE id = $2", { 25, 2 })
+end)
+db:close()
 ```
 
 ## Current boundaries
