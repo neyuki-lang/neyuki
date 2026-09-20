@@ -1,7 +1,8 @@
 //! Bridges the tree-walking runtime's native primitives into the register VM.
 //!
-//! `@neyuki/http`, `@neyuki/fs` and `@neyuki/io` are written in Neyuki on top
-//! of `__http_*`, `__fs_*` and `__io_*` natives that speak `runtime::Value`.
+//! `@neyuki/http`, `@neyuki/fs`, `@neyuki/io` and `@neyuki/sql` are written in
+//! Neyuki on top of `__http_*`, `__fs_*`, `__io_*` and `__sql_*` natives that
+//! speak `runtime::Value`.
 //! Rather than keep a second copy of each primitive for the VM, every one is
 //! wrapped in a VM native that converts the arguments over and the results
 //! back. The primitives are plain `fn(Vec<Value>) -> Result<Vec<Value>, _>`
@@ -138,6 +139,7 @@ bridged!(crypto_primitive, crate::crypto_lib::NATIVES);
 bridged!(http_primitive, crate::http_lib::NATIVES);
 bridged!(fs_primitive, crate::fs_lib::NATIVES);
 bridged!(io_primitive, crate::io_lib::NATIVES);
+bridged!(sql_primitive, crate::sql_lib::NATIVES);
 
 /// Registers one primitive per listed index. The indices are spelled out
 /// because each one instantiates its own wrapper function, and the `assert!`
@@ -203,4 +205,5 @@ pub fn register_bridged_natives(vm: &mut VM) {
         crate::io_lib::NATIVES,
         [0, 1, 2, 3, 4, 5, 6]
     );
+    register!(vm, sql_primitive, crate::sql_lib::NATIVES, [0, 1, 2, 3, 4]);
 }
