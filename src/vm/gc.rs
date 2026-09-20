@@ -378,7 +378,6 @@ mod tests {
     use super::*;
     use crate::vm::value::{Value, VmTable};
     use std::cell::RefCell;
-    use std::collections::HashMap;
     use std::rc::Rc;
 
     #[test]
