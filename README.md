@@ -11,6 +11,7 @@ The project currently includes:
 - a bundled library example (`@neyuki/math`)
 - an HTTP client, server and port forwarder (`@neyuki/http`)
 - hashing, password hashing, authenticated encryption and signatures (`@neyuki/crypto`)
+- a PostgreSQL and MySQL/MariaDB client with parameterized queries and transactions (`@neyuki/sql`)
 - a VS Code extension for syntax highlighting in the sibling `editor-extensions/neyuki` folder
 
 ## Why Neyuki?
@@ -149,6 +150,12 @@ The detailed language and runtime references are in [`docs/`](docs/README.md).
 ## Status
 
 This project is still in active development. The grammar and runtime are intentionally compact, and the test suite under `tests/` is the best way to validate behavior as features evolve.
+
+## Community
+
+Join the Discord server for questions, ideas and design discussion: https://discord.gg/mvCB3KnAT4
+
+Contributions are welcome; see [`CONTRIBUTING.md`](CONTRIBUTING.md). To report a security vulnerability, please follow [`SECURITY.md`](SECURITY.md) instead of opening a public issue.
 
 ## License
 
