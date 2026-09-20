@@ -8,13 +8,32 @@ Report them privately through GitHub's private vulnerability reporting:
 
 https://github.com/neyuki-lang/neyuki/security/advisories/new
 
-Include as much of the following as you can:
+### What to include
 
-- the Neyuki version or commit hash
-- your operating system and Rust toolchain version
-- a minimal `.nyk` script (or Rust snippet) that reproduces the issue
-- what an attacker could do with it (crash, memory corruption, data disclosure, code execution, ...)
-- any suggested fix, if you have one
+Please write up and copy your report *before* opening it. It's much quicker for us to process reports that arrive complete than to wait for details to trickle in. Make sure it contains the following:
+
+**Summary**
+- What's broken and why it matters. "Integer overflow in bigint conversion leads to memory corruption" is useful; "crash" is not.
+
+**Reproduction steps**
+- A minimal `.nyk` script (or Rust snippet) that triggers the issue, with everything not needed stripped out.
+- The exact commands you ran (e.g. `cargo run -- run poc.nyk`).
+- Expected vs. actual behaviour.
+
+**Severity and impact**
+- What can an attacker actually do? (crash, memory corruption, data disclosure, code execution, ...)
+- Who is affected: does it require untrusted input, a specific build flag, a specific library, a specific target platform?
+
+**Environment**
+- Neyuki version or commit hash.
+- OS and architecture.
+- Rust toolchain version and any build flags or relevant configuration.
+
+**Root cause** (if known)
+- Where in the code the bug lives and why it happens, plus a suggested fix if you have one.
+
+**Proof of concept**
+- Crash log, panic message and backtrace (`RUST_BACKTRACE=1`), or a screenshot/GIF for anything visual.
 
 We will acknowledge the report as soon as we can, keep you informed while we work on a fix, and credit you in the advisory unless you prefer to stay anonymous. Please give us a reasonable amount of time to release a fix before disclosing publicly.
 
