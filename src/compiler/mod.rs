@@ -91,6 +91,7 @@ pub fn try_compile_to_proto_via_ir(statements: &[Stmt]) -> Result<Proto, String>
 fn compile_to_proto_via_ir_unchecked(statements: &[Stmt]) -> Result<Proto, String> {
     let optimized_stmts = fold_program(statements.to_vec());
     let mut ir_module = ir::ast_to_ir(&optimized_stmts);
+    ir::inline_functions(&mut ir_module);
     optimize_ir_function(&mut ir_module.main);
     ir::ir_to_bytecode(&ir_module)
 }
@@ -266,5 +267,25 @@ mod tests {
         let res_ir = vm_ir.execute(ir_proto).expect("IR exec failed");
 
         assert_eq!(res_direct.to_string(), res_ir.to_string());
+    }
+
+    #[test]
+    fn test_ir_pipeline_inlines_small_leaf_call() {
+        let code = "local function add(x, y) return x + y end\nlocal s = 0\nfor i = 1, 5 do s = s + add(i, i) end\nreturn s";
+        let stmts = compile_source(code).expect("syntax error");
+        let proto = try_compile_to_proto_via_ir(&stmts).expect("IR compilation failed");
+        // The two-instruction leaf must be inlined: no Call left in main.
+        assert!(
+            !proto
+                .instructions
+                .iter()
+                .any(|i| matches!(i, crate::bytecode::instruction::Instruction::Call { .. })),
+            "expected inlined call, got:\n{}",
+            crate::bytecode::disasm::disassemble_proto(&proto, 0)
+        );
+
+        let mut vm = crate::vm::machine::VM::new();
+        let res = vm.execute(proto).expect("exec failed");
+        assert_eq!(res.to_string(), "30");
     }
 }

@@ -6,7 +6,7 @@ use std::rc::Rc;
 use std::str::FromStr;
 
 use crate::vm::machine::VM;
-use crate::vm::value::{Value, VmTable};
+use crate::vm::value::{StrRef, Value, VmTable};
 
 pub fn create_json_lib() -> Value {
     let t = Rc::new(RefCell::new(VmTable::new()));
@@ -364,7 +364,9 @@ impl JsonParser {
             self.advance(); // consume ':'
 
             let val = self.parse_value()?;
-            tbl.borrow_mut().fields.insert(Rc::from(key.as_str()), val);
+            tbl.borrow_mut()
+                .fields
+                .insert(StrRef::from(key.as_str()), val);
             self.skip_whitespace();
 
             match self.peek() {

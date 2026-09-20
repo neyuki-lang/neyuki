@@ -4,6 +4,8 @@ use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use std::cell::{Cell, RefCell};
 use std::fmt;
+use std::hash::{Hash, Hasher};
+use std::ops::Deref;
 use std::rc::Rc;
 
 use crate::bytecode::proto::Proto;
@@ -39,6 +41,79 @@ macro_rules! native {
     };
 }
 
+/// Shared string handle. It wraps `Rc<String>` instead of `Rc<str>` so the
+/// pointer stays thin (8 bytes); a fat `Rc<str>` would push every `Value`
+/// past two words. Hash, equality and borrowing all follow the string
+/// contents, so `&str` lookups on maps keyed by this keep working.
+#[derive(Clone, Debug)]
+pub struct StrRef(pub Rc<String>);
+
+impl PartialEq for StrRef {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0) || self.0 == other.0
+    }
+}
+
+impl Eq for StrRef {}
+
+impl PartialOrd for StrRef {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for StrRef {
+    #[inline]
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.cmp(&other.0)
+    }
+}
+
+impl Hash for StrRef {
+    #[inline]
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.hash(state)
+    }
+}
+
+impl std::borrow::Borrow<str> for StrRef {
+    #[inline]
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Deref for StrRef {
+    type Target = str;
+
+    #[inline]
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for StrRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", &self.0)
+    }
+}
+
+impl From<&str> for StrRef {
+    #[inline]
+    fn from(s: &str) -> Self {
+        StrRef(Rc::new(s.to_owned()))
+    }
+}
+
+impl From<String> for StrRef {
+    #[inline]
+    fn from(s: String) -> Self {
+        StrRef(Rc::new(s))
+    }
+}
+
 /// A runtime value. Kept small and cheap to clone: every heap-backed variant
 /// is behind an `Rc`, so copying a register never copies a string or a table.
 ///
@@ -54,7 +129,7 @@ pub enum Value {
     Int(i64),
     BigInt(Rc<BigInt>),
     Float(f64),
-    String(Rc<str>),
+    String(StrRef),
     Table(Rc<RefCell<VmTable>>),
     Closure(Rc<VmClosure>),
     Native(&'static NativeDef),
@@ -63,7 +138,7 @@ pub enum Value {
 
 pub struct VmTable {
     pub array: Vec<Value>,
-    pub fields: FxHashMap<Rc<str>, Value>,
+    pub fields: FxHashMap<StrRef, Value>,
     pub frozen: bool,
     pub metatable: Option<Rc<RefCell<VmTable>>>,
 }
@@ -101,7 +176,7 @@ impl VmTable {
 
     pub fn set_str(&mut self, key: &str, val: Value) {
         if !self.frozen {
-            self.fields.insert(Rc::from(key), val);
+            self.fields.insert(StrRef::from(key), val);
         }
     }
 
@@ -190,12 +265,12 @@ impl Value {
 
     #[inline]
     pub fn str(s: &str) -> Value {
-        Value::String(Rc::from(s))
+        Value::String(StrRef::from(s))
     }
 
     #[inline]
     pub fn string(s: String) -> Value {
-        Value::String(Rc::from(s))
+        Value::String(StrRef::from(s))
     }
 
     #[inline]
@@ -214,7 +289,7 @@ impl Value {
 
     pub fn as_str(&self) -> Option<&str> {
         match self {
-            Value::String(s) => Some(s),
+            Value::String(s) => Some(&s.0[..]),
             _ => None,
         }
     }
@@ -259,13 +334,13 @@ impl From<BigInt> for Value {
 
 impl From<String> for Value {
     fn from(s: String) -> Value {
-        Value::String(Rc::from(s))
+        Value::String(StrRef::from(s))
     }
 }
 
 impl From<&str> for Value {
     fn from(s: &str) -> Value {
-        Value::String(Rc::from(s))
+        Value::String(StrRef::from(s))
     }
 }
 
@@ -311,12 +386,25 @@ impl PartialEq for Value {
             (Value::Float(a), Value::Int(b)) => *a == (*b as f64),
             (Value::BigInt(a), Value::Float(b)) => a.to_f64().is_some_and(|v| v == *b),
             (Value::Float(a), Value::BigInt(b)) => b.to_f64().is_some_and(|v| *a == v),
-            (Value::String(a), Value::String(b)) => Rc::ptr_eq(a, b) || a == b,
+            (Value::String(a), Value::String(b)) => a == b,
             (Value::Table(a), Value::Table(b)) => Rc::ptr_eq(a, b),
             (Value::Closure(a), Value::Closure(b)) => Rc::ptr_eq(a, b),
             (Value::Native(a), Value::Native(b)) => std::ptr::eq(*a, *b) || a.name == b.name,
             (Value::Buffer(a), Value::Buffer(b)) => Rc::ptr_eq(a, b),
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::mem::size_of;
+
+    /// Hot-loop values are copied on every move: the enum must stay at two
+    /// words so register traffic stays cheap.
+    #[test]
+    fn value_stays_two_words() {
+        assert_eq!(size_of::<Value>(), 16);
     }
 }

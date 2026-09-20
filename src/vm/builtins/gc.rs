@@ -11,10 +11,10 @@ pub fn builtin_collectgarbage(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>,
         .map(|v| v.to_string())
         .unwrap_or_else(|| "collect".to_string());
     match opt.as_str() {
-        "collect" => {
-            vm.gc.collect_garbage(&vm.stack, &vm.globals);
-            Ok(vec![Value::Int(0)])
-        }
+        "collect" => match vm.gc_collect() {
+            Ok(()) => Ok(vec![Value::Int(0)]),
+            Err(err) => Err(err),
+        },
         "stop" => {
             vm.gc.stop();
             Ok(vec![Value::Nil])
@@ -26,15 +26,22 @@ pub fn builtin_collectgarbage(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>,
         "count" => Ok(vec![Value::Float(vm.gc.count_kb())]),
         "isrunning" => Ok(vec![Value::Bool(vm.gc.is_running)]),
         "step" => {
-            let step_size = args
+            let _step_size = args
                 .get(1)
                 .and_then(|v| match v {
                     Value::Int(i) => i.to_usize(),
                     _ => None,
                 })
                 .unwrap_or(1024);
-            let collected = vm.gc.step(step_size, &vm.stack, &vm.globals);
-            Ok(vec![Value::Bool(collected)])
+            // `step` historically collected a full cycle on threshold, so
+            // it runs the same finalizing driver (the size is advisory and
+            // was already ignored). Returns whether a collection ran.
+            if vm.gc.should_collect() {
+                vm.gc_collect()?;
+                Ok(vec![Value::Bool(true)])
+            } else {
+                Ok(vec![Value::Bool(false)])
+            }
         }
         _ => Err(format!("unknown collectgarbage option '{}'", opt)),
     }
