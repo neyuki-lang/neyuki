@@ -86,7 +86,11 @@ pub fn fuzz_gc_cyclic_stress() {
     }
 
     let empty_globals = crate::vm::hash::new_map();
-    let freed = gc.collect_garbage(&root_refs, &empty_globals);
+    let plan = gc.collect_plan(&root_refs, &empty_globals);
+    assert!(plan.queue.is_empty(), "cyclic stress uses no finalizers");
+    let crate::vm::gc::SweepPlan { plain, dropped, .. } = plan;
+    gc.sweep_finish(plain, dropped, Vec::new(), 0);
+    let freed = gc.last_freed;
     assert!(
         freed > 0,
         "GC sweep must break unreachable cyclic table clusters"
@@ -94,11 +98,13 @@ pub fn fuzz_gc_cyclic_stress() {
 }
 
 pub fn fuzz_vm_recursion_protection() {
-    // Tests that mutual infinite recursion is safely caught by call depth guards
+    // Tests that deep NON-tail recursion is safely caught by call depth
+    // guards. The `+ 1` keeps every iteration on a new frame; pure tail
+    // calls (`return f()`) reuse the frame and legitimately run forever.
+    // Self-recursion (not mutual) avoids forward references.
     let code = "
-        local function a() return b() end
-        local function b() return a() end
-        return a()
+        local function f() return f() + 1 end
+        return f()
     ";
     let stmts = crate::compiler::compile_source(code).expect("syntax error");
     let proto = crate::compiler::compile_to_proto(&stmts);
