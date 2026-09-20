@@ -18,6 +18,7 @@ mod lint;
 mod parser;
 mod runtime;
 pub mod sema;
+mod sql_lib;
 mod string_lib;
 mod tests;
 mod vm;

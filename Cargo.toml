@@ -41,6 +41,18 @@ pkcs8 = { version = "0.10", features = ["pem", "std"] }
 base64 = "0.22"
 subtle = "2"
 
+# `@neyuki/sql` speaks to PostgreSQL and MySQL/MariaDB through these pure-Rust
+# drivers, with TLS through the platform `native-tls` like `ureq` above. The
+# `mysql` defaults are dropped because they pull in the C zlib; `minimal-rust`
+# swaps in the Rust one. `postgres-protocol` decodes the wire values that the
+# `postgres` crate leaves to companion crates (dates, uuids, arrays).
+postgres = "0.19"
+postgres-native-tls = "0.5"
+postgres-protocol = "0.6"
+native-tls = "0.2"
+fallible-iterator = "0.2"
+mysql = { version = "28", default-features = false, features = ["minimal-rust", "native-tls", "buffer-pool"] }
+
 [target.'cfg(windows)'.dependencies]
 schannel = ">=0.1.23, <0.1.28"
 

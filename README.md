@@ -11,6 +11,7 @@ The project currently includes:
 - a bundled library example (`@neyuki/math`)
 - an HTTP client, server and port forwarder (`@neyuki/http`)
 - hashing, password hashing, authenticated encryption and signatures (`@neyuki/crypto`)
+- a PostgreSQL and MySQL/MariaDB client with parameterized queries and transactions (`@neyuki/sql`)
 - a VS Code extension for syntax highlighting in the sibling `editor-extensions/neyuki` folder
 
 ## Why Neyuki?

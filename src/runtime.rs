@@ -507,6 +507,7 @@ impl Runtime {
             .chain(crate::fs_lib::NATIVES)
             .chain(crate::http_lib::NATIVES)
             .chain(crate::io_lib::NATIVES)
+            .chain(crate::sql_lib::NATIVES)
         {
             env.borrow_mut()
                 .values

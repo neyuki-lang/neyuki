@@ -1,2 +1,4 @@
 /target
 Cargo.lock
+# local database URLs for tests/sql.nyk
+/tests/sql.local
