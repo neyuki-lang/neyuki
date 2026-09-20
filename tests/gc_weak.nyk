@@ -1,0 +1,53 @@
+-- Weak-table tests. Garbage is created inside a `pcall`ed maker so the
+-- callee frame is truncated on return and collection is deterministic
+-- (see gc_finalizer.nyk).
+
+-- Weak values: the only reference through a weak table must not keep
+-- the value alive across an explicit collection.
+local weak_holder = {}
+
+local function make_weak()
+    local weak = setmetatable({}, { __mode = "v" })
+    local child = { n = 1 }
+    weak.item = child
+    return weak
+end
+
+local ok_w, weak = pcall(make_weak)
+assert(ok_w == true)
+weak_holder.t = weak
+collectgarbage("collect")
+assert(rawget(weak, "item") == nil)
+
+-- Control: without __mode the value survives the same sequence.
+local strong_holder = {}
+
+local function make_strong()
+    local strong = {}
+    local child2 = { n = 2 }
+    strong.item = child2
+    return strong
+end
+
+local ok_s, strong = pcall(make_strong)
+assert(ok_s == true)
+strong_holder.t = strong
+collectgarbage("collect")
+assert(strong.item ~= nil)
+assert(strong.item.n == 2)
+
+-- __mode without "v" changes nothing (keys can never be GC objects).
+local konly_holder = {}
+
+local function make_konly()
+    local konly = setmetatable({}, { __mode = "k" })
+    local child3 = { n = 3 }
+    konly.item = child3
+    return konly
+end
+
+local ok_k, konly = pcall(make_konly)
+assert(ok_k == true)
+konly_holder.t = konly
+collectgarbage("collect")
+assert(konly.item ~= nil)
