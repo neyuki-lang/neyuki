@@ -9,7 +9,7 @@ The project currently includes:
 - a compiler pipeline for syntax validation
 - a small runtime with builtins like `print`, `assert`, `try`, and `require`
 - a bundled library example (`@neyuki/math`)
-- an HTTP client and server (`@neyuki/http`)
+- an HTTP client, server and port forwarder (`@neyuki/http`)
 - hashing, password hashing, authenticated encryption and signatures (`@neyuki/crypto`)
 - a VS Code extension for syntax highlighting in the sibling `editor-extensions/neyuki` folder
 

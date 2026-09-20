@@ -1,0 +1,20 @@
+local http = require("@neyuki/http")
+local os = require("@neyuki/os")
+
+-- Run a dev server first, e.g. `npm run dev` (Vite listens on 5173), then:
+--   http://127.0.0.1:1234  is the dev server, byte for byte (HMR works too)
+--   http://127.0.0.1:8080  answers /api/time itself and proxies the rest
+local dev = http.forward(1234, 5173)
+print("forwarding " .. dev.url .. " -> " .. dev.target)
+
+http.serve(8080, function(request: Request): any
+    local path = request:query()
+    if (path == "/api/time") then
+        return { headers = { ["content-type"] = "application/json" }, body = "{\"now\":" .. tostring(os.time()) .. "}\n" }
+    end
+    -- Anything else is the dev server's business; the answer is sent as is.
+    -- (Vite's HMR socket cannot upgrade through here, so its client falls
+    -- back to connecting to the dev server directly; the TCP forward above
+    -- carries websockets fine.)
+    return request:forward({host = "localhost", port = 3021})
+end)

@@ -86,6 +86,19 @@ http.serve(8080, function(request: Request): any
 end)
 ```
 
+Two functions hand traffic to another server. `forward(options?, target)` is a TCP port forward: it binds `options` (as for `listen`) and relays every connection to `target` (a port on `localhost`, which reaches a server bound to either `127.0.0.1` or `::1`, or a `{ host?, port }` table) byte for byte, so HTTP, WebSockets, TLS and anything else that speaks TCP pass through; a Vite dev server on 5173 becomes reachable on 1234 with `http.forward(1234, 5173)`, hot reloading included. The relaying runs on background threads and returns a `Forward` with `host`, `port`, `url`, `target`, `isOpen()`, `close()` and `wait(timeout?)`, which blocks for `timeout` seconds or, without one, for as long as the forward runs, so a script that only forwards stays alive. A `Request` also has `forward(target, options?)`, which answers that one request with whatever `target` (a port, a `{ host?, port }` table or a base URL such as `"https://api.example.com"`) replies: the method, path, headers and body go upstream and the status, headers and body come back unchanged, redirects included, so a handler can serve a few routes itself and `return request:forward(5173)` for the rest. `options.timeout` bounds the upstream call. If the upstream cannot be reached the client receives a 502 and the error is raised, which `serve` reports on stderr. WebSocket upgrades do not pass through `request:forward` (the handshake is answered like a plain request, so a client such as Vite's falls back to connecting directly); use `http.forward` for those.
+
+```lua
+local http = require("@neyuki/http")
+-- everything on 1234 goes straight to the dev server, sockets included...
+local dev = http.forward(1234, 5173)
+-- ...while 8080 answers /api itself and proxies the rest
+http.serve(8080, function(request: Request): any
+    if (request.path == "/api/time") then return tostring(os.time()) end
+    return request:forward(5173)
+end)
+```
+
 `@neyuki/crypto` is built on the RustCrypto and dalek crates rather than Neyuki code, so keys do not leak through timing and bulk encryption runs at native speed. Binary values are strings in an *encoding*, `"hex"`, `"base64"` or `"base64url"`: digests default to hex and everything else (keys, ciphertexts, signatures, random bytes) to base64. Asymmetric keys are PEM strings (PKCS#8 private, SPKI public) that OpenSSL and other languages read; PKCS#1 `RSA PRIVATE KEY` files are accepted too. `encode(s, encoding)` and `decode(s, encoding)` convert; `decode` errors if the bytes are not UTF-8 text, so keys and ciphertexts should stay encoded.
 
 - `hash(s, algorithm?, encoding?)` digests `s` with `sha256` (default), `sha224`, `sha384`, `sha512`, `sha3-256`, `sha3-512`, `blake2b`, `blake2s`, `sha1` or `md5`. `hmac(s, key, algorithm?, encoding?)` is the keyed version (no blake2). `equals(a, b)` compares in constant time, for MACs and tokens.

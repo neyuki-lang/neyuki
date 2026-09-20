@@ -189,7 +189,7 @@ pub fn register_bridged_natives(vm: &mut VM) {
         vm,
         http_primitive,
         crate::http_lib::NATIVES,
-        [0, 1, 2, 3, 4, 5, 6]
+        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     );
     register!(
         vm,

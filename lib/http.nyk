@@ -200,6 +200,37 @@ function normalizeReply(reply: any): (number, {[string]: string}, string)
     return reply.status ?? 200, reply.headers ?? {}, reply.body ?? ""
 end
 
+-- Joins a host and a port into `host:port`, bracketing IPv6 literals.
+function hostPort(host: string, port: number): string
+    if (string.find(host, ":", 1, true) != nil) then host = "[" .. host .. "]" end
+    return host .. ":" .. tostring(port)
+end
+
+-- Splits a forward target into a host and a port. A number is a port on
+-- `localhost`, which reaches a server bound to either 127.0.0.1 or ::1 (dev
+-- servers on Node often listen on ::1 only); a table holds `host` (default
+-- "localhost") and `port`.
+function targetAddress(target: ForwardTarget, name: string): (string, number)
+    if (type(target) == "number") then return "localhost", target end
+    if (type(target) != "table") then error(name .. " must be a port number or a { host, port } table") end
+    checkOptionalString(target.host, name .. ".host")
+    if (type(target.port) != "number") then error(name .. ".port must be a number") end
+    return target.host ?? "localhost", target.port
+end
+
+-- Like `targetAddress`, but also accepts a base URL string and returns the
+-- target as one.
+function targetUrl(target: ForwardTarget): string
+    if (type(target) == "string") then
+        if (string.find(target, "://", 1, true) == nil) then
+            error("target must be a port number, a { host, port } table or a URL with a scheme")
+        end
+        return target
+    end
+    local host, port = targetAddress(target, "target")
+    return "http://" .. hostPort(host, port)
+end
+
 function makeRequest(raw: {[string]: any}): Request
     local answered = false
     local request = {}
@@ -228,6 +259,25 @@ function makeRequest(raw: {[string]: any}): Request
 
     function request.answered(self: Request): boolean
         return answered
+    end
+
+    -- Answers this request with whatever `target` replies to it: the method,
+    -- path, headers and body go upstream unchanged and the status, headers
+    -- and body come back byte-for-byte, so a handler can `return
+    -- request:forward(5173)` for anything it does not serve itself. `target`
+    -- is a port on localhost, a { host?, port } table or a base URL such as
+    -- "https://api.example.com"; `options.timeout` bounds the upstream call.
+    -- If the upstream cannot be reached the client gets a 502 and the error
+    -- is raised so `serve` reports it. WebSocket upgrades cannot pass
+    -- through here; use `http.forward` for those.
+    function request.forward(self: Request, target: ForwardTarget, options: ForwardOptions?): ()
+        if (answered) then error("request was already answered") end
+        local base = targetUrl(target)
+        checkOptionalTable(options, "options")
+        options = options ?? {}
+        checkOptionalNumber(options.timeout, "timeout")
+        answered = true
+        __http_proxy(raw.id, base, options.timeout)
     end
 
     return table.freeze(request)
@@ -275,6 +325,51 @@ function http.listen(options: ServerOptions | number | nil): Server
     end
 
     return table.freeze(server)
+end
+
+-- Forwards every TCP connection made to `options` (a port number or a
+-- { host?, port? } table, as for `listen`) to `target` (a port number on
+-- localhost or a { host?, port } table). Bytes pass through untouched, so anything that
+-- speaks TCP works: HTTP, WebSockets (a Vite dev server's HMR included),
+-- TLS, databases. The relaying happens on background threads, so the script
+-- carries on; call `wait()` on the returned `Forward` to keep a script that
+-- does nothing else alive, or run `serve` alongside it.
+function http.forward(options: ServerOptions | number | nil, target: ForwardTarget): Forward
+    if (type(options) == "number") then options = { port = options } end
+    checkOptionalTable(options, "options")
+    options = options ?? {}
+    checkOptionalString(options.host, "host")
+    checkOptionalNumber(options.port, "port")
+    local host = options.host ?? "127.0.0.1"
+    local targetHost, targetPort = targetAddress(target, "target")
+
+    local id, port = __http_forward(host, options.port ?? 8080, targetHost, targetPort)
+    local closed = false
+    local forward = {}
+    forward.host = host
+    forward.port = port
+    forward.url = "http://" .. hostPort(host, port)
+    forward.target = hostPort(targetHost, targetPort)
+
+    -- Blocks for `timeout` seconds, or indefinitely without one.
+    function forward.wait(self: Forward, timeout: number?): ()
+        if (closed) then error("forward on " .. forward.url .. " is closed") end
+        checkOptionalNumber(timeout, "timeout")
+        __http_forward_wait(id, timeout)
+    end
+
+    -- Stops accepting connections; ones already relayed finish on their own.
+    function forward.close(self: Forward): ()
+        if (closed) then return end
+        closed = true
+        __http_unforward(id)
+    end
+
+    function forward.isOpen(self: Forward): boolean
+        return not closed
+    end
+
+    return table.freeze(forward)
 end
 
 -- Runs `handler(request)` for every incoming request, forever. A handler's
