@@ -151,6 +151,12 @@ The detailed language and runtime references are in [`docs/`](docs/README.md).
 
 This project is still in active development. The grammar and runtime are intentionally compact, and the test suite under `tests/` is the best way to validate behavior as features evolve.
 
+## Community
+
+Join the Discord server for questions, ideas and design discussion: https://discord.gg/mvCB3KnAT4
+
+Contributions are welcome; see [`CONTRIBUTING.md`](CONTRIBUTING.md). To report a security vulnerability, please follow [`SECURITY.md`](SECURITY.md) instead of opening a public issue.
+
 ## License
 
 This project is licensed under the MIT License. See `LICENSE` for details.
