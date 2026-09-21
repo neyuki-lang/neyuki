@@ -6,6 +6,7 @@ use num_integer::Integer as _;
 
 use crate::bytecode::instruction::{Instruction, MULTRET};
 use crate::bytecode::proto::Proto;
+use crate::dap::DapSession;
 use crate::vm::frame::CallFrame;
 use crate::vm::gc::GcTracker;
 use crate::vm::hash::{FxHashMap, new_map};
@@ -99,6 +100,12 @@ pub struct VM {
     pub hook: Option<DebugHook>,
     /// True while a hook function itself runs: hooks never trigger hooks.
     pub in_hook: bool,
+    /// Active DAP debug session, if any (`neyuki dap`). `None` keeps
+    /// breakpoint checks to a single predictable branch.
+    pub dap: Option<DapSession>,
+    /// True while a DAP `evaluate` call runs: breakpoints stay silent
+    /// inside evaluation (it would otherwise pause on itself).
+    pub in_eval: bool,
     /// Upvalues that still point at a live register of the current stack,
     /// sorted by register index. Nearly always empty or very short, which is
     /// why a plain vector beats a map here.
@@ -133,6 +140,8 @@ impl VM {
             is_yielding: false,
             hook: None,
             in_hook: false,
+            dap: None,
+            in_eval: false,
             open_upvalues: Vec::new(),
             top: 0,
             modules: HashMap::new(),
@@ -378,6 +387,20 @@ impl VM {
                     }
                     return Err(err);
                 }
+                if let Err(err) = crate::dap::check_break(
+                    self,
+                    &c.proto
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| "<anonymous>".to_string()),
+                ) {
+                    if !self.is_yielding {
+                        self.frames.truncate(depth);
+                        self.close_upvalues(prev_stack_len);
+                        self.stack.truncate(prev_stack_len);
+                    }
+                    return Err(err);
+                }
                 self.returned.clear();
                 match self.run_to_depth(depth) {
                     Ok(res) => {
@@ -464,20 +487,41 @@ impl VM {
     /// run each handler newest-first, settle resurrections, then finish the
     /// sweep. A handler error is recorded and propagated after the whole
     /// queue ran; its table is still collected (run-once guarantee).
+    /// Drains any sweep left staged by an earlier bounded step first, so
+    /// explicit collections always complete fully.
     pub(crate) fn gc_collect(&mut self) -> Result<(), String> {
+        while !self.gc.sweep_slice(usize::MAX) {}
+        while !self.gc.sweep_slice(usize::MAX) {}
         let crate::vm::gc::SweepPlan {
             queue,
             internal,
             plain,
             dropped,
         } = self.gc.collect_plan(&self.stack, &self.globals);
+        let (settled_cleared, settled_freed, first_err) = self.settle_queue(&queue, &internal);
+        self.gc
+            .sweep_finish(plain, dropped, settled_cleared, settled_freed);
+        if let Some(e) = first_err {
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Runs one finalizer queue, settling each table afterwards. Shared by
+    /// the draining and bounded-stepping drivers so both observe identical
+    /// order and resurrection rules.
+    fn settle_queue(
+        &mut self,
+        queue: &[(Rc<RefCell<VmTable>>, Value)],
+        internal: &HashMap<*const RefCell<VmTable>, usize>,
+    ) -> (Vec<*const RefCell<VmTable>>, usize, Option<String>) {
         let mut settled_cleared = Vec::new();
         let mut settled_freed = 0;
         let mut first_err: Option<String> = None;
-        for (rc, handler) in &queue {
+        for (rc, handler) in queue {
             let arg = Value::Table(rc.clone());
             let res = self.call_function(handler.clone(), std::slice::from_ref(&arg));
-            let (cleared, freed) = self.gc.settle_table(rc, res.is_ok(), &internal);
+            let (cleared, freed) = self.gc.settle_table(rc, res.is_ok(), internal);
             if let Some(ptr) = cleared {
                 settled_cleared.push(ptr);
             }
@@ -488,8 +532,33 @@ impl VM {
                 }
             }
         }
+        (settled_cleared, settled_freed, first_err)
+    }
+
+    /// Allocation-triggered collection step: advances an in-progress sweep
+    /// by one bounded slice, or starts a new cycle (plan, settle, begin)
+    /// when over threshold and takes its first slice. Bounds pause times;
+    /// explicit collections still drain fully. Slice size is fixed; pacing
+    /// itself comes from the allocation threshold.
+    pub(crate) fn gc_auto_step(&mut self) -> Result<(), String> {
+        const SLICE_BUDGET: usize = 64;
+        if self.gc.sweeping {
+            self.gc.sweep_slice(SLICE_BUDGET);
+            return Ok(());
+        }
+        if !self.gc.should_collect() {
+            return Ok(());
+        }
+        let crate::vm::gc::SweepPlan {
+            queue,
+            internal,
+            plain,
+            dropped,
+        } = self.gc.collect_plan(&self.stack, &self.globals);
+        let (settled_cleared, settled_freed, first_err) = self.settle_queue(&queue, &internal);
         self.gc
-            .sweep_finish(plain, dropped, settled_cleared, settled_freed);
+            .sweep_begin(plain, dropped, settled_cleared, settled_freed);
+        self.gc.sweep_slice(SLICE_BUDGET);
         if let Some(e) = first_err {
             return Err(e);
         }
@@ -725,8 +794,8 @@ impl VM {
                         self.upvalue_set(&closure.upvalues[upval_idx as usize], val);
                     }
                     Instruction::NewTable { dst } => {
-                        if self.gc.should_collect() {
-                            if let Err(err) = self.gc_collect() {
+                        if self.gc.should_collect() || self.gc.sweeping {
+                            if let Err(err) = self.gc_auto_step() {
                                 sync_ip!();
                                 return Err(err);
                             }
@@ -1200,6 +1269,10 @@ impl VM {
                                 }
                                 let callee_closure = callee_closure.clone();
                                 let proto = &callee_closure.proto;
+                                let callee_name = proto
+                                    .name
+                                    .clone()
+                                    .unwrap_or_else(|| "<anonymous>".to_string());
                                 // For a tail call the callee window slides
                                 // down one slot so it sits exactly where a
                                 // call from our caller would put it, and the
@@ -1257,6 +1330,11 @@ impl VM {
                                     HookEvent::Call
                                 };
                                 if let Err(err) = self.fire_hook(event) {
+                                    self.frames.pop();
+                                    sync_ip!();
+                                    return Err(err);
+                                }
+                                if let Err(err) = crate::dap::check_break(self, &callee_name) {
                                     self.frames.pop();
                                     sync_ip!();
                                     return Err(err);
@@ -1721,6 +1799,28 @@ mod tests {
         let proto = compile_to_proto(&stmts);
         let mut vm = VM::new();
         vm.execute(proto).expect("execution error")
+    }
+
+    fn run_err(src: &str) -> String {
+        let mut parser = Parser::new(src);
+        let (stmts, _pool) = parser.parse_program().expect("syntax error");
+        let proto = compile_to_proto(&stmts);
+        let mut vm = VM::new();
+        vm.execute(proto).expect_err("expected an error")
+    }
+
+    #[test]
+    fn test_vm_hook_yield_errors() {
+        // Yielding from inside a hook with no coroutine active is an
+        // error (Lua: "attempt to yield across a C-call boundary"),
+        // never a hang. Probed to return in ~0.3s, not block.
+        let code = "debug.sethook(function() return coroutine.yield(99) end, \"c\")\nlocal function foo() return 1 end\nreturn foo()";
+        let err = run_err(code);
+        assert!(
+            err.contains("yield"),
+            "expected a yield error, got: {}",
+            err
+        );
     }
 
     #[test]

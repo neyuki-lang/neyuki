@@ -99,6 +99,18 @@ pub struct GcTracker {
     /// finalizer. Entries leave here exactly once: at settle time, or
     /// when the metatable stops providing `__gc`. Never scanned as roots.
     pub pinned: HashMap<*const RefCell<VmTable>, Rc<RefCell<VmTable>>>,
+    /// Incremental sweep cursor: remaining work when `sweeping` is true.
+    /// Plain tables still to clear, dropped ptrs still to remove, buffers
+    /// still to remove, weak survivors still to prune, and the doomed
+    /// sets plus freed accumulator shared across slices.
+    pub sweep_plain: Vec<Rc<RefCell<VmTable>>>,
+    pub sweep_dropped: Vec<*const RefCell<VmTable>>,
+    pub sweep_buf_remove: Vec<*const RefCell<VmBuffer>>,
+    pub sweep_weak: Vec<Rc<RefCell<VmTable>>>,
+    pub sweep_doomed_tables: HashSet<*const RefCell<VmTable>>,
+    pub sweep_doomed_buffers: HashSet<*const RefCell<VmBuffer>>,
+    pub sweep_freed: usize,
+    pub sweeping: bool,
 }
 
 /// Sweep work extracted for the driver: plain garbage to clear, the
@@ -130,6 +142,14 @@ impl GcTracker {
             last_freed: 0,
             next_alloc_id: 0,
             pinned: HashMap::new(),
+            sweep_plain: Vec::new(),
+            sweep_dropped: Vec::new(),
+            sweep_buf_remove: Vec::new(),
+            sweep_weak: Vec::new(),
+            sweep_doomed_tables: HashSet::new(),
+            sweep_doomed_buffers: HashSet::new(),
+            sweep_freed: 0,
+            sweeping: false,
         }
     }
 
@@ -260,8 +280,16 @@ impl GcTracker {
         self.state = GCState::Propagate;
     }
 
-    pub fn propagate_all(&mut self) {
-        while let Some(t_ptr) = self.gray_stack.pop() {
+    /// Propagates at most `budget` gray entries; returns true when the
+    /// gray stack is empty (marking complete, state moves to Sweep).
+    /// Unbounded callers pass `usize::MAX`.
+    pub fn propagate_n(&mut self, budget: usize) -> bool {
+        let mut remaining = budget;
+        while remaining > 0 {
+            let Some(t_ptr) = self.gray_stack.pop() else {
+                break;
+            };
+            remaining -= 1;
             if let Some((weak_rc, header)) = self.tables.get_mut(&t_ptr) {
                 header.color = GcColor::Black;
                 if let Some(rc) = weak_rc.upgrade() {
@@ -286,7 +314,17 @@ impl GcTracker {
                 }
             }
         }
-        self.state = GCState::Sweep;
+        if self.gray_stack.is_empty() {
+            self.state = GCState::Sweep;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Drains the gray stack completely (see `propagate_n`).
+    pub fn propagate_all(&mut self) {
+        while !self.propagate_n(usize::MAX) {}
     }
 
     /// Mark + propagate + identify + extract. Leaves colors and contents
@@ -493,45 +531,21 @@ impl GcTracker {
     /// dead entries from surviving BLACK weak tables (spared and preserved
     /// tables are never pruned — their values were deliberately unmarked),
     /// then flips colors and recomputes the threshold.
-    pub fn sweep_finish(
+    /// Stages a sweep: snapshots buffer decisions and the weak-prune
+    /// list, parks everything in cursor fields. Nothing is freed yet;
+    /// the first `sweep_slice` call starts freeing.
+    pub fn sweep_begin(
         &mut self,
         plain: Vec<Rc<RefCell<VmTable>>>,
         dropped: Vec<*const RefCell<VmTable>>,
         settled_cleared: Vec<*const RefCell<VmTable>>,
         settled_freed: usize,
     ) {
-        let mut freed_bytes = settled_freed;
         let mut doomed_tables: HashSet<*const RefCell<VmTable>> = HashSet::new();
-
-        for rc in &plain {
-            let ptr = Rc::as_ptr(rc);
-            if let Some((_, header)) = self.tables.get(&ptr) {
-                freed_bytes += header.size;
-            }
-            {
-                let mut tbl = rc.borrow_mut();
-                tbl.array.clear();
-                tbl.fields.clear();
-                tbl.metatable = None;
-            }
-            self.tables.remove(&ptr);
-            self.pinned.remove(&ptr);
-            doomed_tables.insert(ptr);
-        }
-        for ptr in dropped {
-            if let Some((_, header)) = self.tables.get(&ptr) {
-                freed_bytes += header.size;
-            }
-            self.tables.remove(&ptr);
-            self.pinned.remove(&ptr);
-            doomed_tables.insert(ptr);
-        }
         for ptr in settled_cleared {
             doomed_tables.insert(ptr);
         }
 
-        // Sweep buffers (unchanged policy), snapshotting the doomed set
-        // for weak pruning below.
         let mut doomed_buffers: HashSet<*const RefCell<VmBuffer>> = HashSet::new();
         let mut to_remove_buffers = Vec::new();
         for (&ptr, (weak_buf, header)) in self.buffers.iter_mut() {
@@ -543,12 +557,10 @@ impl GcTracker {
                     Some(_) => {
                         doomed_buffers.insert(ptr);
                         to_remove_buffers.push(ptr);
-                        freed_bytes += header.size;
                     }
                     None => {
                         doomed_buffers.insert(ptr);
                         to_remove_buffers.push(ptr);
-                        freed_bytes += header.size;
                     }
                 }
             } else {
@@ -556,11 +568,8 @@ impl GcTracker {
             }
         }
 
-        for ptr in to_remove_buffers {
-            self.buffers.remove(&ptr);
-        }
-
-        // Prune dead entries from surviving black weak tables only.
+        // Weak survivors to prune once all clearing is done. Upgraded now
+        // so they cannot vanish mid-sweep.
         let weak_black: Vec<Rc<RefCell<VmTable>>> = self
             .tables
             .iter()
@@ -573,22 +582,104 @@ impl GcTracker {
             })
             .filter(|rc| table_weak_values(rc))
             .collect();
-        for rc in &weak_black {
-            Self::prune_weak_table(&mut rc.borrow_mut(), &doomed_tables, &doomed_buffers);
-        }
 
-        // Flip surviving black tables to next white
+        self.sweep_plain = plain;
+        self.sweep_dropped = dropped;
+        self.sweep_buf_remove = to_remove_buffers;
+        self.sweep_weak = weak_black;
+        self.sweep_doomed_tables = doomed_tables;
+        self.sweep_doomed_buffers = doomed_buffers;
+        self.sweep_freed = settled_freed;
+        self.sweeping = true;
+    }
+
+    /// Performs up to `budget` units of staged sweep work (one cleared
+    /// table / removed entry / pruned table each) and returns true when
+    /// the sweep is fully done (pruned, colors flipped, threshold
+    /// recomputed). Pruning and flipping run in the final call only, once
+    /// every doomed set is complete.
+    pub fn sweep_slice(&mut self, budget: usize) -> bool {
+        if !self.sweeping {
+            return true;
+        }
+        let mut remaining = budget;
+        while remaining > 0 {
+            if let Some(rc) = self.sweep_plain.pop() {
+                let ptr = Rc::as_ptr(&rc);
+                if let Some((_, header)) = self.tables.get(&ptr) {
+                    self.sweep_freed += header.size;
+                    self.bytes_allocated = self.bytes_allocated.saturating_sub(header.size);
+                }
+                {
+                    let mut tbl = rc.borrow_mut();
+                    tbl.array.clear();
+                    tbl.fields.clear();
+                    tbl.metatable = None;
+                }
+                self.tables.remove(&ptr);
+                self.pinned.remove(&ptr);
+                self.sweep_doomed_tables.insert(ptr);
+                remaining -= 1;
+                continue;
+            }
+            if let Some(ptr) = self.sweep_dropped.pop() {
+                if let Some((_, header)) = self.tables.get(&ptr) {
+                    self.sweep_freed += header.size;
+                    self.bytes_allocated = self.bytes_allocated.saturating_sub(header.size);
+                }
+                self.tables.remove(&ptr);
+                self.pinned.remove(&ptr);
+                self.sweep_doomed_tables.insert(ptr);
+                remaining -= 1;
+                continue;
+            }
+            if let Some(ptr) = self.sweep_buf_remove.pop() {
+                if let Some((_, header)) = self.buffers.get(&ptr) {
+                    self.sweep_freed += header.size;
+                    self.bytes_allocated = self.bytes_allocated.saturating_sub(header.size);
+                }
+                self.buffers.remove(&ptr);
+                remaining -= 1;
+                continue;
+            }
+            break;
+        }
+        if !self.sweep_plain.is_empty()
+            || !self.sweep_dropped.is_empty()
+            || !self.sweep_buf_remove.is_empty()
+        {
+            return false;
+        }
+        for rc in std::mem::take(&mut self.sweep_weak) {
+            Self::prune_weak_table(
+                &mut rc.borrow_mut(),
+                &self.sweep_doomed_tables,
+                &self.sweep_doomed_buffers,
+            );
+        }
         for (_, header) in self.tables.values_mut() {
             if header.color == GcColor::Black {
                 header.color = self.current_white.other_white();
             }
         }
-
-        self.bytes_allocated = self.bytes_allocated.saturating_sub(freed_bytes);
-        self.last_freed = freed_bytes;
+        self.last_freed = self.sweep_freed;
+        self.sweep_freed = 0;
         self.current_white = self.current_white.other_white();
         self.state = GCState::Pause;
         self.threshold = (self.bytes_allocated * self.pause_multiplier / 100).max(1024 * 1024);
+        self.sweeping = false;
+        true
+    }
+
+    pub fn sweep_finish(
+        &mut self,
+        plain: Vec<Rc<RefCell<VmTable>>>,
+        dropped: Vec<*const RefCell<VmTable>>,
+        settled_cleared: Vec<*const RefCell<VmTable>>,
+        settled_freed: usize,
+    ) {
+        self.sweep_begin(plain, dropped, settled_cleared, settled_freed);
+        while !self.sweep_slice(usize::MAX) {}
     }
 
     pub fn should_collect(&self) -> bool {
@@ -622,7 +713,6 @@ mod tests {
     use super::*;
     use crate::vm::value::{Value, VmTable};
     use std::cell::RefCell;
-    use std::collections::HashMap;
     use std::rc::Rc;
 
     /// Full collection for tests without finalizers: plan, assert nothing
@@ -780,5 +870,101 @@ mod tests {
             assert_eq!(h.color, GcColor::Gray);
         }
         assert_eq!(gc.gray_stack.len(), 1);
+    }
+
+    /// Builds a tracker with: a rooted cycle, an unrooted garbage cycle,
+    /// and a rooted weak table holding a dead value.
+    fn build_mixed_heap() -> (GcTracker, Vec<Value>, Globals) {
+        let mut gc = GcTracker::new();
+        let mut stack = Vec::new();
+        let globals = crate::vm::hash::new_map();
+
+        let root = Rc::new(RefCell::new(VmTable::new()));
+        gc.register_table(&root);
+        let live_child = Rc::new(RefCell::new(VmTable::new()));
+        gc.register_table(&live_child);
+        root.borrow_mut()
+            .set_str("child", Value::Table(live_child.clone()));
+        drop(live_child);
+        stack.push(Value::Table(root.clone()));
+        drop(root);
+
+        let a = Rc::new(RefCell::new(VmTable::new()));
+        let b = Rc::new(RefCell::new(VmTable::new()));
+        gc.register_table(&a);
+        gc.register_table(&b);
+        a.borrow_mut().set_str("other", Value::Table(b.clone()));
+        b.borrow_mut().set_str("other", Value::Table(a.clone()));
+        drop(a);
+        drop(b);
+
+        let weak = Rc::new(RefCell::new(VmTable::new()));
+        gc.register_table(&weak);
+        let mt = Rc::new(RefCell::new(VmTable::new()));
+        gc.register_table(&mt);
+        mt.borrow_mut().set_str("__mode", Value::String("v".into()));
+        weak.borrow_mut().metatable = Some(mt.clone());
+        drop(mt);
+        let dead = Rc::new(RefCell::new(VmTable::new()));
+        gc.register_table(&dead);
+        weak.borrow_mut()
+            .fields
+            .insert(StrRef::from("item"), Value::Table(dead.clone()));
+        drop(dead);
+        stack.push(Value::Table(weak.clone()));
+        drop(weak);
+
+        (gc, stack, globals)
+    }
+
+    #[test]
+    fn test_gc_sweep_slices_match_drain() {
+        // Drain path (existing behavior).
+        let (mut g1, s1, gl1) = build_mixed_heap();
+        let plan1 = g1.collect_plan(&s1, &gl1);
+        assert!(plan1.queue.is_empty());
+        let SweepPlan { plain, dropped, .. } = plan1;
+        g1.sweep_finish(plain, dropped, Vec::new(), 0);
+        // Weak entry pruned on both paths.
+        let weak_entry_gone = |gc: &GcTracker| {
+            gc.tables.values().all(|(weak_rc, _)| {
+                let tbl = weak_rc.upgrade().expect("live table");
+                let t = tbl.borrow();
+                !(t.metatable.is_some() && t.fields.contains_key("item"))
+            })
+        };
+        assert!(weak_entry_gone(&g1));
+
+        // Sliced path, one unit at a time (hardest cursor workout).
+        let (mut g2, s2, gl2) = build_mixed_heap();
+        let plan2 = g2.collect_plan(&s2, &gl2);
+        assert!(plan2.queue.is_empty());
+        let SweepPlan { plain, dropped, .. } = plan2;
+        g2.sweep_begin(plain, dropped, Vec::new(), 0);
+        while !g2.sweep_slice(1) {}
+        assert!(weak_entry_gone(&g2));
+
+        assert_eq!(g1.tables.len(), g2.tables.len());
+        assert_eq!(g1.bytes_allocated, g2.bytes_allocated);
+        assert_eq!(g1.last_freed, g2.last_freed);
+        assert_eq!(g1.current_white, g2.current_white);
+        assert_eq!(g1.state, g2.state);
+    }
+
+    #[test]
+    fn test_gc_sweep_staging_flags() {
+        // Staged sweep state is observable: begin stages work, a zero
+        // budget slice leaves it staged, draining finishes it.
+        let (mut gc, stack, globals) = build_mixed_heap();
+        assert!(!gc.sweeping);
+        let plan = gc.collect_plan(&stack, &globals);
+        let SweepPlan { plain, dropped, .. } = plan;
+        gc.sweep_begin(plain, dropped, Vec::new(), 0);
+        assert!(gc.sweeping);
+        assert!(!gc.sweep_slice(0));
+        assert!(gc.sweeping);
+        assert!(gc.sweep_slice(usize::MAX));
+        assert!(!gc.sweeping);
+        assert_eq!(gc.state, GCState::Pause);
     }
 }

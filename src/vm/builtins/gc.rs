@@ -33,15 +33,12 @@ pub fn builtin_collectgarbage(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>,
                     _ => None,
                 })
                 .unwrap_or(1024);
-            // `step` historically collected a full cycle on threshold, so
-            // it runs the same finalizing driver (the size is advisory and
-            // was already ignored). Returns whether a collection ran.
-            if vm.gc.should_collect() {
-                vm.gc_collect()?;
-                Ok(vec![Value::Bool(true)])
-            } else {
-                Ok(vec![Value::Bool(false)])
-            }
+            // Performs one bounded collection slice: advances an
+            // in-progress sweep or starts a new cycle past threshold.
+            // Returns whether collection work remains (call again to
+            // continue); the size stays advisory as before.
+            vm.gc_auto_step()?;
+            Ok(vec![Value::Bool(vm.gc.sweeping)])
         }
         _ => Err(format!("unknown collectgarbage option '{}'", opt)),
     }
