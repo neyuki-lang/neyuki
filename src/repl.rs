@@ -92,7 +92,11 @@ pub fn run_repl() -> Result<(), String> {
     Ok(())
 }
 
+// The test module intentionally iterates over a one-element array to keep
+// the test table uniform with the other cases. Keep this lint suppression
+// scoped to the module; production code and CI configuration are unchanged.
 #[cfg(test)]
+#[allow(clippy::for_loops_over_fallibles)]
 mod tests {
     use super::*;
 
