@@ -1,5 +1,10 @@
 # Security policy
 
+## Pre-release reports
+**To keep development as fast as possible, you can report vulnerabilities from betas & pre-releases through Discord.**
+To do so, join our Discord [Server](https://discord.gg/mvCB3KnAT4) and Direct Message one of the Maintainers.
+(Pre-1.0.0 is considered pre-release; this snippet will be deleted once we have a stable build)
+
 ## Reporting a vulnerability
 
 **Please do not report security vulnerabilities through public GitHub issues, pull requests, or the Discord server.**
@@ -10,7 +15,7 @@ https://github.com/neyuki-lang/neyuki/security/advisories/new
 
 ### What to include
 
-Please write up and copy your report *before* opening it. It's much quicker for us to process reports that arrive complete than to wait for details to trickle in. Make sure it contains the following:
+Make sure it contains the following:
 
 **Summary**
 - What's broken and why it matters. "Integer overflow in bigint conversion leads to memory corruption" is useful; "crash" is not.
