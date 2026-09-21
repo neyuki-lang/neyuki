@@ -344,14 +344,10 @@ impl VM {
         }
         match func {
             Value::Native(def) => {
-                if let Err(err) = self.fire_hook(HookEvent::Call) {
-                    return Err(err);
-                }
+                self.fire_hook(HookEvent::Call)?;
                 match (def.func)(self, args) {
                     Ok(results) => {
-                        if let Err(err) = self.fire_hook(HookEvent::Return) {
-                            return Err(err);
-                        }
+                        self.fire_hook(HookEvent::Return)?;
                         Ok(results)
                     }
                     Err(err) => Err(err),
@@ -527,9 +523,7 @@ impl VM {
             }
             settled_freed += freed;
             if let Err(e) = res {
-                if first_err.is_none() {
-                    first_err = Some(e);
-                }
+                first_err.get_or_insert(e);
             }
         }
         (settled_cleared, settled_freed, first_err)
@@ -748,9 +742,7 @@ impl VM {
                 let Some(&inst) = code.get(ip) else {
                     // Fell off the end without a `Return`: treat as returning nothing.
                     sync_ip!();
-                    if let Err(err) = self.fire_hook(HookEvent::Return) {
-                        return Err(err);
-                    }
+                    self.fire_hook(HookEvent::Return)?;
                     self.frames.pop();
                     continue 'frames;
                 };
@@ -795,10 +787,9 @@ impl VM {
                     }
                     Instruction::NewTable { dst } => {
                         if self.gc.should_collect() || self.gc.sweeping {
-                            if let Err(err) = self.gc_auto_step() {
+                            self.gc_auto_step().inspect_err(|_| {
                                 sync_ip!();
-                                return Err(err);
-                            }
+                            })?;
                         }
                         let rc = Rc::new(RefCell::new(VmTable::new()));
                         self.gc.register_table(&rc);
@@ -1392,9 +1383,7 @@ impl VM {
                     }
                     Instruction::Return { base: ret, count } => {
                         sync_ip!();
-                        if let Err(err) = self.fire_hook(HookEvent::Return) {
-                            return Err(err);
-                        }
+                        self.fire_hook(HookEvent::Return)?;
                         let frame = self.frames.pop().unwrap();
                         if !self.open_upvalues.is_empty() {
                             self.close_upvalues(frame.base);

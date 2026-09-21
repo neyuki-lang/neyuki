@@ -580,7 +580,7 @@ impl GcTracker {
                     None
                 }
             })
-            .filter(|rc| table_weak_values(rc))
+            .filter(table_weak_values)
             .collect();
 
         self.sweep_plain = plain;

@@ -578,8 +578,13 @@ fn expand_variables(vm: &mut VM, var_ref: usize, start: usize, count: Option<usi
         .as_ref()
         .and_then(|s| s.variables.get(&var_ref).cloned())
     {
-        Some(Value::Int(n)) if n == -999_999 => Resolved::Globals,
-        Some(Value::Int(n)) if n < 0 => Resolved::Locals((-n - 1) as usize),
+        Some(Value::Int(n)) if n < 0 => {
+            if n == -999_999 {
+                Resolved::Globals
+            } else {
+                Resolved::Locals((-n - 1) as usize)
+            }
+        }
         Some(Value::Table(t)) => Resolved::Table(t),
         _ => Resolved::Missing,
     };
@@ -642,16 +647,12 @@ fn expand_variables(vm: &mut VM, var_ref: usize, start: usize, count: Option<usi
             .take(end - start)
             .map(|(name, v)| {
                 let child_ref = match &v {
-                    Value::Table(_) => {
-                        if has_session {
-                            let s = vm.dap.as_mut().expect("session");
-                            let id = s.next_var_ref;
-                            s.next_var_ref += 1;
-                            s.variables.insert(id, v.clone());
-                            id
-                        } else {
-                            0
-                        }
+                    Value::Table(_) if has_session => {
+                        let s = vm.dap.as_mut().expect("session");
+                        let id = s.next_var_ref;
+                        s.next_var_ref += 1;
+                        s.variables.insert(id, v.clone());
+                        id
                     }
                     _ => 0,
                 };

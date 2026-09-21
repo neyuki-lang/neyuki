@@ -120,7 +120,7 @@ pub fn inline_functions(module: &mut IrModule) -> bool {
             )
             .and_then(|idx| candidates.get(&idx))
             .filter(|f| f.num_params as usize == args.len())
-            .map(|target| (target, dsts[0].clone(), args.clone())),
+            .map(|target| (target, dsts[0], args.clone())),
             _ => None,
         };
 

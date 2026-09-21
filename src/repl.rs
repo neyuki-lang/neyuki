@@ -92,11 +92,7 @@ pub fn run_repl() -> Result<(), String> {
     Ok(())
 }
 
-// The test module intentionally iterates over a one-element array to keep
-// the test table uniform with the other cases. Keep this lint suppression
-// scoped to the module; production code and CI configuration are unchanged.
 #[cfg(test)]
-#[allow(clippy::for_loops_over_fallibles)]
 mod tests {
     use super::*;
 
@@ -124,13 +120,12 @@ mod tests {
 
     #[test]
     fn complete_errors_report_immediately() {
-        for src in ["local = 1"] {
-            assert!(
-                !is_incomplete_input(&parse_err(src)),
-                "should report: {:?}",
-                src
-            );
-        }
+        let src = "local = 1";
+        assert!(
+            !is_incomplete_input(&parse_err(src)),
+            "should report: {:?}",
+            src
+        );
     }
 
     #[test]
