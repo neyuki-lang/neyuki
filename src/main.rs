@@ -7,6 +7,8 @@ mod bench;
 mod bytecode;
 mod compiler;
 mod crypto_lib;
+mod dap;
+mod dap_json;
 pub mod diagnostics;
 mod fs_lib;
 #[path = "../fuzz/mod.rs"]
@@ -16,6 +18,7 @@ mod io_lib;
 mod lexer;
 mod lint;
 mod parser;
+mod repl;
 mod runtime;
 pub mod sema;
 mod sql_lib;
@@ -154,6 +157,16 @@ fn main() {
         fuzz::run_all_fuzz_tests();
     } else if action == "bench" {
         bench::run_all_benchmarks();
+    } else if action == "repl" {
+        if let Err(err) = repl::run_repl() {
+            eprintln!("repl error: {}", err);
+            process::exit(1);
+        }
+    } else if action == "dap" {
+        if let Err(err) = dap::run_dap_session() {
+            eprintln!("dap error: {}", err);
+            process::exit(1);
+        }
     } else {
         eprintln!("Unknown action: {}", action);
         process::exit(1);

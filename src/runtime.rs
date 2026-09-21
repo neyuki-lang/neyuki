@@ -2571,8 +2571,10 @@ fn runtime_to_vm_val(val: &Value, depth: usize) -> Result<crate::vm::value::Valu
                 tbl.array.push(runtime_to_vm_val(item, depth + 1)?);
             }
             for (k, item) in &borrowed.fields {
-                tbl.fields
-                    .insert(Rc::from(k.as_str()), runtime_to_vm_val(item, depth + 1)?);
+                tbl.fields.insert(
+                    crate::vm::value::StrRef::from(k.as_str()),
+                    runtime_to_vm_val(item, depth + 1)?,
+                );
             }
             Ok(crate::vm::value::Value::Table(Rc::new(RefCell::new(tbl))))
         }
@@ -2927,7 +2929,8 @@ fn runtime_coroutine_create(args: Vec<Value>) -> Result<Vec<Value>, String> {
         all_vars.reverse();
         for (k, v) in all_vars {
             if let Ok(vm_v) = runtime_to_vm_val(&v, 0) {
-                vm.globals.insert(Rc::from(k.as_str()), vm_v);
+                vm.globals
+                    .insert(crate::vm::value::StrRef::from(k.as_str()), vm_v);
             }
         }
     }

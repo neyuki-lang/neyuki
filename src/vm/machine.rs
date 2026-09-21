@@ -2,8 +2,11 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use num_integer::Integer as _;
+
 use crate::bytecode::instruction::{Instruction, MULTRET};
 use crate::bytecode::proto::Proto;
+use crate::dap::DapSession;
 use crate::vm::frame::CallFrame;
 use crate::vm::gc::GcTracker;
 use crate::vm::hash::{FxHashMap, new_map};
@@ -13,7 +16,7 @@ use crate::vm::libs::{
     register_bridged_natives,
 };
 use crate::vm::ops;
-use crate::vm::value::{NativeDef, Upvalue, Value, VmClosure, VmTable};
+use crate::vm::value::{NativeDef, StrRef, Upvalue, Value, VmClosure, VmTable};
 
 const MAX_CALL_DEPTH: usize = 512;
 
@@ -50,15 +53,59 @@ pub struct CoroutineState {
     pub open_upvalues: Vec<ParkedUpvalue>,
 }
 
+/// A `debug.sethook` hook (v1: call/return events only). `None` means no
+/// hook is set, in which case event checks cost a single predictable
+/// branch at call/return boundaries and nothing in the dispatch loop.
+#[derive(Clone)]
+pub struct DebugHook {
+    pub func: Value,
+    pub on_call: bool,
+    pub on_return: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum HookEvent {
+    Call,
+    TailCall,
+    Return,
+}
+
+impl HookEvent {
+    fn name(self) -> &'static str {
+        match self {
+            HookEvent::Call => "call",
+            HookEvent::TailCall => "tail call",
+            HookEvent::Return => "return",
+        }
+    }
+
+    fn wants(self, hook: &DebugHook) -> bool {
+        match self {
+            HookEvent::Call | HookEvent::TailCall => hook.on_call,
+            HookEvent::Return => hook.on_return,
+        }
+    }
+}
+
 pub struct VM {
     pub stack: Vec<Value>,
     pub frames: Vec<CallFrame>,
-    pub globals: FxHashMap<Rc<str>, Value>,
+    pub globals: FxHashMap<StrRef, Value>,
     pub gc: GcTracker,
     pub coroutines: HashMap<usize, Rc<RefCell<CoroutineState>>>,
     pub next_co_id: usize,
     pub current_co: Option<usize>,
     pub is_yielding: bool,
+    /// Active `debug.sethook` hook, if any.
+    pub hook: Option<DebugHook>,
+    /// True while a hook function itself runs: hooks never trigger hooks.
+    pub in_hook: bool,
+    /// Active DAP debug session, if any (`neyuki dap`). `None` keeps
+    /// breakpoint checks to a single predictable branch.
+    pub dap: Option<DapSession>,
+    /// True while a DAP `evaluate` call runs: breakpoints stay silent
+    /// inside evaluation (it would otherwise pause on itself).
+    pub in_eval: bool,
     /// Upvalues that still point at a live register of the current stack,
     /// sorted by register index. Nearly always empty or very short, which is
     /// why a plain vector beats a map here.
@@ -91,6 +138,10 @@ impl VM {
             next_co_id: 1,
             current_co: None,
             is_yielding: false,
+            hook: None,
+            in_hook: false,
+            dap: None,
+            in_eval: false,
             open_upvalues: Vec::new(),
             top: 0,
             modules: HashMap::new(),
@@ -119,7 +170,7 @@ impl VM {
     }
 
     pub fn set_global(&mut self, name: &str, value: Value) {
-        self.globals.insert(Rc::from(name), value);
+        self.globals.insert(StrRef::from(name), value);
     }
 
     pub fn register_native(&mut self, def: &'static NativeDef) {
@@ -292,7 +343,16 @@ impl VM {
             ));
         }
         match func {
-            Value::Native(def) => (def.func)(self, args),
+            Value::Native(def) => {
+                self.fire_hook(HookEvent::Call)?;
+                match (def.func)(self, args) {
+                    Ok(results) => {
+                        self.fire_hook(HookEvent::Return)?;
+                        Ok(results)
+                    }
+                    Err(err) => Err(err),
+                }
+            }
             Value::Closure(c) => {
                 let depth = self.frames.len();
                 let prev_stack_len = self.stack.len();
@@ -315,9 +375,34 @@ impl VM {
                 };
                 self.frames
                     .push(CallFrame::with_varargs(c.clone(), base, varargs));
+                if let Err(err) = self.fire_hook(HookEvent::Call) {
+                    if !self.is_yielding {
+                        self.frames.truncate(depth);
+                        self.close_upvalues(prev_stack_len);
+                        self.stack.truncate(prev_stack_len);
+                    }
+                    return Err(err);
+                }
+                if let Err(err) = crate::dap::check_break(
+                    self,
+                    &c.proto
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| "<anonymous>".to_string()),
+                ) {
+                    if !self.is_yielding {
+                        self.frames.truncate(depth);
+                        self.close_upvalues(prev_stack_len);
+                        self.stack.truncate(prev_stack_len);
+                    }
+                    return Err(err);
+                }
                 self.returned.clear();
                 match self.run_to_depth(depth) {
                     Ok(res) => {
+                        // No return hook here: the callee reports its own
+                        // return through its Return instruction (or
+                        // fall-off-end), so firing again would double-report.
                         if !self.is_yielding {
                             self.close_upvalues(prev_stack_len);
                             self.stack.truncate(prev_stack_len);
@@ -374,6 +459,104 @@ impl VM {
             return t.borrow().metamethod(event);
         }
         None
+    }
+
+    /// Runs the active debug hook for `event`, if one is set and listening.
+    /// Hooks never trigger hooks (`in_hook` guard); a hook error propagates
+    /// to the caller, which is responsible for unwinding its own frame.
+    fn fire_hook(&mut self, event: HookEvent) -> Result<(), String> {
+        let (func, wanted) = match &self.hook {
+            Some(hook) if !self.in_hook => (hook.func.clone(), event.wants(hook)),
+            _ => return Ok(()),
+        };
+        if !wanted {
+            return Ok(());
+        }
+        self.in_hook = true;
+        let arg = Value::str(event.name());
+        let res = self.call_function(func, &[arg]);
+        self.in_hook = false;
+        res.map(|_| ())
+    }
+
+    /// Full collection with finalizers: mark, extract the finalizer queue,
+    /// run each handler newest-first, settle resurrections, then finish the
+    /// sweep. A handler error is recorded and propagated after the whole
+    /// queue ran; its table is still collected (run-once guarantee).
+    /// Drains any sweep left staged by an earlier bounded step first, so
+    /// explicit collections always complete fully.
+    pub(crate) fn gc_collect(&mut self) -> Result<(), String> {
+        while !self.gc.sweep_slice(usize::MAX) {}
+        while !self.gc.sweep_slice(usize::MAX) {}
+        let crate::vm::gc::SweepPlan {
+            queue,
+            internal,
+            plain,
+            dropped,
+        } = self.gc.collect_plan(&self.stack, &self.globals);
+        let (settled_cleared, settled_freed, first_err) = self.settle_queue(&queue, &internal);
+        self.gc
+            .sweep_finish(plain, dropped, settled_cleared, settled_freed);
+        if let Some(e) = first_err {
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Runs one finalizer queue, settling each table afterwards. Shared by
+    /// the draining and bounded-stepping drivers so both observe identical
+    /// order and resurrection rules.
+    fn settle_queue(
+        &mut self,
+        queue: &[(Rc<RefCell<VmTable>>, Value)],
+        internal: &HashMap<*const RefCell<VmTable>, usize>,
+    ) -> (Vec<*const RefCell<VmTable>>, usize, Option<String>) {
+        let mut settled_cleared = Vec::new();
+        let mut settled_freed = 0;
+        let mut first_err: Option<String> = None;
+        for (rc, handler) in queue {
+            let arg = Value::Table(rc.clone());
+            let res = self.call_function(handler.clone(), std::slice::from_ref(&arg));
+            let (cleared, freed) = self.gc.settle_table(rc, res.is_ok(), internal);
+            if let Some(ptr) = cleared {
+                settled_cleared.push(ptr);
+            }
+            settled_freed += freed;
+            if let Err(e) = res {
+                first_err.get_or_insert(e);
+            }
+        }
+        (settled_cleared, settled_freed, first_err)
+    }
+
+    /// Allocation-triggered collection step: advances an in-progress sweep
+    /// by one bounded slice, or starts a new cycle (plan, settle, begin)
+    /// when over threshold and takes its first slice. Bounds pause times;
+    /// explicit collections still drain fully. Slice size is fixed; pacing
+    /// itself comes from the allocation threshold.
+    pub(crate) fn gc_auto_step(&mut self) -> Result<(), String> {
+        const SLICE_BUDGET: usize = 64;
+        if self.gc.sweeping {
+            self.gc.sweep_slice(SLICE_BUDGET);
+            return Ok(());
+        }
+        if !self.gc.should_collect() {
+            return Ok(());
+        }
+        let crate::vm::gc::SweepPlan {
+            queue,
+            internal,
+            plain,
+            dropped,
+        } = self.gc.collect_plan(&self.stack, &self.globals);
+        let (settled_cleared, settled_freed, first_err) = self.settle_queue(&queue, &internal);
+        self.gc
+            .sweep_begin(plain, dropped, settled_cleared, settled_freed);
+        self.gc.sweep_slice(SLICE_BUDGET);
+        if let Some(e) = first_err {
+            return Err(e);
+        }
+        Ok(())
     }
 
     pub fn run(&mut self) -> Result<Value, String> {
@@ -558,6 +741,8 @@ impl VM {
             loop {
                 let Some(&inst) = code.get(ip) else {
                     // Fell off the end without a `Return`: treat as returning nothing.
+                    sync_ip!();
+                    self.fire_hook(HookEvent::Return)?;
                     self.frames.pop();
                     continue 'frames;
                 };
@@ -601,8 +786,10 @@ impl VM {
                         self.upvalue_set(&closure.upvalues[upval_idx as usize], val);
                     }
                     Instruction::NewTable { dst } => {
-                        if self.gc.should_collect() {
-                            self.gc.collect_garbage(&self.stack, &self.globals);
+                        if self.gc.should_collect() || self.gc.sweeping {
+                            self.gc_auto_step().inspect_err(|_| {
+                                sync_ip!();
+                            })?;
                         }
                         let rc = Rc::new(RefCell::new(VmTable::new()));
                         self.gc.register_table(&rc);
@@ -707,19 +894,116 @@ impl VM {
                         arith_slow!(dst, a, b, ops::eval_div, "__div")
                     }
                     Instruction::IDiv { dst, a, b } => {
-                        arith_slow!(dst, a, b, ops::eval_idiv, "__idiv")
+                        // Fast path for small ints; the zero divisor,
+                        // MIN/-1 overflow, floats, BigInts and metamethods
+                        // keep going through the generic evaluator so
+                        // semantics cannot drift.
+                        let ra = &reg!(a);
+                        let rb = &reg!(b);
+                        let res = match (ra, rb) {
+                            (Value::Int(x), Value::Int(y)) => {
+                                if *y == 0 || (*x == i64::MIN && *y == -1) {
+                                    attempt!(ops::eval_idiv(ra, rb))
+                                } else {
+                                    Value::Int(x.div_floor(y))
+                                }
+                            }
+                            _ => attempt!(ops::eval_idiv(ra, rb)),
+                        };
+                        set!(dst, res);
                     }
                     Instruction::Mod { dst, a, b } => {
-                        arith_slow!(dst, a, b, ops::eval_mod, "__mod")
+                        // Fast path for small ints; the zero divisor,
+                        // MIN/-1 overflow, floats, BigInts and metamethods
+                        // keep going through the generic evaluator so
+                        // semantics cannot drift.
+                        let ra = &reg!(a);
+                        let rb = &reg!(b);
+                        let res = match (ra, rb) {
+                            (Value::Int(x), Value::Int(y)) => {
+                                if *y == 0 {
+                                    attempt!(ops::eval_mod(ra, rb))
+                                } else if *y == -1 {
+                                    Value::Int(0)
+                                } else {
+                                    Value::Int(x.mod_floor(y))
+                                }
+                            }
+                            _ => attempt!(ops::eval_mod(ra, rb)),
+                        };
+                        set!(dst, res);
                     }
                     Instruction::Pow { dst, a, b } => {
                         arith_slow!(dst, a, b, ops::eval_pow, "__pow")
                     }
-                    Instruction::BitAnd { dst, a, b } => bitop!(dst, a, b, ops::eval_bitand),
-                    Instruction::BitOr { dst, a, b } => bitop!(dst, a, b, ops::eval_bitor),
-                    Instruction::BitXor { dst, a, b } => bitop!(dst, a, b, ops::eval_bitxor),
-                    Instruction::Shl { dst, a, b } => bitop!(dst, a, b, ops::eval_shl),
-                    Instruction::Shr { dst, a, b } => bitop!(dst, a, b, ops::eval_shr),
+                    Instruction::BitAnd { dst, a, b } => {
+                        let ra = &reg!(a);
+                        let rb = &reg!(b);
+                        let res = match (ra, rb) {
+                            (Value::Int(x), Value::Int(y)) => Value::Int(x & y),
+                            _ => attempt!(ops::eval_bitand(ra, rb)),
+                        };
+                        set!(dst, res);
+                    }
+                    Instruction::BitOr { dst, a, b } => {
+                        let ra = &reg!(a);
+                        let rb = &reg!(b);
+                        let res = match (ra, rb) {
+                            (Value::Int(x), Value::Int(y)) => Value::Int(x | y),
+                            _ => attempt!(ops::eval_bitor(ra, rb)),
+                        };
+                        set!(dst, res);
+                    }
+                    Instruction::BitXor { dst, a, b } => {
+                        let ra = &reg!(a);
+                        let rb = &reg!(b);
+                        let res = match (ra, rb) {
+                            (Value::Int(x), Value::Int(y)) => Value::Int(x ^ y),
+                            _ => attempt!(ops::eval_bitxor(ra, rb)),
+                        };
+                        set!(dst, res);
+                    }
+                    Instruction::Shl { dst, a, b } => {
+                        // Only shifts that provably keep every bit stay
+                        // inline; the headroom rule mirrors `shift_left`
+                        // exactly and everything else (negatives, widening,
+                        // floats) delegates to it.
+                        let ra = &reg!(a);
+                        let rb = &reg!(b);
+                        let res = match (ra, rb) {
+                            (Value::Int(x), Value::Int(y))
+                                if *x >= 0
+                                    && *y >= 0
+                                    && (*y as u64)
+                                        <= x.leading_zeros().saturating_sub(1) as u64 =>
+                            {
+                                Value::Int(x << *y)
+                            }
+                            _ => attempt!(ops::eval_shl(ra, rb)),
+                        };
+                        set!(dst, res);
+                    }
+                    Instruction::Shr { dst, a, b } => {
+                        // Fast path for the overwhelmingly common
+                        // small-int shift; every other operand shape keeps
+                        // going through the generic evaluator so its
+                        // semantics (widening, floats, errors) cannot drift.
+                        let ra = &reg!(a);
+                        let rb = &reg!(b);
+                        let res = match (ra, rb) {
+                            (Value::Int(x), Value::Int(y)) => {
+                                if *y < 0 {
+                                    attempt!(ops::eval_shl(ra, rb))
+                                } else if *y >= 64 {
+                                    Value::Int(if *x < 0 { -1 } else { 0 })
+                                } else {
+                                    Value::Int(x >> *y)
+                                }
+                            }
+                            _ => attempt!(ops::eval_shr(ra, rb)),
+                        };
+                        set!(dst, res);
+                    }
                     Instruction::LShl { dst, a, b } => bitop!(dst, a, b, ops::eval_lshl),
                     Instruction::LShr { dst, a, b } => bitop!(dst, a, b, ops::eval_lshr),
                     Instruction::Concat { dst, a, b } => {
@@ -947,7 +1231,28 @@ impl VM {
 
                         match &reg!(callee) {
                             Value::Closure(callee_closure) => {
-                                if self.frames.len() >= MAX_CALL_DEPTH {
+                                // Tail call: this `Call` is immediately
+                                // followed by `Return` of its own results, so
+                                // the current frame is replaced instead of
+                                // pushing a new one, giving proper tail calls
+                                // constant stack space. Only the exact shape
+                                // the compilers emit for `return f(...)`
+                                // qualifies (MULTRET on both sides with the
+                                // results starting at the callee slot): any
+                                // extra value would need an instruction
+                                // between the two, which fails the adjacency
+                                // check. A frame with no caller (base 0)
+                                // cannot be replaced.
+                                let tail = retc == MULTRET
+                                    && base >= 1
+                                    && matches!(
+                                        code.get(ip),
+                                        Some(Instruction::Return {
+                                            base: ret,
+                                            count: MULTRET,
+                                        }) if *ret == callee
+                                    );
+                                if !tail && self.frames.len() >= MAX_CALL_DEPTH {
                                     throw!(
                                         "call stack overflow: exceeded maximum call depth of {}",
                                         MAX_CALL_DEPTH
@@ -955,7 +1260,42 @@ impl VM {
                                 }
                                 let callee_closure = callee_closure.clone();
                                 let proto = &callee_closure.proto;
-                                let new_base = args_start;
+                                let callee_name = proto
+                                    .name
+                                    .clone()
+                                    .unwrap_or_else(|| "<anonymous>".to_string());
+                                // For a tail call the callee window slides
+                                // down one slot so it sits exactly where a
+                                // call from our caller would put it, and the
+                                // callee inherits our return obligation.
+                                let (new_base, want_ret) = if tail {
+                                    let cur = self.frames.pop().unwrap();
+                                    if !self.open_upvalues.is_empty() {
+                                        self.close_upvalues(cur.base);
+                                    }
+                                    // Relocate the whole callee window so the
+                                    // callee sits where our caller put us
+                                    // (`cur.base - 1`) and the arguments
+                                    // follow; the new frame keeps our base so
+                                    // its results land in our caller's slot.
+                                    let caller_dest = cur.base - 1;
+                                    let callee_abs = cur.base + callee as usize;
+                                    let shift = callee_abs - caller_dest;
+                                    let len = args_end - callee_abs;
+                                    for k in 0..len {
+                                        let v = std::mem::replace(
+                                            &mut self.stack[callee_abs + k],
+                                            Value::Nil,
+                                        );
+                                        self.stack[caller_dest + k] = v;
+                                    }
+                                    if self.top > callee_abs {
+                                        self.top -= shift;
+                                    }
+                                    (cur.base, cur.want_ret)
+                                } else {
+                                    (args_start, retc)
+                                };
                                 let needed = new_base + proto.max_registers as usize;
                                 if needed >= self.stack.len() {
                                     self.stack.resize(needed + 1, Value::Nil);
@@ -965,14 +1305,31 @@ impl VM {
                                     self.stack[new_base + i] = Value::Nil;
                                 }
                                 let varargs = if proto.is_vararg && argc > num_params {
-                                    self.stack[args_start + num_params..args_end].to_vec()
+                                    self.stack[new_base + num_params..new_base + argc].to_vec()
                                 } else {
                                     Vec::new()
                                 };
                                 let new_frame =
                                     CallFrame::with_varargs(callee_closure, new_base, varargs)
-                                        .wanting(retc);
+                                        .wanting(want_ret);
                                 self.frames.push(new_frame);
+                                // A replaced frame never returns, so a tail
+                                // call reports "tail call" instead of "call".
+                                let event = if tail {
+                                    HookEvent::TailCall
+                                } else {
+                                    HookEvent::Call
+                                };
+                                if let Err(err) = self.fire_hook(event) {
+                                    self.frames.pop();
+                                    sync_ip!();
+                                    return Err(err);
+                                }
+                                if let Err(err) = crate::dap::check_break(self, &callee_name) {
+                                    self.frames.pop();
+                                    sync_ip!();
+                                    return Err(err);
+                                }
                                 continue 'frames;
                             }
                             Value::Native(def) => {
@@ -981,8 +1338,16 @@ impl VM {
                                 // the argument window is cheaper than exposing
                                 // the stack to code that may resize it.
                                 let args: Vec<Value> = self.stack[args_start..args_end].to_vec();
+                                if let Err(err) = self.fire_hook(HookEvent::Call) {
+                                    sync_ip!();
+                                    return Err(err);
+                                }
                                 match func(self, &args) {
                                     Ok(results) => {
+                                        if let Err(err) = self.fire_hook(HookEvent::Return) {
+                                            sync_ip!();
+                                            return Err(err);
+                                        }
                                         self.store_call_results(callee, retc, &results);
                                     }
                                     Err(err) if self.is_yielding => {
@@ -1017,6 +1382,8 @@ impl VM {
                         }
                     }
                     Instruction::Return { base: ret, count } => {
+                        sync_ip!();
+                        self.fire_hook(HookEvent::Return)?;
                         let frame = self.frames.pop().unwrap();
                         if !self.open_upvalues.is_empty() {
                             self.close_upvalues(frame.base);
@@ -1135,7 +1502,7 @@ impl VM {
                             vec![Value::Nil, Value::Nil]
                         }
                     } else if retc > 1 {
-                        let mut keys: Vec<&Rc<str>> = tbl.fields.keys().collect();
+                        let mut keys: Vec<&StrRef> = tbl.fields.keys().collect();
                         keys.sort();
                         let next_key = match &ctrl {
                             Value::Nil => keys.first().copied(),
@@ -1423,6 +1790,28 @@ mod tests {
         vm.execute(proto).expect("execution error")
     }
 
+    fn run_err(src: &str) -> String {
+        let mut parser = Parser::new(src);
+        let (stmts, _pool) = parser.parse_program().expect("syntax error");
+        let proto = compile_to_proto(&stmts);
+        let mut vm = VM::new();
+        vm.execute(proto).expect_err("expected an error")
+    }
+
+    #[test]
+    fn test_vm_hook_yield_errors() {
+        // Yielding from inside a hook with no coroutine active is an
+        // error (Lua: "attempt to yield across a C-call boundary"),
+        // never a hang. Probed to return in ~0.3s, not block.
+        let code = "debug.sethook(function() return coroutine.yield(99) end, \"c\")\nlocal function foo() return 1 end\nreturn foo()";
+        let err = run_err(code);
+        assert!(
+            err.contains("yield"),
+            "expected a yield error, got: {}",
+            err
+        );
+    }
+
     #[test]
     fn test_vm_arithmetic() {
         let res = run_code("local a = 10\nlocal b = 20\nreturn a + b * 2");
@@ -1452,10 +1841,90 @@ mod tests {
     }
 
     #[test]
+    fn test_vm_shr_edge_cases() {
+        // Negative value, oversized shift, and negative shift amount.
+        let res = run_code("return (16 >> 2) + (1 >> 100) + (-8 >> 2) + (4 >> -1)");
+        // 4 + 0 + -2 + 8 = 10
+        assert_eq!(res.to_string(), "10");
+    }
+
+    #[test]
+    fn test_vm_mod_edge_cases() {
+        let res = run_code("return (17 % 5) + (-17 % 5) + (7.5 % 2)");
+        // Floored modulo: 2 + 3 + 1.5 = 6.5 (verified against Lua 5.4).
+        assert_eq!(res.to_string(), "6.5");
+    }
+
+    #[test]
+    fn test_vm_mod_min_zero() {
+        // i64::MIN % -1 is 0 mathematically, not an overflow panic.
+        let res = run_code("return -9223372036854775808 % -1");
+        assert_eq!(res.to_string(), "0");
+    }
+
+    #[test]
+    fn test_vm_mod_zero_message() {
+        let err = crate::vm::ops::eval_mod(
+            &crate::vm::value::Value::Int(1),
+            &crate::vm::value::Value::Int(0),
+        )
+        .unwrap_err();
+        assert_eq!(err, "modulo by zero");
+    }
+
+    #[test]
+    fn test_vm_idiv_edge_cases() {
+        let res = run_code("return (17 // 5) + (-17 // 5) + (7.5 // 2)");
+        // Floored division: 3 + -4 + 3.0 = 2.0, displayed as "2".
+        assert_eq!(res.to_string(), "2");
+    }
+
+    #[test]
+    fn test_vm_idiv_min_neg1_widens() {
+        // i64::MIN // -1 overflows i64: must widen to BigInt, not wrap.
+        let res = run_code("return -9223372036854775808 // -1");
+        assert_eq!(res.to_string(), "9223372036854775808");
+    }
+
+    #[test]
+    fn test_vm_idiv_zero_message() {
+        let err = crate::vm::ops::eval_idiv(
+            &crate::vm::value::Value::Int(1),
+            &crate::vm::value::Value::Int(0),
+        )
+        .unwrap_err();
+        assert_eq!(err, "division by zero");
+    }
+
+    #[test]
+    fn test_vm_bitops_int_paths() {
+        let res = run_code("return (12 & 10) + (12 | 10) + (12 ~ 10) + (1 << 4)");
+        // 8 + 14 + 6 + 16 = 44
+        assert_eq!(res.to_string(), "44");
+    }
+
+    #[test]
+    fn test_vm_shl_widening_fallback() {
+        // 1 << 100 widens past i64: must equal 2^100, not wrap.
+        // 3 << 62 also widens (headroom rule); both go through fallback.
+        let res = run_code(
+            "return ((1 << 100) == 1267650600228229401496703205376) and ((3 << 62) == 13835058055282163712)",
+        );
+        assert_eq!(res.to_string(), "true");
+    }
+
+    #[test]
     fn test_vm_functions_and_calls() {
         let code = "function add(x, y) return x + y end\nreturn add(15, 27)";
         let res = run_code(code);
         assert_eq!(res.to_string(), "42");
+    }
+
+    #[test]
+    fn test_vm_tail_call_deep_recursion() {
+        let code = "local function loop(n, acc)\nif n == 0 then return acc end\nreturn loop(n - 1, acc + n)\nend\nreturn loop(100000, 0)";
+        let res = run_code(code);
+        assert_eq!(res.to_string(), "5000050000");
     }
 
     #[test]
@@ -1592,6 +2061,65 @@ mod tests {
     }
 
     #[test]
+    fn test_vm_debug_hook_call_return() {
+        // Verified against Lua 5.4: the sethook call itself reports its
+        // return (hook is active by then), then add's pair, then the
+        // clearing sethook reports its call (but no return: hook is off).
+        let code = "local events = {}\nlocal function tracer(ev)\n  events[#events + 1] = ev\nend\ndebug.sethook(tracer, \"cr\")\nlocal function add(x, y)\n  return x + y\nend\nlocal s = add(1, 2)\ndebug.sethook(nil)\nreturn table.concat(events, \",\")";
+        let res = run_code(code);
+        assert_eq!(res.to_string(), "return,call,return,call");
+    }
+
+    #[test]
+    fn test_vm_debug_gethook_roundtrip() {
+        let code = "local function tracer(ev) end\ndebug.sethook(tracer, \"cr\")\nlocal h, m = debug.gethook()\nassert(h == tracer)\nassert(m == \"cr\")\ndebug.sethook(nil)\nlocal h2 = debug.gethook()\nassert(h2 == nil)\nreturn 1";
+        let res = run_code(code);
+        assert_eq!(res.to_string(), "1");
+    }
+
+    // Deferred to v3: per-instruction line numbers are not plumbed yet
+    // (both compilers emit line 1; the parser's SpanPool is dropped in
+    // `compile_source`). Needs spans threaded AST -> IR/bytecode emit.
+    #[test]
+    #[ignore]
+    fn test_vm_debug_hook_line_events() {
+        let code = "local lines = {}\nlocal function tracer(ev)\n  if ev == \"line\" then\n    local info = debug.getinfo(2)\n    lines[#lines + 1] = info.currentline\n  end\nend\ndebug.sethook(tracer, \"l\")\nlocal a = 1\nlocal b = 2\nlocal c = a + b\ndebug.sethook(nil)\nreturn table.concat(lines, \",\")";
+        let res = run_code(code);
+        assert_eq!(res.to_string(), "9,10,11,12");
+    }
+
+    #[test]
+    fn test_vm_debug_hook_native_call() {
+        // `tostring(i)` over a loop variable cannot be constant-folded, so
+        // the native call really executes. Lua-consistent sequence:
+        // sethook-return, two tostring pairs, clearing call.
+        let code = "local events = {}\nlocal function tracer(ev)\n  events[#events + 1] = ev\nend\ndebug.sethook(tracer, \"cr\")\nlocal x = \"\"\nfor i = 1, 2 do x = tostring(i) end\ndebug.sethook(nil)\nassert(x == \"2\")\nreturn table.concat(events, \",\")";
+        let res = run_code(code);
+        assert_eq!(res.to_string(), "return,call,return,call,return,call");
+    }
+
+    #[test]
+    fn test_vm_debug_hook_pcall_path() {
+        // Lua 5.4 ground truth: sethook-return, pcall-call, add-call,
+        // add-return, pcall-return, clearing call.
+        let code = "local events = {}\nlocal function tracer(ev)\n  events[#events + 1] = ev\nend\nlocal function add(x, y)\n  return x + y\nend\ndebug.sethook(tracer, \"cr\")\nlocal ok, v = pcall(add, 1, 2)\ndebug.sethook(nil)\nassert(ok == true)\nassert(v == 3)\nreturn table.concat(events, \",\")";
+        let res = run_code(code);
+        assert_eq!(res.to_string(), "return,call,call,return,return,call");
+    }
+
+    #[test]
+    fn test_vm_debug_hook_tail_call_event() {
+        // Lua 5.4 ground truth: sethook-return, initial call, one "tail
+        // call" per replaced frame, final return, clearing call.
+        let code = "local events = {}\nlocal function tracer(ev)\n  events[#events + 1] = ev\nend\nlocal function loop(n, acc)\n  if n == 0 then return acc end\n  return loop(n - 1, acc + n)\nend\ndebug.sethook(tracer, \"cr\")\nlocal r = loop(3, 0)\ndebug.sethook(nil)\nassert(r == 6)\nreturn table.concat(events, \",\")";
+        let res = run_code(code);
+        assert_eq!(
+            res.to_string(),
+            "return,call,tail call,tail call,tail call,return,call"
+        );
+    }
+
+    #[test]
     fn test_vm_require_bundled_libs() {
         let code_bit = "local bit = require(\"@neyuki/bit\")\nreturn bit.band(7, 3)";
         let res_bit = run_code(code_bit);
@@ -1637,8 +2165,10 @@ mod tests {
 
     #[test]
     fn test_vm_call_stack_overflow_caught() {
-        // Infinite recursion via Instruction::Call must be caught by MAX_CALL_DEPTH = 512
-        let code = "local function f()\n  return f()\nend\nreturn f()";
+        // Infinite NON-tail recursion via Instruction::Call must be caught by
+        // MAX_CALL_DEPTH = 512. (A tail call like `return f()` reuses the
+        // frame instead and legitimately runs forever.)
+        let code = "local function f()\n  return f() + 1\nend\nreturn f()";
         let stmts = crate::compiler::compile_source(code).expect("syntax error");
         let proto = crate::compiler::compile_to_proto(&stmts);
         let mut vm = VM::new();

@@ -46,8 +46,8 @@ fn to_usize(val: &Value, name: &str) -> Result<usize, String> {
 }
 
 fn buf_create(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    if vm.gc.should_collect() {
-        vm.gc.collect_garbage(&vm.stack, &vm.globals);
+    if vm.gc.should_collect() || vm.gc.sweeping {
+        vm.gc_auto_step()?;
     }
     let size = to_usize(
         args.first()
@@ -68,8 +68,8 @@ fn buf_create(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 }
 
 fn buf_fromstring(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    if vm.gc.should_collect() {
-        vm.gc.collect_garbage(&vm.stack, &vm.globals);
+    if vm.gc.should_collect() || vm.gc.sweeping {
+        vm.gc_auto_step()?;
     }
     let s = match args
         .first()

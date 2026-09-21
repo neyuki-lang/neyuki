@@ -5,7 +5,7 @@ use std::rc::Rc;
 use crate::vm::machine::VM;
 use crate::vm::value::Value;
 
-pub fn builtin_setmetatable(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+pub fn builtin_setmetatable(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let tbl_val = args
         .first()
         .ok_or_else(|| "setmetatable expects table as first argument".to_string())?;
@@ -20,13 +20,30 @@ pub fn builtin_setmetatable(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, 
             {
                 return Err("cannot change a protected metatable".to_string());
             }
+            // Pin tables carrying a finalizer so refcounting alone can
+            // never destroy them before a sweep runs their `__gc`; unpin
+            // as soon as the metatable stops providing one.
+            let pinned_now = matches!(
+                mt_val,
+                Value::Table(mt)
+                    if matches!(
+                        mt.borrow().fields.get("__gc"),
+                        Some(Value::Closure(_) | Value::Native(_))
+                    )
+            );
             match mt_val {
                 Value::Nil => {
                     t.borrow_mut().metatable = None;
+                    vm.gc.unpin_table(t);
                     Ok(vec![tbl_val.clone()])
                 }
                 Value::Table(mt) => {
                     t.borrow_mut().metatable = Some(mt.clone());
+                    if pinned_now {
+                        vm.gc.pin_table(t);
+                    } else {
+                        vm.gc.unpin_table(t);
+                    }
                     Ok(vec![tbl_val.clone()])
                 }
                 _ => Err("metatable must be a table or nil".to_string()),

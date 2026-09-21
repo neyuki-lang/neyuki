@@ -14,7 +14,7 @@ use std::rc::Rc;
 
 use crate::runtime::{Int, Table};
 use crate::vm::machine::VM;
-use crate::vm::value::{Value, VmTable};
+use crate::vm::value::{StrRef, Value, VmTable};
 
 /// Tables are converted by copying, so a self-referential one would otherwise
 /// recurse forever.
@@ -81,7 +81,7 @@ fn from_runtime(value: &crate::runtime::Value, depth: usize) -> Result<Value, St
             for (key, item) in &source.fields {
                 table
                     .fields
-                    .insert(Rc::from(key.as_str()), from_runtime(item, depth + 1)?);
+                    .insert(StrRef::from(key.as_str()), from_runtime(item, depth + 1)?);
             }
             Value::Table(Rc::new(RefCell::new(table)))
         }
@@ -154,7 +154,7 @@ macro_rules! register {
             let (name, _) = $slice[$index];
             $vm.globals
                 .insert(
-                    Rc::from(name),
+                    StrRef::from(name),
                     Value::Native($crate::native_def!($slice[$index].0, $wrapper::<$index>)),
                 );
         })*

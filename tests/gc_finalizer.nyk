@@ -1,0 +1,60 @@
+-- Finalizer tests. Garbage is created inside a `pcall`ed maker so the
+-- callee frame (with all its registers and call windows) is truncated on
+-- return: without this, stale stack slots keep objects alive for an
+-- unpredictable time, and collection is not deterministic.
+
+local log = {}
+
+local function make_fin(tag)
+    local t = {}
+    local mt = {}
+    mt.__gc = function(x)
+        log[#log + 1] = "finalized:" .. tostring(x.tag)
+    end
+    setmetatable(t, mt)
+    t.tag = tag
+end
+
+pcall(make_fin, "A")
+collectgarbage("collect")
+assert(#log == 1)
+assert(log[1] == "finalized:A")
+
+-- Cyclic pair with a finalizer must still terminate.
+local cyc_log = {}
+
+local function make_cyc()
+    local a = {}
+    local b = {}
+    a.other = b
+    b.other = a
+    local cmt = {}
+    cmt.__gc = function(x)
+        cyc_log[#cyc_log + 1] = "cyc"
+    end
+    setmetatable(a, cmt)
+end
+
+pcall(make_cyc)
+collectgarbage("collect")
+assert(#cyc_log == 1)
+
+-- Resurrection: a finalizer that stores its table keeps it alive,
+-- with contents intact, and is never finalized twice.
+global resurrected = nil
+
+local function make_res()
+    local r = { val = 7 }
+    local rmt = {}
+    rmt.__gc = function(x)
+        resurrected = x
+    end
+    setmetatable(r, rmt)
+end
+
+pcall(make_res)
+collectgarbage("collect")
+assert(resurrected ~= nil)
+assert(resurrected.val == 7)
+collectgarbage("collect")
+assert(resurrected.val == 7)

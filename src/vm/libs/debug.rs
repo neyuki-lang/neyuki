@@ -27,6 +27,8 @@ pub fn create_debug_lib() -> Value {
         "setupvalue",
         crate::native!("debug.setupvalue", debug_setupvalue),
     );
+    b.set_str("sethook", crate::native!("debug.sethook", debug_sethook));
+    b.set_str("gethook", crate::native!("debug.gethook", debug_gethook));
 
     Value::Table(t.clone())
 }
@@ -293,4 +295,55 @@ fn debug_setupvalue(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> 
     let uv = c.upvalues[idx - 1].clone();
     _vm.upvalue_set(&uv, new_val);
     Ok(vec![Value::String((format!("upval_{}", idx)).into())])
+}
+
+/// `debug.sethook(hook | nil [, mask])`.
+/// The mask holds `c` (calls, including tail calls) and/or `r` (returns);
+/// a missing mask means `"cr"`. Line hooks are rejected until per-line
+/// debug info is plumbed through the compilers (v3). Hooks never trigger
+/// hooks. Yielding inside a hook is unsupported.
+fn debug_sethook(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let hook = args.first().cloned().unwrap_or(Value::Nil);
+    if matches!(hook, Value::Nil) {
+        vm.hook = None;
+        return Ok(vec![]);
+    }
+    let mask = match args.get(1) {
+        None => "cr".to_string(),
+        Some(Value::String(s)) => s.to_string(),
+        _ => return Err("bad argument #2 to 'sethook' (string expected)".to_string()),
+    };
+    let mut on_call = false;
+    let mut on_return = false;
+    for ch in mask.chars() {
+        match ch {
+            'c' => on_call = true,
+            'r' => on_return = true,
+            'l' => return Err("line hooks are not supported".to_string()),
+            _ => return Err(format!("invalid hook mask character '{}'", ch)),
+        }
+    }
+    vm.hook = Some(crate::vm::machine::DebugHook {
+        func: hook,
+        on_call,
+        on_return,
+    });
+    Ok(vec![])
+}
+
+/// `debug.gethook()` returns the hook function (or nil) plus its mask.
+fn debug_gethook(vm: &mut VM, _args: &[Value]) -> Result<Vec<Value>, String> {
+    match &vm.hook {
+        None => Ok(vec![Value::Nil]),
+        Some(hook) => {
+            let mut mask = String::new();
+            if hook.on_call {
+                mask.push('c');
+            }
+            if hook.on_return {
+                mask.push('r');
+            }
+            Ok(vec![hook.func.clone(), Value::string(mask)])
+        }
+    }
 }

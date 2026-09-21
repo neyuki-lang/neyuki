@@ -59,6 +59,18 @@ impl LivenessInfo {
         // 2. Iterative backward dataflow analysis
         // out[B] = Union_{S in succ[B]} in[S]
         // in[B] = use[B] Union (out[B] \ def[B])
+        //
+        // Blocks are visited in postorder (successors before predecessors),
+        // so straight-line dependency chains settle in one round and each
+        // loop nesting level costs roughly one more round. Visiting in raw
+        // layout order can propagate only one block per round and hit the
+        // iteration cap on loop-heavy functions.
+        let succ_map: HashMap<IrLabel, Vec<IrLabel>> = cfg
+            .blocks
+            .iter()
+            .map(|block| (block.label, block.successors.clone()))
+            .collect();
+        let order = Self::reverse_postorder(cfg);
         let mut changed = true;
         let mut iterations = 0;
         const MAX_ITERATIONS: usize = 1000;
@@ -67,33 +79,29 @@ impl LivenessInfo {
             changed = false;
             iterations += 1;
 
-            for block in cfg.blocks.iter().rev() {
-                let lbl = block.label;
-
+            for lbl in &order {
                 // Compute out[B]
                 let mut new_out = HashSet::new();
-                for succ in &block.successors {
-                    if let Some(succ_info) = blocks.get(succ) {
-                        for v in &succ_info.live_in {
-                            new_out.insert(*v);
+                if let Some(successors) = succ_map.get(lbl) {
+                    for succ in successors {
+                        if let Some(succ_info) = blocks.get(succ) {
+                            new_out.extend(succ_info.live_in.iter().copied());
                         }
                     }
                 }
 
-                // Compute in[B] = use[B] Union (out[B] \ def[B])
-                let (use_vars, def_vars) = {
-                    let b = &blocks[&lbl];
-                    (b.use_vars.clone(), b.def_vars.clone())
-                };
-
-                let mut new_in = use_vars;
+                // Compute in[B] = use[B] Union (out[B] \ def[B]), borrowing
+                // the stored sets instead of cloning them every round.
+                let b = &blocks[lbl];
+                let mut new_in = HashSet::with_capacity(b.use_vars.len() + new_out.len());
+                new_in.extend(b.use_vars.iter().copied());
                 for v in &new_out {
-                    if !def_vars.contains(v) {
+                    if !b.def_vars.contains(v) {
                         new_in.insert(*v);
                     }
                 }
 
-                let cur = blocks.get_mut(&lbl).expect("block exists");
+                let cur = blocks.get_mut(lbl).expect("block exists");
                 if cur.live_out != new_out || cur.live_in != new_in {
                     cur.live_out = new_out;
                     cur.live_in = new_in;
@@ -103,6 +111,46 @@ impl LivenessInfo {
         }
 
         Self { blocks }
+    }
+
+    /// Postorder of the CFG from the entry (successors before predecessors),
+    /// with blocks unreachable from the entry appended in layout order. A
+    /// backward analysis that visits blocks in this order propagates straight
+    /// chains in one round and each loop level in one more, instead of one
+    /// block per round.
+    fn reverse_postorder(cfg: &ControlFlowGraph) -> Vec<IrLabel> {
+        let mut visited: HashSet<IrLabel> = HashSet::new();
+        let mut post: Vec<IrLabel> = Vec::new();
+        // Seed with the entry plus every block, so unreachable blocks are covered
+        // while the entry's reachable region still comes first.
+        let mut seeds: Vec<IrLabel> = vec![cfg.entry_label];
+        for block in &cfg.blocks {
+            seeds.push(block.label);
+        }
+        for seed in seeds {
+            if visited.contains(&seed) {
+                continue;
+            }
+            let mut stack: Vec<(IrLabel, bool)> = vec![(seed, false)];
+            while let Some((lbl, expanded)) = stack.pop() {
+                if expanded {
+                    post.push(lbl);
+                    continue;
+                }
+                if !visited.insert(lbl) {
+                    continue;
+                }
+                stack.push((lbl, true));
+                if let Some(block) = cfg.find_block(lbl) {
+                    for succ in &block.successors {
+                        if !visited.contains(succ) {
+                            stack.push((*succ, false));
+                        }
+                    }
+                }
+            }
+        }
+        post
     }
 
     pub fn is_live_in(&self, label: IrLabel, var: IrVar) -> bool {

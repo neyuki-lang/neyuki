@@ -1,0 +1,24 @@
+local profile = require("@neyuki/profile")
+
+local function workload(n)
+    local s = 0
+    for i = 1, n do
+        s = s + i
+    end
+    return s
+end
+
+assert(profile.is_running() == false)
+profile.start()
+assert(profile.is_running() == true)
+local r = workload(100)
+assert(r == 5050)
+local report = profile.stop()
+assert(profile.is_running() == false)
+
+-- The profiled function must show up with an exact call count on its own
+-- report line; timing values are environment-dependent, so only presence
+-- and count are checked. The profiler must never record itself.
+assert(string.find(report, "workload: calls=1") ~= nil)
+assert(string.find(report, "stop") == nil)
+assert(string.find(report, "tracer") == nil)

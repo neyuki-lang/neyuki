@@ -1,0 +1,87 @@
+-- Sampling-free profiler on top of `debug.sethook` ("cr" mask).
+-- No engine changes: counts calls and attributes wall time per function
+-- name via `debug.getinfo`. Approximate by design: hook machinery itself
+-- is invisible (guarded), the profiler's own functions are skipped by
+-- identity, and returns without a matching recorded call are skipped.
+
+local os = require("@neyuki/os")
+
+local profile = {}
+
+local stats = {}
+local stack = {}
+local running = false
+
+local function tracer(ev)
+    -- NOTE: getinfo is called *directly* here, never through a helper:
+    -- level 2 is the hooked function only with this exact call depth
+    -- (an extra wrapper frame would misattribute everything to tracer).
+    local info = debug.getinfo(2)
+    if info == nil then
+        return
+    end
+    -- Never profile the profiler itself: start/stop/is_running calls are
+    -- skipped by function identity (their proto names are dotted, so a
+    -- name-based scrub would miss).
+    if info.func == profile.start or info.func == profile.stop or info.func == profile.is_running then
+        return
+    end
+    local name = info.name
+    if ev == "call" then
+        local entry = stats[name]
+        if entry == nil then
+            entry = { calls = 0, time = 0 }
+            stats[name] = entry
+        end
+        entry.calls = entry.calls + 1
+        stack[#stack + 1] = { name = name, t0 = os.clock() }
+    elseif ev == "return" then
+        -- Unmatched returns (e.g. the return of `start` itself, whose
+        -- call predates the hook) carry no timing info: skip them.
+        -- NOTE: never read `stack[#stack]` on an empty stack; key 0 is
+        -- an invalid table key, it does not yield nil.
+        if #stack == 0 then
+            return
+        end
+        local top = table.remove(stack)
+        local entry = stats[top.name]
+        if entry ~= nil then
+            entry.time = entry.time + (os.clock() - top.t0)
+        end
+    end
+end
+
+function profile.start()
+    stats = {}
+    stack = {}
+    running = true
+    debug.sethook(tracer, "cr")
+end
+
+function profile.stop()
+    debug.sethook(nil)
+    running = false
+    -- The tracer skips the profiler's own functions by identity, so no
+    -- scrubbing is needed here. Resetting the stack drops any entries
+    -- whose calls predated profiling details (e.g. error paths).
+    stack = {}
+    local names = {}
+    for name, e in stats do
+        if e ~= nil then
+            names[#names + 1] = name
+        end
+    end
+    table.sort(names, function(a, b) return stats[a].time > stats[b].time end)
+    local lines = {}
+    for _, name in names do
+        local entry = stats[name]
+        lines[#lines + 1] = name .. ": calls=" .. tostring(entry.calls) .. ", time=" .. tostring(entry.time) .. "s"
+    end
+    return table.concat(lines, "\n")
+end
+
+function profile.is_running()
+    return running
+end
+
+return profile
