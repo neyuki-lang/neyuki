@@ -20,7 +20,7 @@ Programs go through the optimizing IR pipeline by default. `run --tree-walker` e
 
 The base runtime provides `print`, `tostring`, `type`, `typeof`, `assert`, `int`, `float`, `try`, and `require`. `type` groups integers and floats as `number`; `typeof` reports `bigint` for arbitrary-precision integers and `float` for floating-point values.
 
-`try(function, ...)` returns a leading boolean followed by the function result or an error message. The bundled `@neyuki/crypto`, `@neyuki/fs`, `@neyuki/http`, `@neyuki/io`, `@neyuki/math`, `@neyuki/sql`, `@neyuki/string` and `@neyuki/table` modules can be loaded with `require`.
+`try(function, ...)` returns a leading boolean followed by the function result or an error message. The bundled `@neyuki/crypto`, `@neyuki/fs`, `@neyuki/http`, `@neyuki/io`, `@neyuki/math`, `@neyuki/sql`, `@neyuki/string`, `@neyuki/table` and `@neyuki/ui` modules can be loaded with `require`.
 
 ```lua
 local math = require("@neyuki/math")
@@ -152,6 +152,34 @@ db:transaction(function(tx: Connection)
     tx:execute("UPDATE accounts SET balance = balance + $1 WHERE id = $2", { 25, 2 })
 end)
 db:close()
+```
+
+`@neyuki/ui` opens windows and draws into them, on X11, Wayland, macOS and Windows from one code path: `winit` provides the windows, `tiny-skia` and `fontdue` render each frame on the CPU and `softbuffer` shows it, all pure Rust with no GPU or GL involved. Like the HTTP server it is pull-based, because natives cannot call back into Neyuki: the script owns the loop, `poll` returns what happened and drawing calls paint a back buffer that `present` shows. Coordinates are logical pixels (HiDPI scaling is handled underneath) and colors are `"#rgb"`, `"#rrggbb"` or `"#rrggbbaa"` strings or `{ r, g, b, a? }` tables with channels from 0 to 255.
+
+- `open(options?)` returns a `Window`; `options` may hold `title`, `width` and `height` (default 800 × 600), `resizable` and `visible`. The canvas starts white. A window has `id`, `isOpen()`, `close()`, `title()`, `setTitle(title)`, `size()` (width, height), `setSize(width, height)` and `scale()` (physical pixels per logical pixel).
+- Drawing: `clear(color?)`, `fillRect(x, y, w, h, color, { radius? })`, `strokeRect(x, y, w, h, color, { width?, radius? })`, `line(x1, y1, x2, y2, color, { width? })`, `circle(cx, cy, r, color, { fill?, width? })`, `polygon({ x1, y1, x2, y2, ... }, color, { fill?, width? })`, `text(x, y, s, { size?, color?, font? })` (top-left of the line box at `(x, y)`, `"\n"` starts a new line, returns the width drawn), `drawImage(image, x, y, { width?, height? })` and `present()`, which shows everything drawn since the last call. Shapes are filled unless `fill` is false; `width` is then the line width (default 1).
+- `poll(timeout?)` pumps the event loop and returns the events since the last call; without a timeout it returns at once, with one (in seconds) it waits up to that long for the first event. Each event is a table with `kind`, `window` and the fields of its kind: `close` (a request only; call `window:close()` to honour it), `resize` (`width`, `height`), `focus`, `blur`, `redraw`, `keydown`/`keyup` (`key` such as `"a"`, `"escape"`, `"arrowleft"` or `"f1"`, `code` such as `"KeyA"`, `repeat`, `text` for what the key typed or `nil`, `mods` with `shift`, `ctrl`, `alt` and `meta`), `mousemove` (`x`, `y`), `mousedown`/`mouseup` (`button` of `"left"`, `"right"`, `"middle"`, `x`, `y`), `scroll` (`dx`, `dy`, `unit` of `"lines"` or `"pixels"`, `x`, `y`), `mouseenter` and `mouseleave`.
+- `run(handler, { fps?, autoClose? })` calls `handler(events, dt)` at `fps` (default 60) frames a second until every window is closed, with `dt` the seconds since the previous call; `close` events are honoured before the handler sees them unless `autoClose` is false, and an error in the handler closes the windows and is re-raised.
+- `loadImage(path)` decodes a PNG into an `Image` with `width`, `height` and `close()`; `loadFont(path)` reads a TrueType or OpenType file into a `Font` for the `font` text option (the bundled Noto Sans is used otherwise); `measureText(s, { size?, font? })` returns the width and height `text` would cover; `color(value)` packs a color into the integer the natives take, for scripts that draw the same colors every frame.
+- `isAvailable()` reports whether a display can be reached; on a headless machine `open` and `poll` raise an error saying so while `measureText`, `loadImage` and `loadFont` still work. On Linux the X11 or Wayland client libraries and `libxkbcommon` are loaded at run time, so a build needs none of them.
+
+A window's canvas is cleared to white whenever it is resized, so redraw everything each frame rather than once:
+
+```lua
+local ui = require("@neyuki/ui")
+local win = ui.open({ title = "Hello", width = 400, height = 300 })
+
+ui.run(function(events: {Event}, dt: number)
+    for _, event in events do
+        if (event.kind == "keydown" and event.key == "escape") then win:close() end
+    end
+    local w, h = win:size()
+    win:clear("#202030")
+    win:fillRect(20, 20, 160, 60, "#ff5555", { radius = 8 })
+    win:circle(w - 60, 60, 40, "#4488ff")
+    win:text(20, 100, "Hello, world!", { size = 24, color = "#ffffff" })
+    win:present()
+end)
 ```
 
 ## Current boundaries

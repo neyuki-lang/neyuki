@@ -2,3 +2,5 @@
 Cargo.lock
 # local database URLs for tests/sql.nyk
 /tests/sql.local
+# opt-in marker for the live window checks in tests/ui.nyk
+/tests/ui.local

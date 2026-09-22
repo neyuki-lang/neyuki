@@ -1,0 +1,437 @@
+local table = require("@neyuki/table")
+local string = require("@neyuki/string")
+
+local ui = {}
+
+-- Windows, drawing and input on top of the `__ui_*` natives in
+-- src/ui_lib.rs (winit, tiny-skia, fontdue and softbuffer: pure Rust, CPU
+-- rendered, one code path for X11, Wayland, macOS and Windows).
+--
+-- Natives cannot call back into Neyuki, so there are no callbacks: the
+-- script owns the loop. `ui.poll(timeout?)` pumps the OS event loop and
+-- returns what happened as a list of event tables; drawing calls paint a
+-- window's back buffer and `window:present()` shows it. `ui.run(handler)`
+-- wraps that loop for the common case.
+--
+-- Coordinates are logical pixels (DPI scaling is handled underneath), colors
+-- are "#rgb", "#rrggbb", "#rrggbbaa" strings or { r, g, b, a? } tables with
+-- channels 0-255.
+
+function checkString(s: string, name: string)
+    if (s == nil) then error(name .. " must be provided") end
+    if (type(s) != "string") then error(name .. " must be a string") end
+end
+
+function checkNumber(n: number, name: string)
+    if (n == nil) then error(name .. " must be provided") end
+    if (type(n) != "number") then error(name .. " must be a number") end
+end
+
+function checkOptionalString(s: string?, name: string)
+    if (s != nil) then checkString(s, name) end
+end
+
+function checkOptionalNumber(n: number?, name: string)
+    if (n != nil and type(n) != "number") then error(name .. " must be a number") end
+end
+
+function checkOptionalBoolean(b: boolean?, name: string)
+    if (b != nil and type(b) != "boolean") then error(name .. " must be a boolean") end
+end
+
+function checkOptionalTable(t: {any}?, name: string)
+    if (t != nil and type(t) != "table") then error(name .. " must be a table") end
+end
+
+function checkFunction(f: any, name: string)
+    if (type(f) != "function") then error(name .. " must be a function") end
+end
+
+-- COLORS -------------------------------------------------------------------
+
+function checkChannel(value: any, name: string): number
+    if (type(value) != "number") then error(name .. " must be a number from 0 to 255") end
+    if (value < 0 or value > 255) then error(name .. " must be a number from 0 to 255") end
+    return __floor(value + 0.5)
+end
+
+-- Turns a color into the 0xRRGGBBAA integer the natives take.
+function packColor(color: any, name: string): number
+    if (type(color) == "string") then
+        if (string.sub(color, 1, 1) != "#") then
+            error(name .. " must be a #rgb, #rrggbb or #rrggbbaa string")
+        end
+        local hex = string.sub(color, 2)
+        local n = #hex
+        if (n == 3 or n == 4) then
+            local expanded = ""
+            for i = 1, n do
+                local digit = string.sub(hex, i, i)
+                expanded = expanded .. digit .. digit
+            end
+            hex = expanded
+            n = #hex
+        end
+        if (n != 6 and n != 8) then
+            error(name .. " must be a #rgb, #rrggbb or #rrggbbaa string")
+        end
+        local value = tonumber(hex, 16)
+        if (value == nil) then
+            error(name .. " must be a #rgb, #rrggbb or #rrggbbaa string")
+        end
+        if (n == 6) then value = value * 256 + 255 end
+        return value
+    elseif (type(color) == "table") then
+        local r = checkChannel(color.r ?? color[1], name .. ".r")
+        local g = checkChannel(color.g ?? color[2], name .. ".g")
+        local b = checkChannel(color.b ?? color[3], name .. ".b")
+        local a = checkChannel(color.a ?? color[4] ?? 255, name .. ".a")
+        return ((r * 256 + g) * 256 + b) * 256 + a
+    end
+    error(name .. " must be a color string or { r, g, b, a? } table")
+end
+
+-- Exposed so scripts can pre-pack colors they draw with every frame.
+function ui.color(color: any): number
+    return packColor(color, "color")
+end
+
+-- FONTS AND IMAGES ---------------------------------------------------------
+
+function makeFont(id: number, path: string?): Font
+    local freed = false
+    local font = {}
+    font.path = path
+
+    function font.id(self: Font): number
+        if (freed) then error("font was freed") end
+        return id
+    end
+
+    function font.close(self: Font): ()
+        if (freed) then return end
+        freed = true
+        __ui_free_font(id)
+    end
+
+    return table.freeze(font)
+end
+
+function fontId(font: Font?, name: string): number?
+    if (font == nil) then return nil end
+    if (type(font) != "table" or type(font.id) != "function") then
+        error(name .. " must be a font from ui.loadFont")
+    end
+    return font:id()
+end
+
+-- Loads a TrueType or OpenType font file. Without one, text uses the
+-- bundled Noto Sans.
+function ui.loadFont(path: string): Font
+    checkString(path, "path")
+    local id = __ui_load_font(path)
+    return makeFont(id, path)
+end
+
+-- Decodes a PNG file into an `Image` with `width` and `height`.
+function ui.loadImage(path: string): Image
+    checkString(path, "path")
+    local id, width, height = __ui_load_image(path)
+    local freed = false
+    local image = {}
+    image.path = path
+    image.width = width
+    image.height = height
+
+    function image.id(self: Image): number
+        if (freed) then error("image was freed") end
+        return id
+    end
+
+    function image.close(self: Image): ()
+        if (freed) then return end
+        freed = true
+        __ui_free_image(id)
+    end
+
+    return table.freeze(image)
+end
+
+-- WINDOWS ------------------------------------------------------------------
+
+-- Open windows keyed by native id (as a string: numeric keys iterate as an
+-- array, holes included), so events can carry the object.
+local windows = {}
+local openCount = 0
+
+-- Reads the shared stroke/fill options of the shape methods.
+function shapeOptions(options: ShapeOptions?): (boolean, number, number)
+    checkOptionalTable(options, "options")
+    options = options ?? {}
+    checkOptionalBoolean(options.fill, "fill")
+    checkOptionalNumber(options.width, "width")
+    checkOptionalNumber(options.radius, "radius")
+    if (options.width != nil and options.width <= 0) then error("width must be positive") end
+    if (options.radius != nil and options.radius < 0) then error("radius must be non-negative") end
+    return options.fill ?? true, options.width ?? 1, options.radius ?? 0
+end
+
+function textOptions(options: TextOptions?): (number, number, number?)
+    checkOptionalTable(options, "options")
+    options = options ?? {}
+    checkOptionalNumber(options.size, "size")
+    if (options.size != nil and options.size <= 0) then error("size must be positive") end
+    local color = packColor(options.color ?? "#000000", "color")
+    return options.size ?? 16, color, fontId(options.font, "font")
+end
+
+-- Opens a window. `options` may hold `title` (default "Neyuki"), `width`
+-- and `height` in logical pixels (default 800 × 600), `resizable` (default
+-- true) and `visible` (default true). The canvas starts out white.
+function ui.open(options: WindowOptions?): Window
+    checkOptionalTable(options, "options")
+    options = options ?? {}
+    checkOptionalString(options.title, "title")
+    checkOptionalNumber(options.width, "width")
+    checkOptionalNumber(options.height, "height")
+    checkOptionalBoolean(options.resizable, "resizable")
+    checkOptionalBoolean(options.visible, "visible")
+    local width = options.width ?? 800
+    local height = options.height ?? 600
+    if (width <= 0 or height <= 0) then error("width and height must be positive") end
+
+    local title = options.title ?? "Neyuki"
+    local id, scale = __ui_open(title, width, height, options.resizable ?? true, options.visible ?? true)
+    local closed = false
+    local window = {}
+    window.id = id
+
+    function checkOpen()
+        if (closed) then error("window is closed") end
+    end
+
+    function window.isOpen(self: Window): boolean
+        return not closed
+    end
+
+    function window.close(self: Window): ()
+        if (closed) then return end
+        closed = true
+        windows[tostring(id)] = nil
+        openCount -= 1
+        __ui_close(id)
+    end
+
+    function window.title(self: Window): string
+        return title
+    end
+
+    function window.setTitle(self: Window, newTitle: string): ()
+        checkOpen()
+        checkString(newTitle, "title")
+        title = newTitle
+        __ui_set_title(id, newTitle)
+    end
+
+    -- The current logical width and height.
+    function window.size(self: Window): (number, number)
+        checkOpen()
+        local w, h = __ui_size(id)
+        return w, h
+    end
+
+    function window.setSize(self: Window, w: number, h: number): ()
+        checkOpen()
+        checkNumber(w, "width")
+        checkNumber(h, "height")
+        if (w <= 0 or h <= 0) then error("width and height must be positive") end
+        __ui_set_size(id, w, h)
+    end
+
+    -- Physical pixels per logical pixel (2 on a HiDPI display, say).
+    function window.scale(self: Window): number
+        checkOpen()
+        local _, _, s = __ui_size(id)
+        return s
+    end
+
+    function window.clear(self: Window, color: any): ()
+        checkOpen()
+        __ui_clear(id, packColor(color ?? "#ffffff", "color"))
+    end
+
+    -- `options.radius` rounds the corners.
+    function window.fillRect(self: Window, x: number, y: number, w: number, h: number, color: any, options: ShapeOptions?): ()
+        checkOpen()
+        checkNumber(x, "x")
+        checkNumber(y, "y")
+        checkNumber(w, "width")
+        checkNumber(h, "height")
+        local _, _, radius = shapeOptions(options)
+        __ui_fill_rect(id, x, y, w, h, packColor(color, "color"), radius)
+    end
+
+    -- `options.width` is the line width, `options.radius` rounds the corners.
+    function window.strokeRect(self: Window, x: number, y: number, w: number, h: number, color: any, options: ShapeOptions?): ()
+        checkOpen()
+        checkNumber(x, "x")
+        checkNumber(y, "y")
+        checkNumber(w, "width")
+        checkNumber(h, "height")
+        local _, lineWidth, radius = shapeOptions(options)
+        __ui_stroke_rect(id, x, y, w, h, packColor(color, "color"), radius, lineWidth)
+    end
+
+    function window.line(self: Window, x1: number, y1: number, x2: number, y2: number, color: any, options: ShapeOptions?): ()
+        checkOpen()
+        checkNumber(x1, "x1")
+        checkNumber(y1, "y1")
+        checkNumber(x2, "x2")
+        checkNumber(y2, "y2")
+        local _, lineWidth = shapeOptions(options)
+        __ui_line(id, x1, y1, x2, y2, packColor(color, "color"), lineWidth)
+    end
+
+    -- Filled unless `options.fill` is false, in which case `options.width`
+    -- is the outline's line width.
+    function window.circle(self: Window, cx: number, cy: number, radius: number, color: any, options: ShapeOptions?): ()
+        checkOpen()
+        checkNumber(cx, "x")
+        checkNumber(cy, "y")
+        checkNumber(radius, "radius")
+        if (radius < 0) then error("radius must be non-negative") end
+        local fill, lineWidth = shapeOptions(options)
+        __ui_circle(id, cx, cy, radius, packColor(color, "color"), fill, lineWidth)
+    end
+
+    -- `points` is a flat { x1, y1, x2, y2, ... } list of at least two
+    -- points; the shape is closed automatically.
+    function window.polygon(self: Window, points: {number}, color: any, options: ShapeOptions?): ()
+        checkOpen()
+        if (type(points) != "table") then error("points must be a table") end
+        if (#points < 4) then error("points must hold at least two points") end
+        local fill, lineWidth = shapeOptions(options)
+        __ui_polygon(id, points, packColor(color, "color"), fill, lineWidth)
+    end
+
+    -- Draws `s` with the top-left corner of its line box at (x, y); "\n"
+    -- starts a new line. `options` may hold `size` (default 16), `color`
+    -- (default black) and `font` (from ui.loadFont). Returns the width drawn.
+    function window.text(self: Window, x: number, y: number, s: string, options: TextOptions?): number
+        checkOpen()
+        checkNumber(x, "x")
+        checkNumber(y, "y")
+        checkString(s, "text")
+        local size, color, font = textOptions(options)
+        return __ui_text(id, x, y, s, size, color, font)
+    end
+
+    -- Draws an image at its own size, or scaled to `options.width` and/or
+    -- `options.height`.
+    function window.drawImage(self: Window, image: Image, x: number, y: number, options: ImageOptions?): ()
+        checkOpen()
+        if (type(image) != "table" or type(image.id) != "function") then
+            error("image must be an image from ui.loadImage")
+        end
+        checkNumber(x, "x")
+        checkNumber(y, "y")
+        checkOptionalTable(options, "options")
+        options = options ?? {}
+        checkOptionalNumber(options.width, "width")
+        checkOptionalNumber(options.height, "height")
+        __ui_draw_image(id, image:id(), x, y, options.width, options.height)
+    end
+
+    -- Shows everything drawn since the last call.
+    function window.present(self: Window): ()
+        checkOpen()
+        __ui_present(id)
+    end
+
+    windows[tostring(id)] = window
+    openCount += 1
+    return table.freeze(window)
+end
+
+-- Whether a display can be reached. On a headless machine every other
+-- function raises an error saying so.
+function ui.isAvailable(): boolean
+    return __ui_available()
+end
+
+-- The logical width and height `window:text` would cover for `s`.
+function ui.measureText(s: string, options: TextOptions?): (number, number)
+    checkString(s, "text")
+    local size, _, font = textOptions(options)
+    local w, h = __ui_measure_text(s, size, font)
+    return w, h
+end
+
+-- Pumps the event loop and returns the events since the last call, each a
+-- table with `kind` and `window` plus the fields of its kind (`type` is a
+-- keyword, hence the name):
+--   close                       the close button or shortcut was used
+--   resize      width, height   the canvas has this new logical size
+--   focus / blur
+--   redraw                      the system asked for the window's contents
+--   keydown / keyup             key ("a", "escape", "arrowleft", "f1"),
+--                               code ("KeyA"), repeat, text, mods { shift,
+--                               ctrl, alt, meta }
+--   mousemove   x, y
+--   mousedown / mouseup         button ("left", "right", "middle"), x, y
+--   scroll      dx, dy, unit ("lines" or "pixels"), x, y
+--   mouseenter / mouseleave
+-- Without a timeout it returns at once; with one (in seconds) it waits up
+-- to that long for the first event. A `close` event only reports the
+-- request: call `window:close()` to honour it.
+function ui.poll(timeout: number?): {Event}
+    checkOptionalNumber(timeout, "timeout")
+    if (timeout != nil and timeout < 0) then error("timeout must be non-negative") end
+    local raw = __ui_poll(timeout)
+    local events = {}
+    for _, event in raw do
+        local window = windows[tostring(event.window)]
+        if (window != nil) then
+            event.window = window
+            events[#events + 1] = event
+        end
+    end
+    return events
+end
+
+-- Runs `handler(events, dt)` about 60 times a second until every window is
+-- closed, where `dt` is the seconds since the previous call. `close` events
+-- are honoured before the handler sees them unless `options.autoClose` is
+-- false. An error inside the handler closes the windows and is re-raised.
+function ui.run(handler: ({Event}, number) -> any, options: RunOptions?): ()
+    checkFunction(handler, "handler")
+    checkOptionalTable(options, "options")
+    options = options ?? {}
+    checkOptionalBoolean(options.autoClose, "autoClose")
+    checkOptionalNumber(options.fps, "fps")
+    local autoClose = options.autoClose ?? true
+    local fps = options.fps ?? 60
+    if (fps <= 0) then error("fps must be positive") end
+    local frame = 1 / fps
+    local last = __os_clock()
+    while (openCount > 0) do
+        local events = ui.poll(frame)
+        if (autoClose) then
+            for _, event in events do
+                if (event.kind == "close") then event.window:close() end
+            end
+        end
+        local now = __os_clock()
+        local ok, err = try(handler, events, now - last)
+        last = now
+        if (not ok) then
+            -- Closed windows linger as nil entries until the table is rebuilt.
+            for _, window in table.clone(windows) do
+                if (window != nil) then window:close() end
+            end
+            error(err)
+        end
+    end
+end
+
+return table.freeze(ui)

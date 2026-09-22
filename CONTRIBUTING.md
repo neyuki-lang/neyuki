@@ -48,7 +48,7 @@ cargo test
 
 ### Commits and pull requests
 
-- **Use conventional commit messages**: `feat(scope): ...`, `fix(scope): ...`, `docs: ...`, `refactor: ...`, `test: ...`, `chore: ...`. Scope is the area touched, e.g. `vm`, `parser`, `http`, `crypto`, `sql`.
+- **Use conventional commit messages**: `feat(scope): ...`, `fix(scope): ...`, `docs: ...`, `refactor: ...`, `test: ...`, `chore: ...`. Scope is the area touched, e.g. `vm`, `parser`, `http`, `crypto`, `sql`, `ui`.
 - **One logical change per PR.** Keep refactors, formatting-only changes and features in separate PRs so they can be reviewed and reverted independently.
 - **Describe the why, not just the what.** The PR description should explain the motivation, the approach, and anything a reviewer should look at closely. Link the related issue if there is one.
 - **Keep PRs green.** Do not open a PR with known failures; mark it as a draft instead.
