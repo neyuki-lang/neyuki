@@ -110,8 +110,18 @@ pub fn loop_invariant_code_motion(cfg: &mut ControlFlowGraph, dom: &DominatorTre
         let mut invariant_defs = HashSet::new();
         let mut hoisted_insts = Vec::new();
 
+        // In layout order: iterating the body set directly would hoist in
+        // hash order, so the same source would compile to different code
+        // from run to run.
+        let body_in_layout_order: Vec<IrLabel> = cfg
+            .blocks
+            .iter()
+            .map(|blk| blk.label)
+            .filter(|lbl| lp.body.contains(lbl))
+            .collect();
+
         // Scan loop blocks for invariant instructions
-        for &block_lbl in &lp.body {
+        for block_lbl in body_in_layout_order {
             if block_lbl == lp.header {
                 continue;
             }

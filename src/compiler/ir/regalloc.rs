@@ -38,8 +38,9 @@ pub fn allocate_registers(
         }
     }
 
-    // Sort by start position
-    intervals.sort_by_key(|intv| (intv.start, intv.end));
+    // Sort by start position, with the variable id breaking ties so the
+    // allocation does not depend on hash order.
+    intervals.sort_by_key(|intv| (intv.start, intv.end, intv.var.0));
 
     let mut mapping: HashMap<IrVar, u8> = HashMap::new();
 
