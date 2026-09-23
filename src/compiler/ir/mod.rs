@@ -423,4 +423,142 @@ return #collected * 100 + total(table.unpack(collected))";
         // sum(1 + i + j) for i in 1..3, j in 1..3 = 9*1 + 3*(1+2+3) + 3*(1+2+3) = 9 + 18 + 18 = 45.
         assert_eq!(val.to_string(), "45");
     }
+
+    /// The CFG is flattened after optimization and rebuilt for codegen, so
+    /// the second round sees the first round's auto labels as real `Label`
+    /// instructions. Minting fresh ones from the same base handed two blocks
+    /// the same label, and every map keyed by label — liveness above all —
+    /// then merged them.
+    #[test]
+    fn test_cfg_rebuild_keeps_labels_unique() {
+        let code = r##"
+            local win = { w = 640, h = 400 }
+            function win.size(self) return self.w, self.h end
+            function win.clear(self, color) self.last = color end
+            function win.text(self, x, y, s) self.label = s end
+            function win.present(self) end
+            local ball = { x = 320, y = 200, vx = 180, vy = 120, r = 24 }
+            local clicks = 0
+            local handler = function(events, dt)
+                for _, event in events do
+                    if event.kind == "keydown" and event.key == "escape" then
+                        return "quit"
+                    elseif event.kind == "mousedown" and event.button == "left" then
+                        ball.x, ball.y = event.x, event.y
+                        clicks = clicks + 1
+                    end
+                end
+                local w, h = win:size()
+                ball.x = ball.x + ball.vx * dt
+                ball.y = ball.y + ball.vy * dt
+                if ball.x < ball.r or ball.x > w - ball.r then ball.vx = -ball.vx end
+                if ball.y < ball.r or ball.y > h - ball.r then ball.vy = -ball.vy end
+                win:clear("#1e1e2e")
+                win:text(24, 22, "clicks: " .. clicks)
+                win:present()
+                return "ran"
+            end
+            local verdict = handler({
+                { kind = "focus" },
+                { kind = "mousedown", button = "left", x = 7, y = 9 },
+                { kind = "mousemove", x = 1, y = 2 }
+            }, 0)
+            return verdict .. ":" .. clicks .. ":" .. ball.x .. ":" .. ball.y .. ":" .. win.label
+        "##;
+        fn check(func: &IrFunction) {
+            let mut cfg = build_cfg(&func.instructions);
+            optimize_cfg(&mut cfg);
+            let rebuilt = build_cfg(&cfg.to_flat_instructions());
+
+            let mut seen = std::collections::HashSet::new();
+            for block in &rebuilt.blocks {
+                assert!(
+                    seen.insert(block.label),
+                    "two blocks of {:?} share {:?} after the rebuild",
+                    func.name,
+                    block.label
+                );
+            }
+            for child in &func.protos {
+                check(child);
+            }
+        }
+
+        let stmts = compile_source(code).expect("syntax error");
+        check(&ast_to_ir(&stmts).main);
+    }
+
+    /// The field names the loop conditions read are loop invariant and get
+    /// hoisted above the loop. Merged liveness let the allocator hand their
+    /// registers to the branch temporaries in the body, so from the second
+    /// iteration on the event was indexed with a leftover boolean.
+    #[test]
+    fn test_ir_hoisted_constants_survive_a_loop_iteration() {
+        let code = r##"
+            local win = { w = 640, h = 400 }
+            function win.size(self) return self.w, self.h end
+            function win.clear(self, color) self.last = color end
+            function win.text(self, x, y, s) self.label = s end
+            function win.present(self) end
+            local ball = { x = 320, y = 200, vx = 180, vy = 120, r = 24 }
+            local clicks = 0
+            local handler = function(events, dt)
+                for _, event in events do
+                    if event.kind == "keydown" and event.key == "escape" then
+                        return "quit"
+                    elseif event.kind == "mousedown" and event.button == "left" then
+                        ball.x, ball.y = event.x, event.y
+                        clicks = clicks + 1
+                    end
+                end
+                local w, h = win:size()
+                ball.x = ball.x + ball.vx * dt
+                ball.y = ball.y + ball.vy * dt
+                if ball.x < ball.r or ball.x > w - ball.r then ball.vx = -ball.vx end
+                if ball.y < ball.r or ball.y > h - ball.r then ball.vy = -ball.vy end
+                win:clear("#1e1e2e")
+                win:text(24, 22, "clicks: " .. clicks)
+                win:present()
+                return "ran"
+            end
+            local verdict = handler({
+                { kind = "focus" },
+                { kind = "mousedown", button = "left", x = 7, y = 9 },
+                { kind = "mousemove", x = 1, y = 2 }
+            }, 0)
+            return verdict .. ":" .. clicks .. ":" .. ball.x .. ":" .. ball.y .. ":" .. win.label
+        "##;
+        assert_eq!(run_via_ir(code), "ran:1:7:9:clicks: 1");
+    }
+
+    /// The same source has to compile to the same bytecode every run: the
+    /// passes may not iterate hash sets where the order reaches the output.
+    #[test]
+    fn test_ir_codegen_is_deterministic() {
+        let code = r#"
+            local function handle(events, acc)
+                for _, event in events do
+                    if event.kind == "keydown" and event.key == "escape" then
+                        acc = acc .. "q"
+                    elseif event.kind == "mousedown" and event.button == "left" then
+                        acc = acc .. "c"
+                    end
+                end
+                return acc
+            end
+            return handle({ { kind = "focus" } }, "")
+        "#;
+        let stmts = compile_source(code).expect("syntax error");
+        let first = format!(
+            "{:?}",
+            crate::compiler::try_compile_to_proto_via_ir(&stmts).expect("ir lowering failed")
+        );
+        for _ in 0..8 {
+            let again = format!(
+                "{:?}",
+                crate::compiler::try_compile_to_proto_via_ir(&stmts).expect("ir lowering failed")
+            );
+            assert_eq!(first, again, "codegen differs between runs");
+        }
+    }
 }

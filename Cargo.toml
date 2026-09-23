@@ -53,6 +53,18 @@ native-tls = "0.2"
 fallible-iterator = "0.2"
 mysql = { version = "28", default-features = false, features = ["minimal-rust", "native-tls", "buffer-pool"] }
 
+# `@neyuki/ui` opens windows through `winit`, blits CPU-rendered frames with
+# `softbuffer` and draws them with `tiny-skia` and `fontdue`; `png` loads
+# images. All pure Rust, so no GPU, GL or C compiler is needed. On Linux the
+# X11, Wayland and xkbcommon client libraries are loaded at runtime (dlopen)
+# rather than linked, so a build machine needs none of them and a headless
+# machine still runs everything else.
+winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen", "wayland-csd-adwaita"] }
+softbuffer = "0.4"
+tiny-skia = "0.11"
+fontdue = "0.9"
+png = "0.18"
+
 [target.'cfg(windows)'.dependencies]
 schannel = ">=0.1.23, <0.1.28"
 

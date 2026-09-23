@@ -41,7 +41,21 @@ pub fn build_cfg(instructions: &[IrInst]) -> ControlFlowGraph {
     let mut blocks: Vec<BasicBlock> = Vec::new();
     let mut current_block: Option<BasicBlock> = None;
     let mut label_map: HashMap<IrLabel, usize> = HashMap::new();
+    // Auto labels start above every label already in the stream. A CFG that
+    // was flattened and rebuilt carries the previous round's auto labels as
+    // real `Label` instructions, and minting from 900_000 again would hand
+    // two blocks the same label: every map keyed by label, liveness above
+    // all, then merges them and the allocator reuses registers that are
+    // still live.
     let mut auto_label_id = 900_000usize;
+    for inst in instructions {
+        if let IrInst::Label(lbl) = inst {
+            auto_label_id = auto_label_id.max(lbl.0);
+        }
+        for target in inst.jump_targets() {
+            auto_label_id = auto_label_id.max(target.0);
+        }
+    }
 
     for (idx, inst) in instructions.iter().enumerate() {
         if leaders.contains(&idx) {

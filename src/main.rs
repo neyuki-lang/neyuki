@@ -24,6 +24,7 @@ pub mod sema;
 mod sql_lib;
 mod string_lib;
 mod tests;
+mod ui_lib;
 mod vm;
 
 fn main() {

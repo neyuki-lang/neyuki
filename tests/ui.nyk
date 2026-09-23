@@ -1,0 +1,145 @@
+local ui = require("@neyuki/ui")
+local fs = require("@neyuki/fs")
+local string = require("@neyuki/string")
+
+function expectError(f: any, needle: string, message: string, ...: any)
+    -- Collected into a table: the VM forwards only the first vararg when
+    -- the call sits in a multi-target `local ok, err = try(f, ...)`.
+    local results = { try(f, ...) }
+    local ok, err = results[1], results[2]
+    assert(not ok and string.find(tostring(err), needle, 1, true) != nil, message .. ": " .. tostring(err))
+end
+
+-- COLORS (no display needed) -----------------------------------------------
+
+assert(ui.color("#ff0000") == 0xff0000ff, "#rrggbb should get an opaque alpha")
+assert(ui.color("#f00") == 0xff0000ff, "#rgb should expand each digit")
+assert(ui.color("#12345678") == 0x12345678, "#rrggbbaa should pass through")
+assert(ui.color("#1234") == 0x11223344, "#rgba should expand each digit")
+assert(ui.color({ 255, 128, 0 }) == 0xff8000ff, "array colors should pack in order")
+assert(ui.color({ r = 1, g = 2, b = 3, a = 4 }) == 0x01020304, "named channels should pack in order")
+assert(ui.color({ 0, 0, 0, 0 }) == 0, "a transparent black packs to zero")
+expectError(ui.color, "#rgb", "colors need the # prefix", "ff0000")
+expectError(ui.color, "#rgb", "colors need 3, 4, 6 or 8 digits", "#12345")
+expectError(ui.color, "#rgb", "colors need hex digits", "#gg0000")
+expectError(ui.color, "0 to 255", "channels are clamped", { 256, 0, 0 })
+expectError(ui.color, "0 to 255", "channels must be numbers", { "1", 0, 0 })
+expectError(ui.color, "color string", "colors must be strings or tables", 42)
+
+-- TEXT MEASUREMENT (no display needed) -------------------------------------
+
+local w, h = ui.measureText("Hello")
+assert(w > 0 and h > 0, "measuring text should give a size")
+local w2, h2 = ui.measureText("Hello", { size = 32 })
+assert(w2 > w and h2 > h, "larger text should measure larger")
+local _, twoLines = ui.measureText("a\nb")
+assert(twoLines > h, "a newline should add a line")
+local empty, _ = ui.measureText("")
+assert(empty == 0, "empty text has no width")
+expectError(ui.measureText, "text must be a string", "measureText checks its text", 5)
+expectError(ui.measureText, "size must be positive", "measureText checks the size", "x", { size = 0 })
+expectError(ui.measureText, "font must be a font", "measureText checks the font", "x", { font = "Arial" })
+
+-- ARGUMENT CHECKS (no display needed) ---------------------------------------
+
+expectError(ui.open, "options must be a table", "open rejects non-table options", 5)
+expectError(ui.open, "title must be a string", "open checks the title", { title = 1 })
+expectError(ui.open, "width must be a number", "open checks the width", { width = "wide" })
+expectError(ui.open, "width and height must be positive", "open rejects empty windows", { width = 0 })
+expectError(ui.open, "resizable must be a boolean", "open checks resizable", { resizable = 1 })
+expectError(ui.poll, "timeout must be a number", "poll checks the timeout", "soon")
+expectError(ui.poll, "non-negative", "poll rejects negative timeouts", -1)
+expectError(ui.run, "handler must be a function", "run needs a handler")
+expectError(ui.run, "fps must be positive", "run checks fps", function() end, { fps = 0 })
+expectError(ui.loadFont, "path must be provided", "loadFont checks the path")
+expectError(ui.loadFont, "cannot open", "loadFont reports a missing file", "tests/fixtures/missing.ttf")
+expectError(ui.loadImage, "cannot open", "loadImage reports a missing file", "tests/fixtures/missing.png")
+expectError(ui.loadImage, "cannot decode", "loadImage rejects non-PNG files", "tests/ui.nyk")
+
+-- IMAGES (no display needed) ------------------------------------------------
+
+local image = ui.loadImage("tests/fixtures/dot.png")
+assert(image.width == 4 and image.height == 3, "the fixture is 4 x 3")
+assert(image.path == "tests/fixtures/dot.png")
+image:close()
+image:close()
+expectError(function() return image:id() end, "image was freed", "a freed image is unusable")
+
+-- LIVE WINDOW (opt in with an empty tests/ui.local file) --------------------
+--
+-- Opening windows needs a display and, on macOS, the main thread, which
+-- `cargo test` does not provide; the marker keeps CI headless.
+if (not fs.exists("tests/ui.local")) then
+    print("ui: skipping the live window checks (no tests/ui.local)")
+    return
+end
+
+assert(ui.isAvailable(), "tests/ui.local is present but no display is available")
+
+local win = ui.open({ title = "Neyuki test", width = 200, height = 120, visible = false })
+assert(win:isOpen(), "a fresh window is open")
+assert(win:title() == "Neyuki test")
+local width, height = win:size()
+assert(width > 0 and height > 0, "a window has a size")
+assert(win:scale() > 0, "a window has a scale factor")
+win:setTitle("Renamed")
+assert(win:title() == "Renamed")
+
+win:clear("#ffffff")
+win:fillRect(10, 10, 50, 30, "#ff0000", { radius = 5 })
+win:strokeRect(10, 10, 50, 30, "#000000", { width = 2 })
+win:line(0, 0, 200, 120, "#00ff00", { width = 3 })
+win:circle(100, 60, 20, "#0000ff")
+win:circle(100, 60, 30, "#0000ff", { fill = false })
+win:polygon({ 150, 20, 190, 40, 170, 100 }, "#ff00ff")
+win:polygon({ 150, 20, 190, 40, 170, 100 }, "#000000", { fill = false, width = 2 })
+local drawn = win:text(10, 80, "Hello", { size = 20, color = "#333333" })
+assert(drawn > 0, "drawing text reports its width")
+local dot = ui.loadImage("tests/fixtures/dot.png")
+win:drawImage(dot, 5, 100)
+win:drawImage(dot, 20, 100, { width = 16, height = 12 })
+dot:close()
+win:present()
+
+expectError(function() win:fillRect(0, 0, 10, 10, "red") end, "#rgb", "drawing checks colors")
+expectError(function() win:polygon({ 1, 2 }, "#000") end, "at least two points", "polygons need two points")
+expectError(function() win:polygon({ 1, 2, 3, 4, 5 }, "#000") end, "pairs", "polygon points come in pairs")
+expectError(function() win:circle(0, 0, -1, "#000") end, "non-negative", "circles need a radius")
+expectError(function() win:text(0, 0, 5) end, "text must be a string", "text checks its string")
+expectError(function() win:drawImage("x", 0, 0) end, "must be an image", "drawImage checks the image")
+expectError(function() win:setSize(0, 10) end, "must be positive", "setSize checks its arguments")
+
+local events = ui.poll()
+assert(type(events) == "table", "poll returns a table")
+for _, event in events do
+    assert(event.window == win, "events name their window")
+    assert(type(event.kind) == "string", "events have a kind")
+end
+events = ui.poll(0.05)
+assert(type(events) == "table", "poll with a timeout returns a table")
+
+win:close()
+assert(not win:isOpen(), "a closed window reports it")
+win:close()
+expectError(function() win:present() end, "window is closed", "a closed window cannot be drawn")
+expectError(function() win:size() end, "window is closed", "a closed window has no size")
+
+-- `run` returns once every window is closed.
+local second = ui.open({ width = 100, height = 100, visible = false })
+local ticks = 0
+ui.run(function(frameEvents: {Event}, dt: number)
+    assert(type(dt) == "number")
+    ticks += 1
+    second:clear("#123456")
+    second:present()
+    if (ticks >= 3) then second:close() end
+end, { fps = 120 })
+assert(ticks == 3, "run should have stopped when the window closed: " .. tostring(ticks))
+assert(not second:isOpen())
+
+-- An error inside the handler closes the windows and surfaces.
+local third = ui.open({ width = 100, height = 100, visible = false })
+expectError(ui.run, "boom", "run re-raises handler errors", function() error("boom") end)
+assert(not third:isOpen(), "run closes windows when the handler fails")
+
+print("ui: live window checks passed")
