@@ -1,9 +1,6 @@
 // Intermediate Representation (IR) module for Neyuki compiler.
 // Provides 3-Address Code / CFG-based intermediate representation between AST and Bytecode.
 
-#![allow(dead_code)]
-#![allow(unused_imports)]
-
 pub mod block;
 pub mod builder;
 pub mod cfg_builder;

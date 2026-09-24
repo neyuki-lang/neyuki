@@ -184,3 +184,46 @@ pub fn walk_expr_mut<V: AstVisitorMut + ?Sized>(visitor: &mut V, expr: &mut Expr
         Expr::Literal { .. } | Expr::Variable { .. } | Expr::Vararg { .. } => {}
     }
 }
+
+#[derive(Default, Debug, Clone)]
+pub struct AstNormalizer {
+    pub mutated_count: usize,
+}
+
+impl AstVisitorMut for AstNormalizer {
+    fn visit_stmt_mut(&mut self, stmt: &mut Stmt) {
+        if let Stmt::If { else_branch, .. } = stmt
+            && else_branch.as_ref().is_some_and(|eb| eb.is_empty())
+        {
+            *else_branch = None;
+            self.mutated_count += 1;
+        }
+        walk_stmt_mut(self, stmt);
+    }
+
+    fn visit_expr_mut(&mut self, expr: &mut Expr) {
+        if let Expr::Interp { parts, .. } = expr {
+            let mut merged: Vec<InterpPart> = Vec::new();
+            for p in parts.drain(..) {
+                if let (InterpPart::Literal(s), Some(InterpPart::Literal(prev))) =
+                    (&p, merged.last_mut())
+                {
+                    prev.push_str(s);
+                    self.mutated_count += 1;
+                    continue;
+                }
+                merged.push(p);
+            }
+            *parts = merged;
+        }
+        walk_expr_mut(self, expr);
+    }
+}
+
+pub fn normalize_ast(stmts: &mut [Stmt]) -> usize {
+    let mut normalizer = AstNormalizer::default();
+    for stmt in stmts {
+        normalizer.visit_stmt_mut(stmt);
+    }
+    normalizer.mutated_count
+}

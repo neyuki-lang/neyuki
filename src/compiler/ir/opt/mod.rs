@@ -15,6 +15,7 @@ use crate::compiler::ir::dom::DominatorTree;
 use crate::compiler::ir::inst::IrInst;
 use crate::compiler::ir::types::IrVar;
 
+pub use crate::compiler::value_tracking::value_tracking_cfg;
 pub use const_fold::constant_propagation;
 pub use copy_prop::{copy_propagation, copy_propagation_cfg};
 pub use cse::{common_subexpression_elimination, common_subexpression_elimination_cfg};
@@ -64,12 +65,17 @@ pub fn optimize_cfg(cfg: &mut ControlFlowGraph) {
             changed = true;
         }
 
-        // 4. Dead Code Elimination
+        // 4. Value Tracking and Constant / Range Propagation
+        if value_tracking_cfg(cfg) {
+            changed = true;
+        }
+
+        // 5. Dead Code Elimination
         if dead_code_elimination_cfg(cfg) {
             changed = true;
         }
 
-        // 5. CFG Simplification (pruning unreachable, collapsing jumps, merging blocks)
+        // 6. CFG Simplification (pruning unreachable, collapsing jumps, merging blocks)
         if simplify_cfg(cfg) {
             changed = true;
         }

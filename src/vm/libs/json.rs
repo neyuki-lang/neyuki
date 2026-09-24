@@ -111,7 +111,7 @@ fn encode_string(s: &str, out: &mut String) {
     out.push('"');
 }
 
-pub(crate) fn decode_from_str(s: &str) -> Result<Value, String> {
+pub fn decode_from_str(s: &str) -> Result<Value, String> {
     let mut parser = JsonParser::new(s);
     let val = parser.parse_value()?;
     parser.skip_whitespace();

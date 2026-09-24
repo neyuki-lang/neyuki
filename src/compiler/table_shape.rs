@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::parser::{Expr, TableEntry};
 
 #[derive(Clone, Debug, PartialEq, Eq)]

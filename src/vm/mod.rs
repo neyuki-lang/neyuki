@@ -6,10 +6,12 @@ pub mod hash;
 pub mod libs;
 pub mod machine;
 pub mod ops;
+pub mod table;
 pub mod value;
 
 pub use machine::VM;
 use std::fs;
+pub use table::TableKey;
 pub use value::Value;
 
 use crate::bytecode::deserialize;

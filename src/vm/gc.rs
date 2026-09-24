@@ -77,7 +77,6 @@ pub enum GCState {
     Sweep,
 }
 
-#[allow(dead_code)]
 pub struct GcTracker {
     pub bytes_allocated: usize,
     pub total_allocations: usize,
@@ -123,7 +122,12 @@ pub struct SweepPlan {
     pub internal: HashMap<*const RefCell<VmTable>, usize>,
 }
 
-#[allow(dead_code)]
+impl Default for GcTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GcTracker {
     pub fn new() -> Self {
         Self {

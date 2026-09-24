@@ -1,7 +1,7 @@
-#![allow(dead_code)]
-
 use crate::bytecode::instruction::Instruction;
 use crate::bytecode::proto::Proto;
+use crate::compiler::ir::block::IrFunction;
+use crate::compiler::ir::inst::IrInst;
 use crate::parser::{Expr, Stmt};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -87,6 +87,7 @@ impl CostModel {
             Instruction::Vararg { .. } => self.register_move_cost,
 
             Instruction::GetGlobal { .. } | Instruction::SetGlobal { .. } => self.table_access_cost,
+            Instruction::GetImport { .. } => self.table_access_cost,
             Instruction::GetUpval { .. } | Instruction::SetUpval { .. } => self.register_move_cost,
             Instruction::Concat { .. }
             | Instruction::Not { .. }
@@ -122,6 +123,53 @@ impl CostModel {
         }
 
         self.proto_cost(proto) <= INLINE_COST_THRESHOLD
+    }
+
+    // Calculates execution cost of an IR instruction
+    pub fn ir_inst_cost(&self, inst: &IrInst) -> u32 {
+        match inst {
+            IrInst::Move { .. } => self.register_move_cost,
+            IrInst::BinOp { .. } | IrInst::UnOp { .. } => self.arithmetic_cost,
+            IrInst::LoadConst { .. } | IrInst::LoadNil { .. } => self.const_load_cost,
+            IrInst::NewTable { .. } => self.closure_alloc_cost,
+            IrInst::GetTable { .. } | IrInst::SetTable { .. } | IrInst::GetImport { .. } => {
+                self.table_access_cost
+            }
+            IrInst::GetGlobal { .. } | IrInst::SetGlobal { .. } => self.table_access_cost,
+            _ => 2,
+        }
+    }
+
+    // Calculates total estimated cost of an IR function
+    pub fn ir_function_cost(&self, func: &IrFunction) -> u32 {
+        let mut total = 0u32;
+        for inst in &func.instructions {
+            total = total.saturating_add(self.ir_inst_cost(inst));
+        }
+        total
+    }
+
+    // Evaluates whether an IR function is small and profitable to inline
+    pub fn should_inline_ir(&self, func: &IrFunction) -> bool {
+        const MAX_INLINE_COST: u32 = 40;
+        const MAX_INLINE_INSTRUCTIONS: usize = 30;
+
+        if func.is_vararg || !func.protos.is_empty() {
+            return false;
+        }
+        if func.instructions.len() > MAX_INLINE_INSTRUCTIONS {
+            return false;
+        }
+        self.ir_function_cost(func) <= MAX_INLINE_COST
+    }
+
+    // Calculates total cost of an entire AST statement list
+    pub fn program_cost(&self, stmts: &[Stmt]) -> u32 {
+        let mut total = 0u32;
+        for s in stmts {
+            total = total.saturating_add(self.stmt_cost(s));
+        }
+        total
     }
 
     // Calculates rough complexity score for an AST statement tree

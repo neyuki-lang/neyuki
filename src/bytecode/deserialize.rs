@@ -376,6 +376,12 @@ fn read_instruction(bytes: &[u8], cursor: &mut usize) -> Result<Instruction, Str
             a: read_u8(bytes, cursor)?,
             b: read_u8(bytes, cursor)?,
         }),
+        53 => Ok(Instruction::GetImport {
+            dst: read_u8(bytes, cursor)?,
+            mod_k: read_u16(bytes, cursor)?,
+            field_k: read_u16(bytes, cursor)?,
+            site: read_u16(bytes, cursor)?,
+        }),
         _ => Err(format!("unknown instruction tag: {}", tag)),
     }
 }

@@ -301,12 +301,7 @@ pub fn builtin_require(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String
             if let Some(val) = load_bundled_module(vm, other)? {
                 return Ok(vec![val]);
             }
-            let path = if other.ends_with(".nyk") || other.ends_with(".nykb") {
-                other.to_string()
-            } else {
-                format!("{}.nyk", other)
-            };
-            let path_obj = std::path::Path::new(&path);
+            let path_obj = std::path::Path::new(other);
             if other.contains('\0')
                 || other.contains("..")
                 || other.starts_with('/')
@@ -326,35 +321,13 @@ pub fn builtin_require(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String
                     pkg
                 ));
             }
-            if let Ok(bytes) = std::fs::read(&path) {
-                let proto = if bytes.starts_with(crate::bytecode::MAGIC) || path.ends_with(".nykb")
-                {
-                    let p = crate::bytecode::deserialize(&bytes)?;
-                    crate::bytecode::verify_proto(&p)
-                        .map_err(|e| format!("bytecode verification failed: {}", e))?;
-                    p
-                } else {
-                    let src = std::str::from_utf8(&bytes)
-                        .map_err(|_| format!("cannot read module '{}': invalid UTF-8", pkg))?;
-                    let stmts = crate::compiler::compile_source(src)?;
-                    let diags = crate::sema::analyze(&stmts, src);
-                    if let Some(err) = diags
-                        .iter()
-                        .find(|d| d.severity == crate::diagnostics::severity::Severity::Error)
-                    {
-                        return Err(format!(
-                            "semantic error in module '{}': {}",
-                            pkg, err.message
-                        ));
-                    }
-                    let p = crate::compiler::try_compile_to_proto_via_ir(&stmts)?;
-                    crate::bytecode::verify_proto(&p)
-                        .map_err(|e| format!("bytecode verification failed: {}", e))?;
-                    p
-                };
+
+            let mut loader = crate::module_loader::ModuleLoader::new();
+            if let Ok((resolved_path, bytes)) = loader.read_module(other) {
+                let proto = loader.compile_bytes(&resolved_path, &bytes, pkg)?;
                 // Run on top of the current frames: `execute` would reset the
                 // stack out from under whatever called `require`.
-                let val = vm.execute_module(proto)?;
+                let val = vm.execute_module((*proto).clone())?;
                 return Ok(vec![val]);
             }
             return Err(format!("cannot find module '{}'", pkg));

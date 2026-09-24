@@ -5,7 +5,6 @@ pub mod gc;
 pub mod global;
 pub mod meta;
 
-#[allow(unused_imports)]
 pub use array::{builtin_array_create, builtin_table_clear};
 pub use gc::builtin_collectgarbage;
 pub use global::{
@@ -35,6 +34,8 @@ pub fn register_all(vm: &mut VM) {
     vm.register_native(crate::native_def!("xpcall", builtin_xpcall));
     vm.register_native(crate::native_def!("try", builtin_try));
     vm.register_native(crate::native_def!("require", builtin_require));
+    vm.register_native(crate::native_def!("array_create", builtin_array_create));
+    vm.register_native(crate::native_def!("table_clear", builtin_table_clear));
 
     // Garbage collector
     vm.register_native(crate::native_def!("collectgarbage", builtin_collectgarbage));

@@ -1,7 +1,5 @@
 // Array and Object built-in manipulation functions.
 
-#![allow(dead_code)]
-
 use num_traits::ToPrimitive;
 use std::cell::RefCell;
 use std::rc::Rc;

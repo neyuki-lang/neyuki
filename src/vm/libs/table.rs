@@ -210,6 +210,8 @@ fn table_clone(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     new_tbl.array = tbl.array.clone();
     new_tbl.fields = tbl.fields.clone();
     new_tbl.metatable = tbl.metatable.clone();
+    // Cloned handles share the coroutine: there is still exactly one state.
+    new_tbl.co_state = tbl.co_state.clone();
     let rc = Rc::new(RefCell::new(new_tbl));
     vm.gc.register_table(&rc);
     Ok(vec![Value::Table(rc)])
@@ -230,36 +232,9 @@ fn table_sort(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         && !matches!(comp_fn, Value::Nil)
     {
         let mut items = std::mem::take(&mut tbl_rc.borrow_mut().array);
-        let mut sort_err = None;
-        for i in 1..items.len() {
-            let mut j = i;
-            while j > 0 {
-                let a = &items[j - 1];
-                let b = &items[j];
-                match vm.call_function(comp_fn.clone(), &[b.clone(), a.clone()]) {
-                    Ok(res) => {
-                        let b_less_than_a = res.first().map(|v| v.is_truthy()).unwrap_or(false);
-                        if b_less_than_a {
-                            items.swap(j - 1, j);
-                            j -= 1;
-                        } else {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        sort_err = Some(e);
-                        break;
-                    }
-                }
-            }
-            if sort_err.is_some() {
-                break;
-            }
-        }
+        let res = merge_sort_by(vm, &comp_fn, &mut items);
         tbl_rc.borrow_mut().array = items;
-        if let Some(err) = sort_err {
-            return Err(err);
-        }
+        res?;
     } else {
         let mut tbl = tbl_rc.borrow_mut();
         tbl.array.sort_by(|a, b| match (a, b) {
@@ -272,6 +247,57 @@ fn table_sort(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         });
     }
     Ok(vec![])
+}
+
+/// Bottom-up merge sort driven by a Neyuki comparator: `comp(a, b)` is true
+/// when `a` must come before `b` (the same contract `table.sort` documents).
+/// Stable, worst-case O(n log n) comparator calls, iterative so there is no
+/// recursion depth to blow, and a comparator error aborts immediately with
+/// the table restored by the caller. This replaced an insertion sort whose
+/// O(n^2) callbacks made comparator sorts ~200x slower than they should be.
+fn merge_sort_by(vm: &mut VM, comp: &Value, items: &mut Vec<Value>) -> Result<(), String> {
+    let n = items.len();
+    if n < 2 {
+        return Ok(());
+    }
+    let mut scratch: Vec<Value> = Vec::with_capacity(n);
+    let mut width = 1;
+    while width < n {
+        scratch.clear();
+        let mut start = 0;
+        while start < n {
+            let mid = (start + width).min(n);
+            let end = (start + 2 * width).min(n);
+            let (mut left, mut right) = (start, mid);
+            while left < mid && right < end {
+                // `comp(right, left)` true means right sorts first.
+                let right_first = vm
+                    .call_function(comp.clone(), &[items[right].clone(), items[left].clone()])?
+                    .first()
+                    .map(|v| v.is_truthy())
+                    .unwrap_or(false);
+                if right_first {
+                    scratch.push(items[right].clone());
+                    right += 1;
+                } else {
+                    scratch.push(items[left].clone());
+                    left += 1;
+                }
+            }
+            while left < mid {
+                scratch.push(items[left].clone());
+                left += 1;
+            }
+            while right < end {
+                scratch.push(items[right].clone());
+                right += 1;
+            }
+            start = end;
+        }
+        std::mem::swap(items, &mut scratch);
+        width *= 2;
+    }
+    Ok(())
 }
 
 fn table_move(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
