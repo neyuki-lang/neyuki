@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use num_bigint::BigInt;
 use num_traits::{Signed, ToPrimitive};
 use std::str::FromStr;

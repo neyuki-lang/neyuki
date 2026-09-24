@@ -466,6 +466,14 @@ fn buf_fill(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     Ok(vec![])
 }
 
+fn buf_isempty(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let buf_rc = get_buf(
+        args.first()
+            .ok_or_else(|| "buffer.isempty expects a buffer".to_string())?,
+    )?;
+    Ok(vec![Value::Bool(buf_rc.borrow().is_empty())])
+}
+
 pub fn create_buffer_lib() -> Value {
     let mut table = VmTable::new();
     table.set_str("create", crate::native!("buffer.create", buf_create));
@@ -475,6 +483,7 @@ pub fn create_buffer_lib() -> Value {
     );
     table.set_str("tostring", crate::native!("buffer.tostring", buf_tostring));
     table.set_str("len", crate::native!("buffer.len", buf_len));
+    table.set_str("isempty", crate::native!("buffer.isempty", buf_isempty));
     table.set_str("readu8", crate::native!("buffer.readu8", buf_readu8));
     table.set_str("writeu8", crate::native!("buffer.writeu8", buf_writeu8));
     table.set_str("readi8", crate::native!("buffer.readi8", buf_readi8));

@@ -1,9 +1,9 @@
 // Function prototype and constant definitions for bytecode.
 
 use crate::bytecode::instruction::Instruction;
-use crate::vm::value::Value;
+use crate::vm::value::{Value, VmTable};
 use num_bigint::BigInt;
-use std::cell::{Cell, OnceCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::fmt;
 use std::rc::Rc;
 
@@ -60,6 +60,29 @@ pub struct Proto {
 pub struct ProtoCache {
     values: OnceCell<Vec<Value>>,
     verified: Cell<bool>,
+    imports: RefCell<Vec<ImportSlot>>,
+}
+
+/// One cached `module.field` resolution for a `GetImport` site: the globals
+/// epoch it was resolved under, the module table (whose lack of a metatable
+/// is rechecked on every hit, so a later `setmetatable` can never go stale),
+/// and the resolved field value. Uninitialized slots carry `u64::MAX`, which
+/// no real epoch ever reaches.
+#[derive(Clone)]
+pub struct ImportSlot {
+    pub epoch: u64,
+    pub module: Option<Rc<RefCell<VmTable>>>,
+    pub value: Value,
+}
+
+impl Default for ImportSlot {
+    fn default() -> Self {
+        Self {
+            epoch: u64::MAX,
+            module: None,
+            value: Value::Nil,
+        }
+    }
 }
 
 impl PartialEq for ProtoCache {
@@ -128,6 +151,43 @@ impl Proto {
                 })
                 .collect()
         })
+    }
+
+    /// Cached `module.field` value for a `GetImport` site, if the slot was
+    /// resolved under the current globals epoch and the module table still
+    /// has no metatable (so no `__index`/`__mode` game can have intervened).
+    /// Returns a clone; the borrow is not held.
+    pub fn import_cached(&self, site: usize, epoch: u64) -> Option<Value> {
+        let slots = self.cache.imports.borrow();
+        let slot = slots.get(site)?;
+        if slot.epoch != epoch {
+            return None;
+        }
+        let module = slot.module.as_ref()?;
+        if module.borrow().metatable.is_some() {
+            return None;
+        }
+        Some(slot.value.clone())
+    }
+
+    /// Records a fresh resolution. Only frozen, metatable-free modules with
+    /// a present non-nil field are stored; everything else stays dynamic.
+    pub fn import_store(
+        &self,
+        site: usize,
+        epoch: u64,
+        module: Rc<RefCell<VmTable>>,
+        value: Value,
+    ) {
+        let mut slots = self.cache.imports.borrow_mut();
+        if slots.len() <= site {
+            slots.resize(site + 1, ImportSlot::default());
+        }
+        slots[site] = ImportSlot {
+            epoch,
+            module: Some(module),
+            value,
+        };
     }
 
     // Add a constant, deduplicating if identical constant already exists

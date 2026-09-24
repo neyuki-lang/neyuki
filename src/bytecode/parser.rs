@@ -76,7 +76,6 @@ fn unescape_string(input: &str) -> Result<String, String> {
     Ok(result)
 }
 
-#[allow(dead_code)]
 pub fn parse_assembly(text: &str) -> Result<Proto, String> {
     let mut proto = Proto::new(Some("main".to_string()), 0, false);
     let mut current_line = 1u32;
@@ -330,6 +329,24 @@ fn parse_instruction_line(line: &str) -> Result<Option<Instruction>, String> {
                 parse_table_and_const_key(parts.get(1).ok_or("SETTABLEK missing table[key_k]")?)?;
             let val = parse_reg(parts.get(2).ok_or("SETTABLEK missing val")?)?;
             Ok(Some(Instruction::SetTableK { table, key_k, val }))
+        }
+        "GETIMPORT" => {
+            let dst = parse_reg(parts.get(1).ok_or("GETIMPORT missing dst")?)?;
+            let mod_k = parse_const_idx(parts.get(2).ok_or("GETIMPORT missing mod_k")?)?;
+            let field_k = parse_const_idx(parts.get(3).ok_or("GETIMPORT missing field_k")?)?;
+            let site = parts
+                .get(4)
+                .ok_or("GETIMPORT missing site")?
+                .trim()
+                .trim_end_matches(',')
+                .parse::<u16>()
+                .map_err(|_| "invalid import site".to_string())?;
+            Ok(Some(Instruction::GetImport {
+                dst,
+                mod_k,
+                field_k,
+                site,
+            }))
         }
         "APPEND" => {
             let table = parse_reg(parts.get(1).ok_or("APPEND missing table")?)?;
@@ -767,6 +784,12 @@ mod tests {
             dst: 8,
             table: 7,
             key_k: 0,
+        });
+        proto.instructions.push(Instruction::GetImport {
+            dst: 8,
+            mod_k: 0,
+            field_k: 0,
+            site: 0,
         });
         proto.instructions.push(Instruction::SetTableK {
             table: 7,

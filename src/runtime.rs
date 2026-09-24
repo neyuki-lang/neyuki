@@ -371,7 +371,7 @@ pub struct RuntimeCallFrame {
     pub what: &'static str,
     pub num_params: usize,
     pub is_vararg: bool,
-    pub func_val: Option<Value>,
+    pub(crate) func_val: Option<Value>,
 }
 
 thread_local! {
@@ -452,7 +452,6 @@ pub fn run_file(path: &str) -> Result<(), String> {
     runtime.execute(&program).map(|_| ())
 }
 
-#[allow(dead_code)]
 pub fn run_source(source: &str) -> Result<(), String> {
     let program = crate::compiler::compile_source(source)?;
     let diags = crate::sema::analyze(&program, source);
@@ -469,6 +468,12 @@ pub fn run_source(source: &str) -> Result<(), String> {
 pub struct Runtime {
     global: EnvRef,
     call_depth: std::cell::Cell<usize>,
+}
+
+impl Default for Runtime {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Runtime {
@@ -508,7 +513,6 @@ impl Runtime {
             .chain(crate::http_lib::NATIVES)
             .chain(crate::io_lib::NATIVES)
             .chain(crate::sql_lib::NATIVES)
-            .chain(crate::ui_lib::NATIVES)
         {
             env.borrow_mut()
                 .values

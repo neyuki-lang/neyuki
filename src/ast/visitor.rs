@@ -1,7 +1,5 @@
 // AST Visitor pattern trait for AST traversal, linting, analysis and transformations.
 
-#![allow(dead_code)]
-
 use crate::ast::expr::Expr;
 use crate::ast::stmt::Stmt;
 
@@ -185,4 +183,46 @@ pub fn walk_expr<V: AstVisitor + ?Sized>(visitor: &mut V, expr: &Expr) {
             }
         }
     }
+}
+
+#[derive(Default, Debug, Clone)]
+pub struct AstSanityChecker {
+    pub max_depth: usize,
+    pub current_depth: usize,
+    pub expr_count: usize,
+    pub stmt_count: usize,
+}
+
+impl AstVisitor for AstSanityChecker {
+    fn visit_stmt(&mut self, stmt: &Stmt) {
+        self.stmt_count += 1;
+        self.current_depth += 1;
+        if self.current_depth > self.max_depth {
+            self.max_depth = self.current_depth;
+        }
+        walk_stmt(self, stmt);
+        self.current_depth -= 1;
+    }
+
+    fn visit_expr(&mut self, expr: &Expr) {
+        self.expr_count += 1;
+        self.current_depth += 1;
+        if self.current_depth > self.max_depth {
+            self.max_depth = self.current_depth;
+        }
+        walk_expr(self, expr);
+        self.current_depth -= 1;
+    }
+}
+
+pub fn check_ast_sanity(stmts: &[Stmt]) -> Result<AstSanityChecker, String> {
+    const MAX_AST_DEPTH: usize = 512;
+    let mut checker = AstSanityChecker::default();
+    for stmt in stmts {
+        checker.visit_stmt(stmt);
+    }
+    if checker.max_depth > MAX_AST_DEPTH {
+        return Err(format!("AST depth limit ({}) exceeded", MAX_AST_DEPTH));
+    }
+    Ok(checker)
 }

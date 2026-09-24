@@ -619,6 +619,14 @@ fn fold_expr_scoped(expr: Expr, shadowed: &HashSet<String>) -> Expr {
                 return res.to_expr();
             }
 
+            if let Some(res) = crate::compiler::builtins_folding::fold_builtin_call_scoped(
+                &folded_callee,
+                &folded_args,
+                shadowed,
+            ) {
+                return res;
+            }
+
             Expr::Call {
                 callee: Box::new(folded_callee),
                 args: folded_args,
@@ -663,7 +671,6 @@ fn fold_expr_scoped(expr: Expr, shadowed: &HashSet<String>) -> Expr {
     }
 }
 
-#[allow(dead_code)]
 pub fn fold_expr(expr: Expr) -> Expr {
     fold_expr_scoped(expr, &HashSet::new())
 }
@@ -913,7 +920,6 @@ fn fold_stmt_scoped(stmt: Stmt, shadowed: &mut HashSet<String>) -> Option<Stmt> 
 }
 
 // Optimize statement by folding constant expressions within it
-#[allow(dead_code)]
 pub fn fold_stmt(stmt: Stmt) -> Option<Stmt> {
     fold_stmt_scoped(stmt, &mut HashSet::new())
 }

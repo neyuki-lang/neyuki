@@ -144,3 +144,9 @@ impl IrFunction {
 pub struct IrModule {
     pub main: IrFunction,
 }
+
+impl IrModule {
+    pub fn new(main: IrFunction) -> Self {
+        Self { main }
+    }
+}

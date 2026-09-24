@@ -22,7 +22,6 @@ impl VmBuffer {
         self.data.len()
     }
 
-    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
     }

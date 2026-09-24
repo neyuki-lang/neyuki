@@ -4,7 +4,6 @@ use crate::bytecode::instruction::Instruction;
 use crate::bytecode::proto::{Constant, Proto};
 use std::fmt::Write;
 
-#[allow(dead_code)]
 pub fn disassemble_proto(proto: &Proto, indent: usize) -> String {
     let mut out = String::new();
     let pad = "  ".repeat(indent);
@@ -71,7 +70,6 @@ pub fn disassemble_proto(proto: &Proto, indent: usize) -> String {
     out
 }
 
-#[allow(dead_code)]
 fn format_instruction(inst: &Instruction) -> String {
     match inst {
         Instruction::LoadNil { dst } => format!("LOADNIL      R{}", dst),
@@ -96,6 +94,14 @@ fn format_instruction(inst: &Instruction) -> String {
         }
         Instruction::GetTableK { dst, table, key_k } => {
             format!("GETTABLEK    R{}, R{}[K{}]", dst, table, key_k)
+        }
+        Instruction::GetImport {
+            dst,
+            mod_k,
+            field_k,
+            site,
+        } => {
+            format!("GETIMPORT    R{}, K{}, K{}, {}", dst, mod_k, field_k, site)
         }
         Instruction::SetTableK { table, key_k, val } => {
             format!("SETTABLEK    R{}[K{}], R{}", table, key_k, val)

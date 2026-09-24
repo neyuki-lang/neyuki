@@ -33,6 +33,7 @@ fn is_inlinable_body_inst(inst: &IrInst) -> bool {
             | IrInst::LoadNil { .. }
             | IrInst::NewTable { .. }
             | IrInst::GetTable { .. }
+            | IrInst::GetImport { .. }
             | IrInst::SetTable { .. }
             | IrInst::GetGlobal { .. }
             | IrInst::SetGlobal { .. }
@@ -233,10 +234,10 @@ fn splice_call(
 }
 
 fn is_inline_candidate(func: &IrFunction) -> bool {
-    if func.is_vararg || !func.protos.is_empty() {
+    if func.instructions.len() > MAX_INLINE_INSTRUCTIONS {
         return false;
     }
-    if func.instructions.len() > MAX_INLINE_INSTRUCTIONS {
+    if !crate::compiler::cost_model::CostModel::default().should_inline_ir(func) {
         return false;
     }
     // Straight-line frame-independent body plus one trailing Return of

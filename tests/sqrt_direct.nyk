@@ -1,0 +1,34 @@
+-- __sqrt is the primitive the bundled math library is built on.
+-- It must behave exactly like the reference implementation: same values,
+-- same rejections, same messages. (Speed is covered by benches, not asserts.)
+assert(__sqrt(4) == 2, "sqrt 4")
+assert(__sqrt(0) == 0, "sqrt 0")
+local s2 = __sqrt(2)
+assert(s2 > 1.4142 and s2 < 1.4143, "sqrt 2")
+assert(__sqrt(9) == 3, "sqrt 9 int")
+assert(__sqrt(2.25) == 1.5, "sqrt float")
+
+local ok1, err1 = try(__sqrt, -1)
+assert(not ok1, "sqrt rejects negative")
+assert(err1 == "sqrt expects a non-negative number", "negative msg: " .. tostring(err1))
+
+local nan = 0.0 / 0.0
+local ok2, err2 = try(__sqrt, nan)
+assert(not ok2, "sqrt rejects NaN")
+assert(err2 == "sqrt expects a finite number", "nan msg: " .. tostring(err2))
+
+local inf = 1.0 / 0.0
+local ok3, _ = try(__sqrt, inf)
+assert(not ok3, "sqrt rejects inf")
+
+local ok4, err4 = try(__sqrt, "x")
+assert(not ok4, "sqrt rejects string")
+assert(err4 == "expected a number", "string msg: " .. tostring(err4))
+
+local ok5, err5 = try(__sqrt, nil)
+assert(not ok5, "sqrt rejects nil")
+assert(err5 == "expected a number", "nil msg: " .. tostring(err5))
+
+-- big integers convert like the reference path
+local big = 2 ^ 70
+assert(__sqrt(big) == 2 ^ 35, "sqrt bigint")
