@@ -140,6 +140,7 @@ bridged!(http_primitive, crate::http_lib::NATIVES);
 bridged!(fs_primitive, crate::fs_lib::NATIVES);
 bridged!(io_primitive, crate::io_lib::NATIVES);
 bridged!(sql_primitive, crate::sql_lib::NATIVES);
+bridged!(ui_primitive, crate::ui_lib::NATIVES);
 
 /// Registers one primitive per listed index. The indices are spelled out
 /// because each one instantiates its own wrapper function, and the `assert!`
@@ -206,4 +207,12 @@ pub fn register_bridged_natives(vm: &mut VM) {
         [0, 1, 2, 3, 4, 5, 6]
     );
     register!(vm, sql_primitive, crate::sql_lib::NATIVES, [0, 1, 2, 3, 4]);
+    register!(
+        vm,
+        ui_primitive,
+        crate::ui_lib::NATIVES,
+        [
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20
+        ]
+    );
 }

@@ -20,4 +20,5 @@ pub mod sql_lib;
 pub mod stack_trace;
 pub mod string_lib;
 pub mod tests;
+pub mod ui_lib;
 pub mod vm;
