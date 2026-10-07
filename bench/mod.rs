@@ -2,8 +2,6 @@
 // Benchmarks all core subsystems: Lexer, Parser, Compiler, VM Arithmetic,
 // Tables, Strings, Coroutines, Garbage Collector, Crypto, Buffer, and JSON.
 
-#![allow(dead_code)]
-
 use crate::compiler::{compile_source, compile_to_proto};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
@@ -311,6 +309,20 @@ pub fn bench_json() -> BenchResult {
     })
 }
 
+// 13. VM End-to-End Pipeline Benchmark (Lex, Parse, Compile & Execute)
+pub fn bench_end_to_end() -> BenchResult {
+    let code = r#"
+        local sum = 0
+        for i = 1, 100 do
+            sum = sum + i
+        end
+        return sum
+    "#;
+    measure("13. VM End-to-End Pipeline", 200, || {
+        run_vm_code(code);
+    })
+}
+
 // Run the full benchmark suite and display formatted results
 pub fn run_all_benchmarks() {
     println!(
@@ -343,6 +355,7 @@ pub fn run_all_benchmarks() {
         bench_crypto(),
         bench_buffer(),
         bench_json(),
+        bench_end_to_end(),
     ];
 
     for res in &results {
@@ -374,5 +387,6 @@ mod tests {
         assert!(bench_crypto().ops_per_sec > 0.0);
         assert!(bench_buffer().ops_per_sec > 0.0);
         assert!(bench_json().ops_per_sec > 0.0);
+        assert!(bench_end_to_end().ops_per_sec > 0.0);
     }
 }
