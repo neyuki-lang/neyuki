@@ -53,16 +53,16 @@ pub fn eval_chunk(vm: &mut VM, source: &str) -> Result<Option<String>, String> {
     }
 }
 
+use crate::parser::readline::ReadLineEngine;
+
 /// Runs the interactive loop on stdin/stdout until EOF.
 pub fn run_repl() -> Result<(), String> {
     let stdin = io::stdin();
     let mut out = io::stdout();
     let mut vm = VM::new();
-    let mut buf = String::new();
-    let mut cont = false;
+    let mut rl = ReadLineEngine::new();
     loop {
-        write!(out, "{}", if cont { ">> " } else { "> " })
-            .map_err(|e| format!("output error: {}", e))?;
+        write!(out, "{}", rl.prompt()).map_err(|e| format!("output error: {}", e))?;
         out.flush().map_err(|e| format!("output error: {}", e))?;
         let mut line = String::new();
         match stdin.lock().read_line(&mut line) {
@@ -70,22 +70,28 @@ pub fn run_repl() -> Result<(), String> {
             Ok(_) => {}
             Err(e) => return Err(format!("input error: {}", e)),
         }
-        buf.push_str(&line);
-        match eval_chunk(&mut vm, &buf) {
+        let status = rl.feed_line(&line);
+        if matches!(
+            status,
+            crate::parser::readline::ChunkStatus::Incomplete { .. }
+        ) {
+            continue;
+        }
+        let chunk = rl.take_chunk();
+        if chunk.trim().is_empty() {
+            continue;
+        }
+        match eval_chunk(&mut vm, &chunk) {
             Ok(echo) => {
                 if let Some(s) = echo {
                     writeln!(out, "{}", s).map_err(|e| format!("output error: {}", e))?;
                 }
-                buf.clear();
-                cont = false;
             }
             Err(e) if is_incomplete_input(&e) => {
-                cont = true;
+                rl.feed_line(&chunk);
             }
             Err(e) => {
                 writeln!(out, "Error: {}", e).map_err(|e| format!("output error: {}", e))?;
-                buf.clear();
-                cont = false;
             }
         }
     }

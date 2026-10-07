@@ -34,43 +34,18 @@ pub fn create_debug_lib() -> Value {
 }
 
 fn debug_traceback(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let mut out = String::new();
-    if let Some(msg) = args.first()
-        && !matches!(msg, Value::Nil)
-    {
-        out.push_str(&msg.to_string());
-        out.push('\n');
-    }
+    let msg = args
+        .first()
+        .filter(|v| !matches!(v, Value::Nil))
+        .map(|v| v.to_string());
 
-    out.push_str("stack traceback:\n");
     let level_offset = match args.get(1) {
         Some(Value::Int(i)) => i.to_usize().unwrap_or(1),
         Some(Value::Float(f)) => *f as usize,
         _ => 1,
     };
 
-    let total_frames = vm.frames.len();
-    for (i, frame) in vm.frames.iter().rev().enumerate() {
-        if i < level_offset.saturating_sub(1) {
-            continue;
-        }
-
-        let proto = &frame.closure.proto;
-        let name = proto.name.as_deref().unwrap_or("<anonymous>");
-        let line = if frame.ip < proto.lines.len() {
-            proto.lines[frame.ip]
-        } else {
-            proto.lines.last().copied().unwrap_or(1)
-        };
-
-        out.push_str(&format!(
-            "  [frame {}] function '{}' at line {}\n",
-            total_frames.saturating_sub(i),
-            name,
-            line
-        ));
-    }
-
+    let out = crate::stack_trace::build_vm_traceback(vm, msg, level_offset);
     Ok(vec![Value::string(out)])
 }
 

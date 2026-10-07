@@ -139,8 +139,14 @@ pub enum Value {
 pub struct VmTable {
     pub array: Vec<Value>,
     pub fields: FxHashMap<StrRef, Value>,
+    pub general: Option<Box<FxHashMap<crate::vm::table::TableKey, Value>>>,
     pub frozen: bool,
     pub metatable: Option<Rc<RefCell<VmTable>>>,
+    /// Strong owner of a coroutine's execution state when this table is a
+    /// coroutine handle. The VM's state map keeps only a weak reference, so
+    /// dropping the last handle frees a suspended coroutine immediately by
+    /// plain refcounting. Cloning a handle shares the state.
+    pub co_state: Option<Rc<RefCell<crate::vm::machine::CoroutineState>>>,
 }
 
 impl Default for VmTable {
@@ -154,8 +160,10 @@ impl VmTable {
         Self {
             array: Vec::new(),
             fields: new_map(),
+            general: None,
             frozen: false,
             metatable: None,
+            co_state: None,
         }
     }
 
@@ -165,8 +173,10 @@ impl VmTable {
         Self {
             array: Vec::with_capacity(array),
             fields: map,
+            general: None,
             frozen: false,
             metatable: None,
+            co_state: None,
         }
     }
 
@@ -177,6 +187,19 @@ impl VmTable {
     pub fn set_str(&mut self, key: &str, val: Value) {
         if !self.frozen {
             self.fields.insert(StrRef::from(key), val);
+        }
+    }
+
+    pub fn get_general(&self, key: &crate::vm::table::TableKey) -> Option<&Value> {
+        self.general.as_ref().and_then(|g| g.get(key))
+    }
+
+    pub fn set_general(&mut self, key: crate::vm::table::TableKey, val: Value) {
+        if !self.frozen {
+            let map = self
+                .general
+                .get_or_insert_with(|| Box::new(crate::vm::hash::new_map()));
+            map.insert(key, val);
         }
     }
 

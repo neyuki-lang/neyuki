@@ -12,6 +12,10 @@ use crate::compiler::ir::block::{IrFunction, IrModule, UpvalSource};
 use crate::compiler::ir::inst::{IrInst, SpreadSink, SpreadSource};
 use crate::compiler::ir::types::{IrBinaryOp, IrConstant, IrLabel, IrUnaryOp, IrVar};
 
+pub fn parse_int_from_str(s: &str) -> Option<BigInt> {
+    BigInt::from_str(s).ok()
+}
+
 struct IrLoopContext {
     break_label: IrLabel,
     continue_label: IrLabel,
@@ -30,6 +34,12 @@ pub struct IrBuilder {
     parent_scopes: Vec<Vec<HashMap<String, IrVar>>>,
     upvalues: Vec<UpvalueDesc>,
     upvalue_vars: Vec<UpvalSource>,
+}
+
+impl Default for IrBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl IrBuilder {
@@ -600,6 +610,19 @@ impl IrBuilder {
                 });
             }
             Expr::Member { object, field, .. } => {
+                // `module.field` on a global resolves through the import
+                // cache; anything else keeps the dynamic table read.
+                if let Expr::Variable { name, .. } = object.as_ref() {
+                    let (is_local, upval, _) = self.resolve_variable(name);
+                    if !is_local && upval.is_none() {
+                        self.emit(IrInst::GetImport {
+                            dst,
+                            module: name.clone(),
+                            field: field.clone(),
+                        });
+                        return dst;
+                    }
+                }
                 let tbl = self.compile_expr(object, None);
                 let key = self.alloc_var();
                 self.emit(IrInst::LoadConst {

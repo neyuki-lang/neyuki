@@ -1,8 +1,8 @@
 //! Bridges the tree-walking runtime's native primitives into the register VM.
 //!
-//! `@neyuki/http`, `@neyuki/fs`, `@neyuki/io`, `@neyuki/sql` and `@neyuki/ui` are
-//! written in Neyuki on top of `__http_*`, `__fs_*`, `__io_*`, `__sql_*` and
-//! `__ui_*` natives that speak `runtime::Value`.
+//! `@neyuki/http`, `@neyuki/fs`, `@neyuki/io` and `@neyuki/sql` are written in
+//! Neyuki on top of `__http_*`, `__fs_*`, `__io_*` and `__sql_*` natives that
+//! speak `runtime::Value`.
 //! Rather than keep a second copy of each primitive for the VM, every one is
 //! wrapped in a VM native that converts the arguments over and the results
 //! back. The primitives are plain `fn(Vec<Value>) -> Result<Vec<Value>, _>`

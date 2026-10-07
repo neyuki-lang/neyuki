@@ -1,0 +1,39 @@
+-- table.sort with a comparator must be O(n log n), not O(n^2).
+-- Reversed input is the worst case for insertion sort: it needs
+-- N*(N-1)/2 comparator calls. Merge sort needs ~N*log2(N).
+local N = 1024
+local arr = {}
+for i = 1, N do arr[i] = N - i + 1 end
+
+local st = { n = 0 }
+table.sort(arr, function(a, b)
+    st.n = st.n + 1
+    return a < b
+end)
+
+for i = 1, N do
+    assert(arr[i] == i, "sorted at " .. tostring(i))
+end
+assert(st.n < 50000, "too many comparator calls: " .. tostring(st.n))
+
+-- correctness with duplicates and descending order
+local dup = {3, 1, 2, 1, 3, 2}
+table.sort(dup, function(a, b) return a < b end)
+assert(dup[1] == 1 and dup[2] == 1 and dup[3] == 2, "dupes asc")
+assert(dup[4] == 2 and dup[5] == 3 and dup[6] == 3, "dupes asc tail")
+table.sort(dup, function(a, b) return a > b end)
+assert(dup[1] == 3 and dup[6] == 1, "descending")
+
+-- comparator errors propagate and leave the call as an error
+local t = {3, 1, 2}
+local ok, err = try(table.sort, t, function(a, b) error("boom") end)
+assert(not ok, "sort must propagate comparator error")
+assert(err == "boom", "error message passes through: " .. tostring(err))
+
+-- empty and singleton are no-ops
+local e = {}
+table.sort(e, function(a, b) return a < b end)
+assert(#e == 0, "empty stays empty")
+local one = {42}
+table.sort(one, function(a, b) return a < b end)
+assert(one[1] == 42, "singleton untouched")

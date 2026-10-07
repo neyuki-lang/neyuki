@@ -97,6 +97,11 @@ pub enum IrInst {
         table: IrVar,
         key: IrVar,
     },
+    GetImport {
+        dst: IrVar,
+        module: String,
+        field: String,
+    },
     SetTable {
         table: IrVar,
         key: IrVar,
@@ -194,6 +199,7 @@ impl IrInst {
             | Self::UnOp { dst, .. }
             | Self::NewTable { dst }
             | Self::GetTable { dst, .. }
+            | Self::GetImport { dst, .. }
             | Self::GetGlobal { dst, .. }
             | Self::GetUpval { dst, .. }
             | Self::Closure { dst, .. }

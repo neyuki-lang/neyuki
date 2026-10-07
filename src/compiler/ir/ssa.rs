@@ -217,6 +217,7 @@ fn set_inst_def(inst: &mut IrInst, new_def: IrVar) {
         | IrInst::UnOp { dst, .. }
         | IrInst::NewTable { dst }
         | IrInst::GetTable { dst, .. }
+        | IrInst::GetImport { dst, .. }
         | IrInst::GetGlobal { dst, .. }
         | IrInst::GetUpval { dst, .. }
         | IrInst::Closure { dst, .. }

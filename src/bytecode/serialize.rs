@@ -5,9 +5,7 @@ use crate::bytecode::instruction::Instruction;
 use crate::bytecode::proto::{Constant, Proto};
 use num_bigint::{BigInt, Sign};
 
-#[allow(unused_imports)]
 pub use crate::bytecode::deserialize::deserialize;
-#[allow(unused_imports)]
 pub use crate::bytecode::format::{BYTECODE_VERSION, MAGIC};
 
 pub fn serialize(proto: &Proto) -> Vec<u8> {
@@ -394,6 +392,18 @@ fn write_instruction(buf: &mut Vec<u8>, inst: &Instruction) {
             write_u8(buf, *dst);
             write_u8(buf, *a);
             write_u8(buf, *b);
+        }
+        Instruction::GetImport {
+            dst,
+            mod_k,
+            field_k,
+            site,
+        } => {
+            write_u8(buf, 53);
+            write_u8(buf, *dst);
+            write_u16(buf, *mod_k);
+            write_u16(buf, *field_k);
+            write_u16(buf, *site);
         }
     }
 }

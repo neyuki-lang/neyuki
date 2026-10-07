@@ -125,6 +125,38 @@ impl Compiler {
                     .emit(Instruction::Vararg { dst, count: 1 });
             }
             Expr::Member { object, field, .. } => {
+                // `module.field` on a global goes through the import cache
+                // (one epoch check instead of two hash lookups); anything
+                // else keeps the dynamic pair.
+                let import_mod = match object.as_ref() {
+                    Expr::Variable { name, .. } => {
+                        let (is_local, upval) = self.resolve_variable(name);
+                        if !is_local && upval.is_none() {
+                            Some(name.clone())
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some(mod_name) = import_mod {
+                    let mod_k = self.add_constant(Constant::String(mod_name));
+                    let field_k = self.add_constant(Constant::String(field.clone()));
+                    let st = self.current_mut();
+                    let site = st.import_sites;
+                    // 65535 import sites per function cannot happen in
+                    // practice; on overflow keep the dynamic pair.
+                    if site != u16::MAX {
+                        st.import_sites += 1;
+                        st.emit(Instruction::GetImport {
+                            dst,
+                            mod_k,
+                            field_k,
+                            site,
+                        });
+                        return dst;
+                    }
+                }
                 let obj_reg = self.compile_expr(object, None);
                 let key_k = self.add_constant(Constant::String(field.clone()));
                 self.current_mut().emit(Instruction::GetTableK {
@@ -146,6 +178,14 @@ impl Compiler {
                 self.current_mut().free_reg(obj_reg);
             }
             Expr::Table { entries, .. } => {
+                let shape = crate::compiler::table_shape::TableShape::analyze(entries);
+                let batch_limit = if shape.has_duplicate_keys {
+                    16
+                } else if shape.array_capacity > 64 {
+                    64
+                } else {
+                    32
+                };
                 self.current_mut().emit(Instruction::NewTable { dst });
                 let mut array_regs = Vec::new();
                 for (index, entry) in entries.iter().enumerate() {
@@ -195,7 +235,7 @@ impl Compiler {
                     } else {
                         let val_reg = self.compile_expr(&entry.value, None);
                         array_regs.push(val_reg);
-                        if array_regs.len() >= 32 {
+                        if array_regs.len() >= batch_limit {
                             let base = array_regs[0];
                             let count = array_regs.len() as u8;
                             self.current_mut().emit(Instruction::SetList {

@@ -1,0 +1,26 @@
+-- GC soak: allocate past the collection threshold many times over so
+-- the auto path performs repeated bounded slices (and occasional full
+-- starts). Live data must survive bit-identical to a stop-the-world run:
+-- kept tables hold x = 3, 6, ..., 30000, summing to 3*(1+...+10000).
+local keep = {}
+for i = 1, 30000 do
+    local t = { x = i }
+    if i % 3 == 0 then
+        keep[#keep + 1] = t
+    end
+end
+
+local s = 0
+for _, t in keep do
+    s = s + t.x
+end
+assert(s == 150015000)
+
+-- An explicit full collection afterwards must also preserve everything.
+collectgarbage("collect")
+local s2 = 0
+for _, t in keep do
+    s2 = s2 + t.x
+end
+assert(s2 == 150015000)
+assert(#keep == 10000)

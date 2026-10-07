@@ -6,6 +6,14 @@ use crate::compiler::ir::block::{BasicBlock, ControlFlowGraph, IrFunction, IrMod
 use crate::compiler::ir::inst::IrInst;
 use crate::compiler::ir::types::{IrBinaryOp, IrConstant, IrLabel, IrUnaryOp, IrVar};
 
+pub fn format_var(v: IrVar) -> String {
+    format!("v{}", v.0)
+}
+
+pub fn format_label(l: IrLabel) -> String {
+    format!("L{}", l.0)
+}
+
 pub fn print_module(module: &IrModule) -> String {
     let mut out = String::new();
     print_function(&module.main, 0, &mut out);
@@ -95,6 +103,9 @@ pub fn format_inst(inst: &IrInst) -> String {
             format!("append(v{}, v{})", table.0, src.0)
         }
         IrInst::GetGlobal { dst, name } => format!("v{} = global {}", dst.0, name),
+        IrInst::GetImport { dst, module, field } => {
+            format!("v{} = import {}.{}", dst.0, module, field)
+        }
         IrInst::SetGlobal { name, src } => format!("global {} = v{}", name, src.0),
         IrInst::GetUpval { dst, index } => format!("v{} = upval[{}]", dst.0, index),
         IrInst::SetUpval { index, src } => format!("upval[{}] = v{}", index, src.0),

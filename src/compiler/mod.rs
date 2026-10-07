@@ -6,22 +6,23 @@ pub mod constant_fold;
 pub mod cost_model;
 pub mod ir;
 pub mod table_shape;
+pub mod value_tracking;
 
 use crate::bytecode::proto::Proto;
 use crate::bytecode::serialize::serialize;
 use crate::parser::{Param, Parser, Stmt};
 use std::fs;
 
-#[allow(unused_imports)]
 pub use codegen::{CompileError, Compiler};
 pub use constant_fold::fold_program;
+pub use value_tracking::{TrackedValue, ValueTracker, value_tracking_cfg};
 
 // Parse Neyuki source code into AST statements
 pub fn compile_source(source: &str) -> Result<Vec<Stmt>, String> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let mut stmts = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut parser = Parser::new(source);
         let (stmts, _pool) = parser.parse_program()?;
-        Ok(stmts)
+        Ok::<Vec<Stmt>, String>(stmts)
     }))
     .map_err(|payload| {
         if let Some(s) = payload.downcast_ref::<&str>() {
@@ -31,7 +32,11 @@ pub fn compile_source(source: &str) -> Result<Vec<Stmt>, String> {
         } else {
             "syntax error".to_string()
         }
-    })?
+    })??;
+
+    crate::ast::visitor::check_ast_sanity(&stmts)?;
+    crate::ast::visitor_mut::normalize_ast(&mut stmts);
+    Ok(stmts)
 }
 
 // Read and parse source file into AST statements
@@ -62,16 +67,21 @@ pub fn compile_bundled_to_proto(statements: &[Stmt]) -> Result<Proto, String> {
 }
 
 fn codegen_proto(statements: &[Stmt]) -> Result<Proto, String> {
+    let cost_model = crate::compiler::cost_model::CostModel::default();
+    let _ast_cost = cost_model.program_cost(statements);
     let optimized_stmts = fold_program(statements.to_vec());
     let mut compiler = Compiler::new(Some("main".to_string()), 0, false);
     compiler.compile_program(&optimized_stmts);
-    compiler.finish().map_err(|errors| {
+    let proto = compiler.finish().map_err(|errors| {
         errors
             .iter()
             .map(|e| e.to_string())
             .collect::<Vec<_>>()
             .join("\n")
-    })
+    })?;
+    let _proto_cost = cost_model.proto_cost(&proto);
+    let _ = cost_model.should_inline(&proto);
+    Ok(proto)
 }
 
 // Compile AST statements through full IR pipeline: AST -> IR -> CFG -> optimize_cfg -> bytecode Proto
@@ -93,6 +103,8 @@ fn compile_to_proto_via_ir_unchecked(statements: &[Stmt]) -> Result<Proto, Strin
     let mut ir_module = ir::ast_to_ir(&optimized_stmts);
     ir::inline_functions(&mut ir_module);
     optimize_ir_function(&mut ir_module.main);
+    ir::verify_module(&ir_module)
+        .map_err(|errs| format!("IR verification error: {}", errs.join(", ")))?;
     ir::ir_to_bytecode(&ir_module)
 }
 
@@ -101,18 +113,18 @@ fn compile_to_proto_via_ir_unchecked(statements: &[Stmt]) -> Result<Proto, Strin
 pub fn dump_ir(statements: &[Stmt]) -> String {
     let optimized_stmts = fold_program(statements.to_vec());
     let mut ir_module = ir::ast_to_ir(&optimized_stmts);
-    let mut out = String::from(
-        "=== before optimization ===
-",
-    );
+    let mut out = String::from("=== before optimization ===\n");
     out.push_str(&ir::pretty::print_module(&ir_module));
+    if let Err(errs) = ir::verify_module(&ir_module) {
+        out.push_str(&format!("\n[verification warnings: {}]\n", errs.join(", ")));
+    }
+    ir::inline_functions(&mut ir_module);
     optimize_ir_function(&mut ir_module.main);
-    out.push_str(
-        "
-=== after optimization ===
-",
-    );
+    out.push_str("\n=== after optimization ===\n");
     out.push_str(&ir::pretty::print_module(&ir_module));
+    if let Err(errs) = ir::verify_module(&ir_module) {
+        out.push_str(&format!("\n[verification warnings: {}]\n", errs.join(", ")));
+    }
     out
 }
 

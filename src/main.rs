@@ -1,31 +1,12 @@
 use std::env;
 use std::process;
 
-pub mod ast;
 #[path = "../bench/mod.rs"]
 mod bench;
-mod bytecode;
-mod compiler;
-mod crypto_lib;
-mod dap;
-mod dap_json;
-pub mod diagnostics;
-mod fs_lib;
 #[path = "../fuzz/mod.rs"]
 mod fuzz;
-mod http_lib;
-mod io_lib;
-mod lexer;
-mod lint;
-mod parser;
-mod repl;
-mod runtime;
-pub mod sema;
-mod sql_lib;
-mod string_lib;
-mod tests;
-mod ui_lib;
-mod vm;
+
+use neyuki::*;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -152,6 +133,40 @@ fn main() {
                 process::exit(1);
             }
         }
+    } else if action == "assemble" {
+        let Some(path) = args.get(2) else {
+            eprintln!("Usage: {} assemble <assembly_file> [output]", args[0]);
+            process::exit(1);
+        };
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("failed to read {}: {}", path, e);
+                process::exit(1);
+            }
+        };
+        let proto = match bytecode::parse_assembly(&text) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("assembly parse error: {}", e);
+                process::exit(1);
+            }
+        };
+        let out_path = args
+            .get(3)
+            .cloned()
+            .unwrap_or_else(|| format!("{}.bin", path));
+        let serialized = bytecode::serialize(&proto);
+        if let Err(e) = std::fs::write(&out_path, &serialized) {
+            eprintln!("failed to write {}: {}", out_path, e);
+            process::exit(1);
+        }
+        println!(
+            "assembled {} -> {} ({} bytes)",
+            path,
+            out_path,
+            serialized.len()
+        );
     } else if action == "test" {
         tests::run_all_tests();
     } else if action == "fuzz" {
@@ -166,6 +181,11 @@ fn main() {
     } else if action == "dap" {
         if let Err(err) = dap::run_dap_session() {
             eprintln!("dap error: {}", err);
+            process::exit(1);
+        }
+    } else if action == "pkg" {
+        if let Err(err) = pkg::run_pkg_cli(&args[2..]) {
+            eprintln!("pkg error: {}", err);
             process::exit(1);
         }
     } else {

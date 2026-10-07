@@ -19,6 +19,7 @@ pub use coroutine::create_coroutine_lib;
 pub use debug::create_debug_lib;
 pub use json::create_json_lib;
 pub use math::create_math_lib;
+pub(crate) use math::primitive_sqrt;
 pub use os::create_os_lib;
 pub use string::create_string_lib;
 pub use table::create_table_lib;

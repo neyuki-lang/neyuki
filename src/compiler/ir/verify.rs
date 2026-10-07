@@ -161,3 +161,33 @@ pub fn verify_function(func: &IrFunction) -> Result<(), Vec<String>> {
 pub fn verify_module(module: &IrModule) -> Result<(), Vec<String>> {
     verify_function(&module.main)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compiler::ir::block::{BasicBlock, ControlFlowGraph};
+
+    #[test]
+    fn test_verify_empty_module() {
+        let module = IrModule::new(IrFunction::new(Some("main".to_string()), 0, false));
+        assert!(verify_module(&module).is_ok());
+    }
+
+    #[test]
+    fn test_verify_module_detects_unknown_jump() {
+        let mut func = IrFunction::new(Some("main".to_string()), 0, false);
+        let mut cfg = ControlFlowGraph::new(IrLabel(0));
+        let mut b0 = BasicBlock::new(IrLabel(0));
+        b0.instructions.push(IrInst::Jump(IrLabel(999)));
+        cfg.blocks.push(b0);
+        func.cfg = Some(cfg);
+        let module = IrModule::new(func);
+        let res = verify_module(&module);
+        assert!(res.is_err());
+        let errs = res.unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("references unknown jump target"))
+        );
+    }
+}

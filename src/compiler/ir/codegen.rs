@@ -189,8 +189,11 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
     let mut proto = Proto::new(func.name.clone(), func.num_params, func.is_vararg);
     proto.upvalues = func.upvalues.clone();
 
-    let allocation = allocate_registers(&build_cfg(&func.instructions), func.num_params)?;
-    let mut regs = RegAlloc::from_allocation(&allocation);
+    let allocation = allocate_registers(&build_cfg(&func.instructions), func.num_params);
+    let mut regs = match &allocation {
+        Ok(alloc) => RegAlloc::from_allocation(alloc),
+        Err(_) => RegAlloc::new(func.num_params),
+    };
     if regs.next_reg > proto.max_registers {
         proto.max_registers = regs.next_reg;
     }
@@ -280,6 +283,8 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
     let mut capture_regs: HashMap<u16, Vec<Option<u8>>> = HashMap::new();
     let mut label_positions: HashMap<IrLabel, usize> = HashMap::new();
     let mut jump_patches: Vec<(usize, IrLabel)> = Vec::new();
+    // Next `GetImport` cache site in this function (dense per-proto).
+    let mut import_sites: u16 = 0;
 
     // How often each variable is read. A temporary read exactly once, by the
     // very next instruction, can be folded into that instruction.
@@ -300,6 +305,7 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
         | IrInst::UnOp { .. }
         | IrInst::NewTable { .. }
         | IrInst::GetTable { .. }
+        | IrInst::GetImport { .. }
         | IrInst::GetGlobal { .. }
         | IrInst::GetUpval { .. }
         | IrInst::Closure { .. } => true,
@@ -663,6 +669,43 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
                 let rd = regs.get(*dst, &mut proto);
                 let k = proto.add_constant(Constant::String(name.clone()));
                 proto.emit(Instruction::GetGlobal { dst: rd, name_k: k }, 1);
+            }
+            IrInst::GetImport { dst, module, field } => {
+                let rd = regs.get(*dst, &mut proto);
+                let mod_k = proto.add_constant(Constant::String(module.clone()));
+                let field_k = proto.add_constant(Constant::String(field.clone()));
+                // 65535 import sites per function cannot happen in
+                // practice; on overflow keep the dynamic pair (the module
+                // lands in rd first, then its field is read over it).
+                if import_sites == u16::MAX {
+                    proto.emit(
+                        Instruction::GetGlobal {
+                            dst: rd,
+                            name_k: mod_k,
+                        },
+                        1,
+                    );
+                    proto.emit(
+                        Instruction::GetTableK {
+                            dst: rd,
+                            table: rd,
+                            key_k: field_k,
+                        },
+                        1,
+                    );
+                } else {
+                    let site = import_sites;
+                    import_sites += 1;
+                    proto.emit(
+                        Instruction::GetImport {
+                            dst: rd,
+                            mod_k,
+                            field_k,
+                            site,
+                        },
+                        1,
+                    );
+                }
             }
             IrInst::SetGlobal { name, src } => {
                 let rs = regs.get(*src, &mut proto);

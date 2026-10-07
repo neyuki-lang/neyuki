@@ -56,7 +56,17 @@ pub(crate) fn coroutine_create(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>
         yield_values: Vec::new(),
         open_upvalues: Vec::new(),
     };
-    vm.coroutines.insert(id, Rc::new(RefCell::new(state)));
+    let state_rc = Rc::new(RefCell::new(state));
+    // The map holds only a WEAK reference: the handle table below owns the
+    // state strongly, so an abandoned suspended coroutine dies with its
+    // handle instead of leaking its whole stack/frames in this map.
+    vm.co_states.insert(id, Rc::downgrade(&state_rc));
+    // Dead-weak pruning is amortized: full collections prune, and creation
+    // prunes once the map doubles past the last prune, so a loop that never
+    // collects still cannot pile dead entries unboundedly.
+    if vm.co_states.len() > vm.co_states_pruned_at.saturating_mul(2).saturating_add(64) {
+        vm.prune_co_states();
+    }
 
     let co = Rc::new(RefCell::new(VmTable::new()));
     let mut b = co.borrow_mut();
@@ -64,6 +74,7 @@ pub(crate) fn coroutine_create(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>
     b.set_str("_id", Value::from_usize(id));
     b.set_str("status", Value::str("suspended"));
     b.set_str("func", func);
+    b.co_state = Some(state_rc);
     drop(b);
 
     Ok(vec![Value::Table(co)])
@@ -77,7 +88,10 @@ pub(crate) fn coroutine_resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>
 
     let co_id = co_val.borrow().get_str("_id").as_usize().unwrap_or(0);
 
-    if co_id == 0 || !vm.coroutines.contains_key(&co_id) {
+    if co_id == 0 || vm.co_state(co_id).is_none() {
+        // No live state: dead (entry removed or pruned) or never existed.
+        // Drop the stale weak, if any, then take the legacy path.
+        vm.co_states.remove(&co_id);
         let (status, func) = {
             let b = co_val.borrow();
             (b.get_str("status"), b.get_str("func"))
@@ -101,7 +115,7 @@ pub(crate) fn coroutine_resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>
         };
     }
 
-    let co_rc = vm.coroutines.get(&co_id).unwrap().clone();
+    let co_rc = vm.co_state(co_id).expect("live coroutine state vanished");
 
     let current_status = co_rc.borrow().status.clone();
     if current_status == "dead" {
@@ -162,6 +176,10 @@ pub(crate) fn coroutine_resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>
                 let res = (def.func)(vm, resume_args);
                 co_rc.borrow_mut().status = "dead".to_string();
                 co_val.borrow_mut().set_str("status", Value::str("dead"));
+                // Dead in both registries: register-VM states live in
+                // `co_states`, tree-walker states (bridged resume) in
+                // `coroutines`. One of the two removes is always a no-op.
+                vm.co_states.remove(&co_id);
                 vm.coroutines.remove(&co_id);
                 vm.close_upvalues(0);
                 vm.stack = caller_stack;
@@ -235,6 +253,7 @@ pub(crate) fn coroutine_resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>
             cs.status = "dead".to_string();
             co_val.borrow_mut().set_str("status", Value::str("dead"));
             drop(cs);
+            vm.co_states.remove(&co_id);
             vm.coroutines.remove(&co_id);
 
             vm.stack = caller_stack;
@@ -250,6 +269,7 @@ pub(crate) fn coroutine_resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>
             cs.status = "dead".to_string();
             co_val.borrow_mut().set_str("status", Value::str("dead"));
             drop(cs);
+            vm.co_states.remove(&co_id);
             vm.coroutines.remove(&co_id);
 
             vm.stack = caller_stack;
@@ -266,7 +286,7 @@ fn coroutine_yield(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let Some(co_id) = vm.current_co else {
         return Err("attempt to yield from outside a coroutine".to_string());
     };
-    if let Some(co_rc) = vm.coroutines.get(&co_id) {
+    if let Some(co_rc) = vm.co_state(co_id) {
         co_rc.borrow_mut().yield_values = args.to_vec();
     }
     vm.is_yielding = true;
@@ -281,7 +301,7 @@ fn coroutine_status(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 
     let co_id = co_val.borrow().get_str("_id").as_usize().unwrap_or(0);
 
-    if let Some(co_rc) = vm.coroutines.get(&co_id) {
+    if let Some(co_rc) = vm.co_state(co_id) {
         let st = co_rc.borrow().status.clone();
         Ok(vec![Value::string(st)])
     } else {

@@ -188,6 +188,16 @@ fn verify_proto_depth(proto: &Proto, depth: usize) -> Result<(), BytecodeVerifyE
                 check_reg(*table, pc)?;
                 check_const(*key_k, pc)?;
             }
+            Instruction::GetImport {
+                dst,
+                mod_k,
+                field_k,
+                site: _,
+            } => {
+                check_reg(*dst, pc)?;
+                check_const(*mod_k, pc)?;
+                check_const(*field_k, pc)?;
+            }
             Instruction::SetTableK { table, key_k, val } => {
                 check_reg(*table, pc)?;
                 check_const(*key_k, pc)?;

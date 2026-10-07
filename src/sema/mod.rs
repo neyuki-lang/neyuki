@@ -81,4 +81,21 @@ mod tests {
         let diags = analyze(&stmts, code);
         assert!(diags.iter().any(|d| d.code == Some(ErrorCode::W0004)));
     }
+
+    #[test]
+    fn test_sema_optional_and_union_types() {
+        let code_valid = "local x: string? = nil\nlocal y: int | string = 42\nreturn x, y";
+        let stmts_valid = compile_source(code_valid).expect("syntax error");
+        let diags_valid = analyze(&stmts_valid, code_valid);
+        assert!(!diags_valid.iter().any(|d| d.code == Some(ErrorCode::E0003)));
+
+        let code_invalid = "local x: int | string = true\nreturn x";
+        let stmts_invalid = compile_source(code_invalid).expect("syntax error");
+        let diags_invalid = analyze(&stmts_invalid, code_invalid);
+        assert!(
+            diags_invalid
+                .iter()
+                .any(|d| d.code == Some(ErrorCode::E0003))
+        );
+    }
 }

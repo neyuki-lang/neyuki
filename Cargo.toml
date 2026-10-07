@@ -8,6 +8,14 @@ license = "MIT"
 repository = "https://github.com/neyuki-lang/neyuki"
 homepage = "https://neyuki.cc/"
 
+[lib]
+name = "neyuki"
+path = "src/lib.rs"
+
+[[bin]]
+name = "neyuki"
+path = "src/main.rs"
+
 [dependencies]
 num-bigint = "0.4"
 num-integer = "0.1"

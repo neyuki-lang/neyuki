@@ -26,6 +26,9 @@ pub(crate) struct FuncState {
     pub(crate) reg_top: u8,
     pub(crate) loops: Vec<LoopContext>,
     pub(crate) current_line: u32,
+    /// Next `GetImport` cache site in this function. Sites are dense
+    /// per-proto indices into its runtime import cache.
+    pub(crate) import_sites: u16,
     /// Registers an inner closure captured as an upvalue. They are never
     /// handed out again: the instruction set has no "close upvalue" op, so a
     /// later write to such a register would reach through the open upvalue and
@@ -42,6 +45,7 @@ impl FuncState {
             reg_top: 0,
             loops: Vec::new(),
             current_line: 1,
+            import_sites: 0,
             captured: HashSet::new(),
         }
     }

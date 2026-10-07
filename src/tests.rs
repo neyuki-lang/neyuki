@@ -8,7 +8,6 @@ use std::time::Instant;
 use crate::vm;
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct TestResult {
     pub path: PathBuf,
     pub duration_ms: u128,

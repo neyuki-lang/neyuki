@@ -656,10 +656,22 @@ impl<'a> SemanticAnalyzer<'a> {
             Expr::Literal { value: val, .. } => match val {
                 Literal::Nil => NeyukiType::Nil,
                 Literal::Bool(_) => NeyukiType::Boolean,
-                Literal::Int(_) | Literal::Float(_) => NeyukiType::Number,
+                Literal::Int(_) => NeyukiType::Int,
+                Literal::Float(_) => NeyukiType::Float,
                 Literal::String(_) => NeyukiType::String,
             },
-            Expr::Table { .. } => NeyukiType::Table,
+            Expr::Table { entries, .. } => {
+                if entries.is_empty() {
+                    NeyukiType::Table
+                } else if entries.iter().all(|e| e.key.is_none()) {
+                    let elem_ty = entries.iter().fold(NeyukiType::Never, |acc, e| {
+                        acc.lub(&self.infer_expr_type(&e.value))
+                    });
+                    NeyukiType::Array(Box::new(elem_ty))
+                } else {
+                    NeyukiType::Table
+                }
+            }
             Expr::Function { .. } => NeyukiType::Function {
                 params: Vec::new(),
                 return_type: Box::new(NeyukiType::Any),
@@ -672,13 +684,23 @@ impl<'a> SemanticAnalyzer<'a> {
                     NeyukiType::Any
                 }
             }
-            Expr::Unary { op, .. } => {
-                if *op == UnOp::Not {
-                    NeyukiType::Boolean
-                } else {
-                    NeyukiType::Number
+            Expr::Unary {
+                op, expr: inner, ..
+            } => match op {
+                UnOp::Not => NeyukiType::Boolean,
+                UnOp::Len => NeyukiType::Int,
+                UnOp::BitNot => NeyukiType::Int,
+                UnOp::Neg => {
+                    let inner_ty = self.infer_expr_type(inner);
+                    if inner_ty == NeyukiType::Int {
+                        NeyukiType::Int
+                    } else if inner_ty == NeyukiType::Float {
+                        NeyukiType::Float
+                    } else {
+                        NeyukiType::Number
+                    }
                 }
-            }
+            },
             Expr::Binary {
                 left, op, right, ..
             } => match op {
@@ -687,17 +709,33 @@ impl<'a> SemanticAnalyzer<'a> {
                 }
                 BinOp::Concat => NeyukiType::String,
                 BinOp::Coalesce => {
+                    let l_ty = self.infer_expr_type(left).narrow_non_nil();
                     let r_ty = self.infer_expr_type(right);
-                    if r_ty != NeyukiType::Any && r_ty != NeyukiType::Nil {
-                        r_ty
-                    } else {
-                        self.infer_expr_type(left)
-                    }
+                    l_ty.lub(&r_ty)
                 }
                 BinOp::And | BinOp::Or => {
                     let r_ty = self.infer_expr_type(right);
                     let l_ty = self.infer_expr_type(left);
-                    if l_ty == r_ty { l_ty } else { NeyukiType::Any }
+                    l_ty.lub(&r_ty)
+                }
+                BinOp::BitAnd
+                | BinOp::BitOr
+                | BinOp::BitXor
+                | BinOp::Shl
+                | BinOp::Shr
+                | BinOp::IDiv
+                | BinOp::Mod => NeyukiType::Int,
+                BinOp::Div => NeyukiType::Float,
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Pow => {
+                    let l_ty = self.infer_expr_type(left);
+                    let r_ty = self.infer_expr_type(right);
+                    if l_ty == NeyukiType::Int && r_ty == NeyukiType::Int {
+                        NeyukiType::Int
+                    } else if l_ty == NeyukiType::Float || r_ty == NeyukiType::Float {
+                        NeyukiType::Float
+                    } else {
+                        NeyukiType::Number
+                    }
                 }
                 _ => NeyukiType::Number,
             },
