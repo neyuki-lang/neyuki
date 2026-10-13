@@ -83,6 +83,10 @@ png = "0.18"
 enigo = "0.6"
 arboard = { version = "3", default-features = false }
 
+# `os.date` formats times and reads the local time zone through the
+# operating system (Windows API bindings, /etc/localtime, CoreFoundation).
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
 [target.'cfg(windows)'.dependencies]
 schannel = ">=0.1.23, <0.1.28"
 
