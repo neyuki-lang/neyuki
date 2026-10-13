@@ -124,7 +124,7 @@ pub fn eliminate_empty_jump_blocks(cfg: &mut ControlFlowGraph) -> bool {
             if let Some(target_blk) = cfg.find_block_mut(target_label) {
                 target_blk.predecessors.retain(|&p| p != empty_label);
                 for p in &empty_preds {
-                    if !target_blk.predecessors.contains(p) && *p != target_label {
+                    if !target_blk.predecessors.contains(p) {
                         target_blk.predecessors.push(*p);
                     }
                 }

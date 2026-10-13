@@ -26,4 +26,11 @@ local arr = { 10, 20, 30, 40, 50, 60, 70, 80 }
 assert(#arr == 8, "array length")
 assert(arr[1] == 10 and arr[8] == 80, "array element access")
 
+-- loops with empty bodies
+local ticks = 0
+local function limit(n) ticks = ticks + 1 return n end
+for _ = 1, limit(3) do end
+for _, _ in { 1, 2 } do end
+assert(ticks == 1, "an empty loop still evaluates its bounds once")
+
 print("[pass] for loops and setlist")
