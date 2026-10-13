@@ -185,3 +185,5 @@ end)
 ## Current boundaries
 
 The compiler currently validates syntax rather than enforcing the declared type annotations. Runtime modules are resolved from the project checkout, and the base `require` implementation recognizes only the bundled modules listed above. User-defined functions return their explicit `return` values; a function without a return produces `nil` when called.
+
+A coroutine can only yield from its own Neyuki frames. Calling `coroutine.yield` from inside a function that a native function called back (a `try` or `pcall` body, a `table.sort` comparator, a metamethod) raises "attempt to yield across a native function call" instead. The handle `coroutine.create` returns is frozen, and only that handle resumes its coroutine.

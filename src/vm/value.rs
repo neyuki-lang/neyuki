@@ -310,13 +310,6 @@ impl Value {
         }
     }
 
-    pub fn as_str(&self) -> Option<&str> {
-        match self {
-            Value::String(s) => Some(&s.0[..]),
-            _ => None,
-        }
-    }
-
     pub fn type_name(&self) -> &'static str {
         match self {
             Value::Nil => "nil",

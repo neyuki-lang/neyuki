@@ -47,6 +47,9 @@ pub struct CoroutineState {
     pub frames: Vec<CallFrame>,
     pub status: String,
     pub func: Value,
+    /// The handle `coroutine.create` returned; `resume` and `status` only
+    /// accept this exact table.
+    pub handle: Weak<RefCell<VmTable>>,
     pub yield_callee: u8,
     pub yield_retc: u8,
     pub yield_values: Vec<Value>,
@@ -108,6 +111,14 @@ pub struct VM {
     pub next_co_id: usize,
     pub current_co: Option<usize>,
     pub is_yielding: bool,
+    /// How many `call_function` calls are active: native code (`try`,
+    /// `table.sort`, metamethods, ...) that re-entered the interpreter and
+    /// is still on the Rust stack.
+    pub native_calls: usize,
+    /// `native_calls` when the running coroutine was resumed. A yield can only
+    /// happen at that level; deeper, it would unwind native frames that
+    /// cannot be saved and resumed.
+    pub yield_floor: usize,
     /// Active `debug.sethook` hook, if any.
     pub hook: Option<DebugHook>,
     /// True while a hook function itself runs: hooks never trigger hooks.
@@ -153,6 +164,8 @@ impl VM {
             next_co_id: 1,
             current_co: None,
             is_yielding: false,
+            native_calls: 0,
+            yield_floor: 0,
             hook: None,
             in_hook: false,
             dap: None,
@@ -206,6 +219,12 @@ impl VM {
         self.stack.clear();
         self.frames.clear();
         self.open_upvalues.clear();
+        // A chunk that panicked (the REPL keeps its VM across chunks) can
+        // leave these mid-call; a new top-level run starts outside any.
+        self.native_calls = 0;
+        self.yield_floor = 0;
+        self.current_co = None;
+        self.is_yielding = false;
 
         // Ensure stack has enough capacity for main frame
         let max_reg = closure.proto.max_registers as usize;
@@ -357,6 +376,13 @@ impl VM {
     }
 
     pub fn call_function(&mut self, func: Value, args: &[Value]) -> Result<Vec<Value>, String> {
+        self.native_calls += 1;
+        let res = self.call_function_inner(func, args);
+        self.native_calls -= 1;
+        res
+    }
+
+    fn call_function_inner(&mut self, func: Value, args: &[Value]) -> Result<Vec<Value>, String> {
         if self.frames.len() >= MAX_CALL_DEPTH {
             return Err(format!(
                 "call stack overflow: exceeded maximum call depth of {}",
@@ -449,7 +475,7 @@ impl VM {
                     let mut call_args = Vec::with_capacity(args.len() + 1);
                     call_args.push(func.clone());
                     call_args.extend_from_slice(args);
-                    return self.call_function(handler, &call_args);
+                    return self.call_function_inner(handler, &call_args);
                 }
                 Err("attempt to call a table value without __call metamethod".to_string())
             }

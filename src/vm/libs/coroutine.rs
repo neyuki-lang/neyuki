@@ -42,24 +42,39 @@ pub(crate) fn coroutine_create(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>
         Some(f @ (Value::Closure(_) | Value::Native(_))) => f.clone(),
         _ => return Err("bad argument #1 to 'coroutine.create' (function expected)".to_string()),
     };
+    Ok(vec![new_coroutine(vm, func)])
+}
 
+/// Registers a suspended coroutine that will run `func` and returns its
+/// handle. The handle is frozen, and `resume` and `status` go by its identity
+/// rather than its fields, so a script cannot forge or revive a coroutine by
+/// editing or copying one.
+pub(crate) fn new_coroutine(vm: &mut VM, func: Value) -> Value {
     let id = vm.next_co_id;
     vm.next_co_id += 1;
+
+    let mut handle = VmTable::new();
+    handle.set_str("__type", Value::str("thread"));
+    handle.set_str("_id", Value::from_usize(id));
+    handle.frozen = true;
+    let handle = Rc::new(RefCell::new(handle));
 
     let state = CoroutineState {
         stack: Vec::new(),
         frames: Vec::new(),
         status: "suspended".to_string(),
-        func: func.clone(),
+        func,
+        handle: Rc::downgrade(&handle),
         yield_callee: 0,
         yield_retc: 0,
         yield_values: Vec::new(),
         open_upvalues: Vec::new(),
     };
     let state_rc = Rc::new(RefCell::new(state));
-    // The map holds only a WEAK reference: the handle table below owns the
-    // state strongly, so an abandoned suspended coroutine dies with its
-    // handle instead of leaking its whole stack/frames in this map.
+    // The map holds only a WEAK reference: the handle owns the state
+    // strongly, so an abandoned suspended coroutine dies with its handle
+    // instead of leaking its whole stack/frames in this map. The state only
+    // points back at the handle weakly, so the two do not form a cycle.
     vm.co_states.insert(id, Rc::downgrade(&state_rc));
     // Dead-weak pruning is amortized: full collections prune, and creation
     // prunes once the map doubles past the last prune, so a loop that never
@@ -67,53 +82,43 @@ pub(crate) fn coroutine_create(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>
     if vm.co_states.len() > vm.co_states_pruned_at.saturating_mul(2).saturating_add(64) {
         vm.prune_co_states();
     }
-
-    let co = Rc::new(RefCell::new(VmTable::new()));
-    let mut b = co.borrow_mut();
-    b.set_str("__type", Value::str("thread"));
-    b.set_str("_id", Value::from_usize(id));
-    b.set_str("status", Value::str("suspended"));
-    b.set_str("func", func);
-    b.co_state = Some(state_rc);
-    drop(b);
-
-    Ok(vec![Value::Table(co)])
+    handle.borrow_mut().co_state = Some(state_rc);
+    Value::Table(handle)
 }
 
-pub(crate) fn coroutine_resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let co_val = match args.first() {
-        Some(Value::Table(t)) => t.clone(),
-        _ => return Err("bad argument #1 to 'coroutine.resume' (thread expected)".to_string()),
+/// The id of the live coroutine whose handle is `val`. Finished coroutines
+/// are dropped from `vm.co_states`, so they, like tables that merely look
+/// like a handle, give `None`.
+fn live_coroutine(vm: &VM, val: Option<&Value>, func: &str) -> Result<Option<usize>, String> {
+    let Some(Value::Table(t)) = val else {
+        return Err(format!("bad argument #1 to '{}' (thread expected)", func));
     };
+    let id = t.borrow().get_str("_id").as_usize().unwrap_or(0);
+    let is_handle = vm.co_state(id).is_some_and(|co| {
+        co.borrow()
+            .handle
+            .upgrade()
+            .is_some_and(|h| Rc::ptr_eq(&h, t))
+    });
+    Ok(is_handle.then_some(id))
+}
 
-    let co_id = co_val.borrow().get_str("_id").as_usize().unwrap_or(0);
+/// `coroutine.resume(co, ...)`. Yields are only allowed at the native-call
+/// level the coroutine is resumed from; see `VM::yield_floor`.
+pub(crate) fn coroutine_resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let saved_floor = std::mem::replace(&mut vm.yield_floor, vm.native_calls);
+    let res = resume(vm, args);
+    vm.yield_floor = saved_floor;
+    res
+}
 
-    if co_id == 0 || vm.co_state(co_id).is_none() {
-        // No live state: dead (entry removed or pruned) or never existed.
-        // Drop the stale weak, if any, then take the legacy path.
-        vm.co_states.remove(&co_id);
-        let (status, func) = {
-            let b = co_val.borrow();
-            (b.get_str("status"), b.get_str("func"))
-        };
-        let status_str = status.as_str().unwrap_or("dead");
-        if status_str == "dead" {
-            return Ok(vec![
-                Value::Bool(false),
-                Value::str("cannot resume dead coroutine"),
-            ]);
-        }
-        let resume_args = &args[1..];
-        co_val.borrow_mut().set_str("status", Value::str("dead"));
-        return match vm.call_function(func, resume_args) {
-            Ok(results) => {
-                let mut ret = vec![Value::Bool(true)];
-                ret.extend(results);
-                Ok(ret)
-            }
-            Err(err) => Ok(vec![Value::Bool(false), Value::string(err)]),
-        };
-    }
+fn resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let Some(co_id) = live_coroutine(vm, args.first(), "coroutine.resume")? else {
+        return Ok(vec![
+            Value::Bool(false),
+            Value::str("cannot resume dead coroutine"),
+        ]);
+    };
 
     let co_rc = vm.co_state(co_id).expect("live coroutine state vanished");
 
@@ -149,7 +154,6 @@ pub(crate) fn coroutine_resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>
         vm.unpark_upvalues(parked);
         let mut co_state = co_rc.borrow_mut();
         co_state.status = "running".to_string();
-        co_val.borrow_mut().set_str("status", Value::str("running"));
     }
 
     let resume_args = &args[1..];
@@ -175,7 +179,6 @@ pub(crate) fn coroutine_resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>
             Value::Native(def) => {
                 let res = (def.func)(vm, resume_args);
                 co_rc.borrow_mut().status = "dead".to_string();
-                co_val.borrow_mut().set_str("status", Value::str("dead"));
                 // Dead in both registries: register-VM states live in
                 // `co_states`, tree-walker states (bridged resume) in
                 // `coroutines`. One of the two removes is always a no-op.
@@ -232,9 +235,6 @@ pub(crate) fn coroutine_resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>
             cs.frames = std::mem::take(&mut vm.frames);
             cs.open_upvalues = parked;
             cs.status = "suspended".to_string();
-            co_val
-                .borrow_mut()
-                .set_str("status", Value::str("suspended"));
             let yielded = std::mem::take(&mut cs.yield_values);
             drop(cs);
 
@@ -251,7 +251,6 @@ pub(crate) fn coroutine_resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>
             vm.close_upvalues(0);
             let mut cs = co_rc.borrow_mut();
             cs.status = "dead".to_string();
-            co_val.borrow_mut().set_str("status", Value::str("dead"));
             drop(cs);
             vm.co_states.remove(&co_id);
             vm.coroutines.remove(&co_id);
@@ -267,7 +266,6 @@ pub(crate) fn coroutine_resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>
             vm.close_upvalues(0);
             let mut cs = co_rc.borrow_mut();
             cs.status = "dead".to_string();
-            co_val.borrow_mut().set_str("status", Value::str("dead"));
             drop(cs);
             vm.co_states.remove(&co_id);
             vm.coroutines.remove(&co_id);
@@ -286,6 +284,12 @@ fn coroutine_yield(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let Some(co_id) = vm.current_co else {
         return Err("attempt to yield from outside a coroutine".to_string());
     };
+    if vm.native_calls > vm.yield_floor {
+        // A native function (`try`, `table.sort`, a metamethod, ...) is
+        // between this call and the coroutine's own frames. Its Rust stack
+        // cannot be saved, so unwinding through it would lose its state.
+        return Err("attempt to yield across a native function call".to_string());
+    }
     if let Some(co_rc) = vm.co_state(co_id) {
         co_rc.borrow_mut().yield_values = args.to_vec();
     }
@@ -294,36 +298,24 @@ fn coroutine_yield(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 }
 
 fn coroutine_status(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let co_val = match args.first() {
-        Some(Value::Table(t)) => t,
-        _ => return Err("bad argument #1 to 'coroutine.status' (thread expected)".to_string()),
+    let status = match live_coroutine(vm, args.first(), "coroutine.status")? {
+        Some(co_id) => match vm.co_state(co_id) {
+            Some(co) => co.borrow().status.clone(),
+            None => "dead".to_string(),
+        },
+        None => "dead".to_string(),
     };
-
-    let co_id = co_val.borrow().get_str("_id").as_usize().unwrap_or(0);
-
-    if let Some(co_rc) = vm.co_state(co_id) {
-        let st = co_rc.borrow().status.clone();
-        Ok(vec![Value::string(st)])
-    } else {
-        let status = co_val.borrow().get_str("status");
-        match status {
-            Value::String(_) => Ok(vec![status]),
-            _ => Ok(vec![Value::str("dead")]),
-        }
-    }
+    Ok(vec![Value::string(status)])
 }
 
 fn coroutine_running(vm: &mut VM, _args: &[Value]) -> Result<Vec<Value>, String> {
-    if let Some(co_id) = vm.current_co {
-        let tbl = Rc::new(RefCell::new(VmTable::new()));
-        let mut b = tbl.borrow_mut();
-        b.set_str("__type", Value::str("thread"));
-        b.set_str("_id", Value::from_usize(co_id));
-        b.set_str("status", Value::str("running"));
-        drop(b);
-        Ok(vec![Value::Table(tbl), Value::Bool(false)])
-    } else {
-        Ok(vec![Value::Nil, Value::Bool(true)])
+    let handle = vm
+        .current_co
+        .and_then(|co_id| vm.co_state(co_id))
+        .and_then(|co| co.borrow().handle.upgrade());
+    match handle {
+        Some(h) => Ok(vec![Value::Table(h), Value::Bool(false)]),
+        None => Ok(vec![Value::Nil, Value::Bool(true)]),
     }
 }
 
@@ -359,6 +351,7 @@ fn coroutine_wrap(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 
     let wrapper_table = Rc::new(RefCell::new(VmTable::new()));
     wrapper_table.borrow_mut().set_str("_co", co_table);
+    wrapper_table.borrow_mut().frozen = true;
 
     let mt = Rc::new(RefCell::new(VmTable::new()));
     mt.borrow_mut().set_str(

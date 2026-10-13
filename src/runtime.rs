@@ -2920,6 +2920,8 @@ fn get_runtime_frame_info(level: usize) -> Option<Table> {
 struct RuntimeCoroutine {
     vm: crate::vm::machine::VM,
     co_id: usize,
+    /// The VM's handle for the coroutine, which its `resume` requires.
+    vm_handle: crate::vm::value::Value,
     status: Rc<RefCell<String>>,
 }
 
@@ -2981,21 +2983,15 @@ fn runtime_coroutine_create(args: Vec<Value>) -> Result<Vec<Value>, String> {
         upvalues: Vec::new(),
     }));
     let co_id = vm.next_co_id;
-    vm.next_co_id += 1;
-    let co_state = crate::vm::machine::CoroutineState {
-        stack: Vec::new(),
-        frames: Vec::new(),
-        status: "suspended".to_string(),
-        func: closure,
-        yield_callee: 0,
-        yield_retc: 0,
-        yield_values: Vec::new(),
-        open_upvalues: Vec::new(),
-    };
-    vm.coroutines.insert(co_id, Rc::new(RefCell::new(co_state)));
+    let vm_handle = crate::vm::libs::coroutine::new_coroutine(&mut vm, closure);
 
     let status = Rc::new(RefCell::new("suspended".to_string()));
-    let handle = RuntimeCoroutine { vm, co_id, status };
+    let handle = RuntimeCoroutine {
+        vm,
+        co_id,
+        vm_handle,
+        status,
+    };
 
     COROUTINE_REGISTRY.with(|reg| {
         reg.borrow_mut().insert(id, handle);
@@ -3049,17 +3045,10 @@ fn runtime_coroutine_resume(args: Vec<Value>) -> Result<Vec<Value>, String> {
         ]);
     }
 
-    let mut vm_args = vec![crate::vm::value::Value::Table(Rc::new(RefCell::new({
-        let mut tbl = crate::vm::value::VmTable::new();
-        let co_id =
-            COROUTINE_REGISTRY.with(|reg| reg.borrow().get(&id).map(|h| h.co_id).unwrap_or(0));
-        tbl.set_str(
-            "_id",
-            crate::vm::value::Value::from_bigint(num_bigint::BigInt::from(co_id)),
-        );
-        tbl.set_str("status", crate::vm::value::Value::str("suspended"));
-        tbl
-    })))];
+    let vm_handle = COROUTINE_REGISTRY
+        .with(|reg| reg.borrow().get(&id).map(|h| h.vm_handle.clone()))
+        .ok_or_else(|| "coroutine not found in registry".to_string())?;
+    let mut vm_args = vec![vm_handle];
 
     for a in &args[1..] {
         vm_args.push(runtime_to_vm_val(a, 0)?);
@@ -3081,7 +3070,7 @@ fn runtime_coroutine_resume(args: Vec<Value>) -> Result<Vec<Value>, String> {
                 COROUTINE_REGISTRY.with(|reg| {
                     let b = reg.borrow();
                     b.get(&id)
-                        .and_then(|h| h.vm.coroutines.get(&h.co_id))
+                        .and_then(|h| h.vm.co_state(h.co_id))
                         .map(|c| c.borrow().status.clone())
                         .unwrap_or_else(|| "dead".to_string())
                 })
