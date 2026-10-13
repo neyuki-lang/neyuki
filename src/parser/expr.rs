@@ -269,6 +269,7 @@ pub fn parse_table(parser: &mut Parser) -> Result<Expr, String> {
                 let value = parse_expr(parser)?;
                 entries.push(TableEntry {
                     key: Some(key),
+                    computed: None,
                     value,
                 });
             } else if parser.check_symbol("[")
@@ -288,11 +289,22 @@ pub fn parse_table(parser: &mut Parser) -> Result<Expr, String> {
                 let value = parse_expr(parser)?;
                 entries.push(TableEntry {
                     key: Some(key),
+                    computed: None,
+                    value,
+                });
+            } else if parser.match_symbol("[") {
+                let key = parse_expr(parser)?;
+                parser.expect_symbol("]")?;
+                parser.expect_symbol("=")?;
+                let value = parse_expr(parser)?;
+                entries.push(TableEntry {
+                    key: None,
+                    computed: Some(Box::new(key)),
                     value,
                 });
             } else {
                 let value = parse_expr(parser)?;
-                entries.push(TableEntry { key: None, value });
+                entries.push(TableEntry::positional(value));
             }
 
             if !parser.match_symbol(",") {

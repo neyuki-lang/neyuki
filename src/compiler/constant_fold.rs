@@ -622,6 +622,7 @@ fn fold_expr_scoped(expr: Expr, shadowed: &HashSet<String>) -> Expr {
                 .into_iter()
                 .map(|e| TableEntry {
                     key: e.key,
+                    computed: e.computed.map(|k| Box::new(fold_expr_scoped(*k, shadowed))),
                     value: fold_expr_scoped(e.value, shadowed),
                 })
                 .collect(),

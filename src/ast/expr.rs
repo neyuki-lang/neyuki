@@ -253,17 +253,28 @@ pub enum InterpPart {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TableEntry {
+    /// `name = value` and `["name"] = value`.
     pub key: Option<String>,
+    /// `[expr] = value` for any other key.
+    pub computed: Option<Box<Expr>>,
     pub value: Expr,
 }
 
 impl TableEntry {
+    pub fn positional(value: Expr) -> Self {
+        Self {
+            key: None,
+            computed: None,
+            value,
+        }
+    }
+
     pub fn is_array_element(&self) -> bool {
-        self.key.is_none()
+        self.key.is_none() && self.computed.is_none()
     }
 
     pub fn is_record_field(&self) -> bool {
-        self.key.is_some()
+        !self.is_array_element()
     }
 }
 

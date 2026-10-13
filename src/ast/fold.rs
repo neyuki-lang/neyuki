@@ -238,6 +238,7 @@ pub fn walk_fold_expr<F: AstFolder + ?Sized>(folder: &mut F, expr: Expr) -> Expr
                 .into_iter()
                 .map(|entry| TableEntry {
                     key: entry.key,
+                    computed: entry.computed.map(|k| Box::new(folder.fold_expr(*k))),
                     value: folder.fold_expr(entry.value),
                 })
                 .collect(),

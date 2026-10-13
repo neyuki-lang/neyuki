@@ -177,7 +177,13 @@ pub fn walk_expr_mut<V: AstVisitorMut + ?Sized>(visitor: &mut V, expr: &mut Expr
             visitor.visit_expr_mut(right);
         }
         Expr::Table { entries, .. } => {
-            for TableEntry { value, .. } in entries {
+            for TableEntry {
+                computed, value, ..
+            } in entries
+            {
+                if let Some(key) = computed {
+                    visitor.visit_expr_mut(key);
+                }
                 visitor.visit_expr_mut(value);
             }
         }

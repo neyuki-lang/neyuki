@@ -101,6 +101,14 @@ end
 local x, y, z = rotate(1, 2, 3)
 assert(x == 2 and y == 3 and z == 1, "multiple returns keep their order")
 
+-- computed keys in constructors
+local prefix = "dyn"
+local built = { [1] = "a", [prefix .. "amic"] = 2, [true] = "yes", [2.5] = "f", ["s"] = 3 }
+assert(built[1] == "a" and built.dynamic == 2 and built[true] == "yes", "computed keys")
+assert(built[2.5] == "f" and built.s == 3, "float and string computed keys")
+local positional = { [1] = "overwritten", "first", "second" }
+assert(positional[1] == "first" and #positional == 2, "positional entries count from 1")
+
 -- globals
 assert(_G.print == print, "_G reads globals")
 assert(string.find(_VERSION, "Neyuki") == 1, "_VERSION")

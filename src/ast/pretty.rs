@@ -295,6 +295,12 @@ pub fn pretty_print_expr(expr: &Expr) -> String {
                 .map(|e| {
                     if let Some(k) = &e.key {
                         format!("{} = {}", k, pretty_print_expr(&e.value))
+                    } else if let Some(k) = &e.computed {
+                        format!(
+                            "[{}] = {}",
+                            pretty_print_expr(k),
+                            pretty_print_expr(&e.value)
+                        )
                     } else {
                         pretty_print_expr(&e.value)
                     }
@@ -333,6 +339,8 @@ pub fn to_sexpr(expr: &Expr) -> String {
             for e in entries {
                 if let Some(k) = &e.key {
                     out.push_str(&format!(" (:{} {})", k, to_sexpr(&e.value)));
+                } else if let Some(k) = &e.computed {
+                    out.push_str(&format!(" ([{}] {})", to_sexpr(k), to_sexpr(&e.value)));
                 } else {
                     out.push_str(&format!(" {}", to_sexpr(&e.value)));
                 }

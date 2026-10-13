@@ -603,7 +603,7 @@ impl IrBuilder {
                 // so it is appended as a run rather than as one element.
                 let trailing = entries
                     .last()
-                    .filter(|e| e.key.is_none())
+                    .filter(|e| e.is_array_element())
                     .filter(|e| Self::is_multi_value(&e.value))
                     .map(|e| e.value.clone());
                 let fixed_entries = if trailing.is_some() {
@@ -611,8 +611,18 @@ impl IrBuilder {
                 } else {
                     &entries[..]
                 };
+                let has_computed = entries.iter().any(|e| e.computed.is_some());
+                let mut position: u64 = 0;
                 for entry in fixed_entries {
-                    if let Some(ref k) = entry.key {
+                    if let Some(key_expr) = &entry.computed {
+                        let key_var = self.compile_expr(key_expr, None);
+                        let val_var = self.compile_expr(&entry.value, None);
+                        self.emit(IrInst::SetTable {
+                            table: dst,
+                            key: key_var,
+                            val: val_var,
+                        });
+                    } else if let Some(ref k) = entry.key {
                         let key_var = self.alloc_var();
                         self.emit(IrInst::LoadConst {
                             dst: key_var,
@@ -623,6 +633,21 @@ impl IrBuilder {
                             table: dst,
                             key: key_var,
                             val: val_var,
+                        });
+                    } else if has_computed {
+                        // A computed key may already have claimed this
+                        // index, so positional entries say theirs.
+                        position += 1;
+                        let key_var = self.alloc_var();
+                        self.emit(IrInst::LoadConst {
+                            dst: key_var,
+                            val: IrConstant::Int(BigInt::from(position)),
+                        });
+                        let elem_var = self.compile_expr(&entry.value, None);
+                        self.emit(IrInst::SetTable {
+                            table: dst,
+                            key: key_var,
+                            val: elem_var,
                         });
                     } else {
                         let elem_var = self.compile_expr(&entry.value, None);

@@ -620,6 +620,9 @@ impl<'a> SemanticAnalyzer<'a> {
             }
             Expr::Table { entries, .. } => {
                 for entry in entries {
+                    if let Some(key) = &entry.computed {
+                        self.analyze_expr(key);
+                    }
                     self.analyze_expr(&entry.value);
                 }
             }
@@ -663,7 +666,7 @@ impl<'a> SemanticAnalyzer<'a> {
             Expr::Table { entries, .. } => {
                 if entries.is_empty() {
                     NeyukiType::Table
-                } else if entries.iter().all(|e| e.key.is_none()) {
+                } else if entries.iter().all(|e| e.is_array_element()) {
                     let elem_ty = entries.iter().fold(NeyukiType::Never, |acc, e| {
                         acc.lub(&self.infer_expr_type(&e.value))
                     });

@@ -179,6 +179,9 @@ pub fn walk_expr<V: AstVisitor + ?Sized>(visitor: &mut V, expr: &Expr) {
         }
         Expr::Table { entries, .. } => {
             for entry in entries {
+                if let Some(key) = &entry.computed {
+                    visitor.visit_expr(key);
+                }
                 visitor.visit_expr(&entry.value);
             }
         }
