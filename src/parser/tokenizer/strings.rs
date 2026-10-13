@@ -21,6 +21,7 @@ impl StringEngine {
     }
 
     pub fn scan_quoted_string(scanner: &mut Scanner<'_>, quote: char) -> Result<String, String> {
+        let start_line = scanner.line();
         scanner.advance(); // consume opening quote
         let mut out = String::new();
 
@@ -31,7 +32,10 @@ impl StringEngine {
             }
             if ch == '\\' {
                 if scanner.is_at_end() {
-                    return Err("Unfinished string escape at EOF".to_string());
+                    return Err(format!(
+                        "[line {}] unfinished string escape at EOF",
+                        scanner.line()
+                    ));
                 }
                 let esc = scanner.advance();
                 match esc {
@@ -50,7 +54,13 @@ impl StringEngine {
                         let hi = scanner.advance();
                         let lo = scanner.advance();
                         let hex = format!("{}{}", hi, lo);
-                        let value = u8::from_str_radix(&hex, 16).unwrap_or(0);
+                        let value = u8::from_str_radix(&hex, 16).map_err(|_| {
+                            format!(
+                                "[line {}] invalid escape \\x{}: expected two hex digits",
+                                scanner.line(),
+                                hex
+                            )
+                        })?;
                         out.push(value as char);
                     }
                     'u' if scanner.peek() == '{' => {
@@ -59,13 +69,25 @@ impl StringEngine {
                         while !scanner.is_at_end() && scanner.peek() != '}' {
                             digits.push(scanner.advance());
                         }
-                        if scanner.peek() == '}' {
-                            scanner.advance();
+                        if scanner.peek() != '}' {
+                            return Err(format!(
+                                "[line {}] unfinished escape \\u{{{}",
+                                scanner.line(),
+                                digits
+                            ));
                         }
-                        let code = u32::from_str_radix(&digits, 16).unwrap_or(0);
-                        if let Some(c) = char::from_u32(code) {
-                            out.push(c);
-                        }
+                        scanner.advance();
+                        let c = u32::from_str_radix(&digits, 16)
+                            .ok()
+                            .and_then(char::from_u32)
+                            .ok_or_else(|| {
+                                format!(
+                                    "[line {}] invalid escape \\u{{{}}}: not a Unicode scalar value",
+                                    scanner.line(),
+                                    digits
+                                )
+                            })?;
+                        out.push(c);
                     }
                     'z' => {
                         while !scanner.is_at_end()
@@ -81,13 +103,14 @@ impl StringEngine {
             }
         }
 
-        Err("Unfinished string literal".to_string())
+        Err(format!("[line {}] unfinished string literal", start_line))
     }
 
     pub fn scan_long_bracket(scanner: &mut Scanner<'_>) -> Result<String, String> {
         let start_pos = scanner.current_pos();
+        let start_line = scanner.line();
         if scanner.peek() != '[' {
-            return Err("Long bracket expected".to_string());
+            return Err(format!("[line {}] long bracket expected", start_line));
         }
         scanner.advance();
 
@@ -99,7 +122,7 @@ impl StringEngine {
 
         if scanner.peek() != '[' {
             scanner.restore(start_pos);
-            return Err("Long bracket expected".to_string());
+            return Err(format!("[line {}] long bracket expected", start_line));
         }
         scanner.advance();
 
@@ -125,7 +148,7 @@ impl StringEngine {
 
         let Some(index) = found else {
             scanner.restore(start_pos);
-            return Err("Unfinished long bracket".to_string());
+            return Err(format!("[line {}] unfinished long bracket", start_line));
         };
 
         let content = scanner.slice_from(content_start)[..index - content_start].to_owned();
@@ -134,6 +157,7 @@ impl StringEngine {
     }
 
     pub fn scan_interpolated_string(scanner: &mut Scanner<'_>) -> Result<String, String> {
+        let start_line = scanner.line();
         scanner.advance(); // consume opening backtick
         let mut out = String::new();
 
@@ -169,6 +193,9 @@ impl StringEngine {
             }
         }
 
-        Err("Unfinished interpolated string".to_string())
+        Err(format!(
+            "[line {}] unfinished interpolated string",
+            start_line
+        ))
     }
 }

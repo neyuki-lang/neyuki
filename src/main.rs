@@ -8,7 +8,27 @@ mod fuzz;
 
 use neyuki::*;
 
+/// Stack for the thread that runs every action. The parser caps nesting, but
+/// the passes after it recurse once per level with large debug-build frames,
+/// and the main thread only gets 1 MiB on Windows. This only reserves address
+/// space; pages are committed as they are touched.
+const MAIN_STACK_SIZE: usize = 256 * 1024 * 1024;
+
 fn main() {
+    let worker = std::thread::Builder::new()
+        .name("main".to_string())
+        .stack_size(MAIN_STACK_SIZE)
+        .spawn(run_cli)
+        .unwrap_or_else(|err| {
+            eprintln!("failed to start the main thread: {}", err);
+            process::exit(1);
+        });
+    if worker.join().is_err() {
+        process::exit(101);
+    }
+}
+
+fn run_cli() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         eprintln!("Usage: {} <action> [path]", args[0]);

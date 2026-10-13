@@ -300,4 +300,57 @@ mod tests {
         let res = vm.execute(proto).expect("exec failed");
         assert_eq!(res.to_string(), "30");
     }
+
+    /// The parser's nesting limit has to keep every later pass inside an
+    /// ordinary thread's stack: library users and `cargo test` do not get the
+    /// CLI's large one. The deepest programs it accepts, in each shape that
+    /// recurses, must compile through both pipelines and run on both engines
+    /// on a 2 MiB thread in a debug build.
+    #[test]
+    fn test_deepest_accepted_programs_fit_a_default_stack() {
+        type Shape = fn(usize) -> String;
+        let shapes: [(&str, Shape); 6] = [
+            ("blocks", |n| {
+                format!("{}x = 1{}", "if true then\n".repeat(n), "\nend".repeat(n))
+            }),
+            ("loops", |n| {
+                format!(
+                    "{}x = 1{}",
+                    "while x == nil do\n".repeat(n),
+                    "\nend".repeat(n)
+                )
+            }),
+            ("parentheses", |n| {
+                format!("x = {}1{}", "(".repeat(n), ")".repeat(n))
+            }),
+            ("operator chain", |n| format!("x = 1{}", " + 1".repeat(n))),
+            ("tables", |n| {
+                format!("x = {}{}", "{".repeat(n), "}".repeat(n))
+            }),
+            ("calls", |n| {
+                format!("x = {}1{}", "tostring(".repeat(n), ")".repeat(n))
+            }),
+        ];
+        let worker = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || {
+                for (name, shape) in shapes {
+                    let deepest = (1..=crate::parser::MAX_PARSE_DEPTH)
+                        .rev()
+                        .find(|&n| compile_source(&shape(n)).is_ok())
+                        .unwrap_or_else(|| panic!("no {} program parses", name));
+                    assert!(deepest >= 60, "{} only nest {} deep", name, deepest);
+                    let source = format!("local x\n{}", shape(deepest));
+                    let stmts = compile_source(&source).expect(name);
+                    try_compile_to_proto(&stmts).expect(name);
+                    let proto = try_compile_to_proto_via_ir(&stmts).expect(name);
+                    crate::vm::machine::VM::new().execute(proto).expect(name);
+                    crate::runtime::run_source(&source).expect(name);
+                }
+            })
+            .unwrap();
+        worker
+            .join()
+            .expect("a pass overflowed or failed on the deepest program");
+    }
 }

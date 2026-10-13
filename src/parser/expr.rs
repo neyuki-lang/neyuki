@@ -11,6 +11,13 @@ pub fn parse_expr(parser: &mut Parser) -> Result<Expr, String> {
 }
 
 pub fn parse_precedence(parser: &mut Parser, min_prec: u8) -> Result<Expr, String> {
+    let saved_depth = parser.depth;
+    let res = parse_precedence_chain(parser, min_prec);
+    parser.depth = saved_depth;
+    res
+}
+
+fn parse_precedence_chain(parser: &mut Parser, min_prec: u8) -> Result<Expr, String> {
     let mut left = parse_prefix(parser)?;
 
     loop {
@@ -25,6 +32,9 @@ pub fn parse_precedence(parser: &mut Parser, min_prec: u8) -> Result<Expr, Strin
             break;
         }
         parser.pos += 1;
+        // Each operator adds a level to the left-deep tree; the depth is
+        // restored once the whole chain is parsed.
+        parser.enter()?;
         let next_min = prec + 1;
         let right = parse_precedence(parser, next_min)?;
         let bin_op = BinOp::parse_str(&op).ok_or_else(|| {
@@ -53,14 +63,7 @@ pub fn parse_precedence(parser: &mut Parser, min_prec: u8) -> Result<Expr, Strin
 }
 
 pub fn parse_prefix(parser: &mut Parser) -> Result<Expr, String> {
-    const MAX_PARSE_DEPTH: usize = 120;
-    if parser.depth >= MAX_PARSE_DEPTH {
-        return Err(format!(
-            "[line {}] parse recursion depth limit (120) exceeded",
-            parser.peek().line
-        ));
-    }
-    parser.depth += 1;
+    parser.enter()?;
     let res = parse_prefix_inner(parser);
     parser.depth -= 1;
     res

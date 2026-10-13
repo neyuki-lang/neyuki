@@ -215,7 +215,7 @@ impl CostModel {
                 for s in body {
                     cost = cost.saturating_add(self.stmt_cost(s));
                 }
-                cost * 3 // Weighted higher for loop bodies
+                cost.saturating_mul(3) // Weighted higher for loop bodies
             }
             Stmt::Repeat {
                 body, condition, ..
@@ -224,14 +224,14 @@ impl CostModel {
                 for s in body {
                     cost = cost.saturating_add(self.stmt_cost(s));
                 }
-                cost * 3
+                cost.saturating_mul(3)
             }
             Stmt::NumericFor { body, .. } | Stmt::For { body, .. } => {
                 let mut cost = self.branch_cost * 2;
                 for s in body {
                     cost = cost.saturating_add(self.stmt_cost(s));
                 }
-                cost * 4
+                cost.saturating_mul(4)
             }
             Stmt::Function { body, .. } => {
                 let mut cost = self.closure_alloc_cost;

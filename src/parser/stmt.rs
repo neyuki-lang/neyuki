@@ -8,7 +8,10 @@ use crate::ast::*;
 
 pub fn parse_statement(parser: &mut Parser) -> Result<Stmt, String> {
     let start = parser.current_loc();
-    let stmt = parse_statement_inner(parser)?;
+    parser.enter()?;
+    let stmt = parse_statement_inner(parser);
+    parser.depth -= 1;
+    let stmt = stmt?;
     parser.record_span(stmt.node_id(), start);
     Ok(stmt)
 }

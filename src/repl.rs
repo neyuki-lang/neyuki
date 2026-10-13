@@ -34,9 +34,8 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 /// the standard library) survive across chunks. Uses the unchecked IR
 /// pipeline on purpose: each chunk cannot be whole-program analyzed, so
 /// unknown names resolve at runtime (nil when missing), exactly like the
-/// Lua REPL. Even panics from malformed input (e.g. the lexer on
-/// unterminated strings) surface as errors: an interactive loop must never
-/// die on input.
+/// Lua REPL. Even a panic from an interpreter bug surfaces as an error: an
+/// interactive loop must never die on input.
 pub fn eval_chunk(vm: &mut VM, source: &str) -> Result<Option<String>, String> {
     let run = || -> Result<Option<String>, String> {
         let stmts = crate::compiler::compile_source(source).map_err(|e| e.to_string())?;

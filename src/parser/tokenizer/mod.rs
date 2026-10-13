@@ -27,12 +27,12 @@ impl<'a> TokenizerEngine<'a> {
         }
     }
 
-    pub fn tokenize(&mut self) -> Vec<Token> {
-        let (tokens, _) = self.tokenize_with_comments();
-        tokens
+    pub fn tokenize(&mut self) -> Result<Vec<Token>, String> {
+        let (tokens, _) = self.tokenize_with_comments()?;
+        Ok(tokens)
     }
 
-    pub fn tokenize_with_comments(&mut self) -> (Vec<Token>, Vec<DocComment>) {
+    pub fn tokenize_with_comments(&mut self) -> Result<(Vec<Token>, Vec<DocComment>), String> {
         let mut tokens = Vec::new();
         let mut doc_comments = Vec::new();
 
@@ -66,8 +66,7 @@ impl<'a> TokenizerEngine<'a> {
                 });
                 self.can_start_comment = false;
             } else if StringEngine::is_string_start(ch) {
-                let s = StringEngine::scan_quoted_string(&mut self.scanner, ch)
-                    .unwrap_or_else(|e| panic!("{}", e));
+                let s = StringEngine::scan_quoted_string(&mut self.scanner, ch)?;
                 tokens.push(Token {
                     kind: "string",
                     value: s,
@@ -76,8 +75,7 @@ impl<'a> TokenizerEngine<'a> {
                 });
                 self.can_start_comment = false;
             } else if StringEngine::is_long_bracket_start(&self.scanner) {
-                let s = StringEngine::scan_long_bracket(&mut self.scanner)
-                    .unwrap_or_else(|e| panic!("{}", e));
+                let s = StringEngine::scan_long_bracket(&mut self.scanner)?;
                 tokens.push(Token {
                     kind: "string",
                     value: s,
@@ -86,8 +84,7 @@ impl<'a> TokenizerEngine<'a> {
                 });
                 self.can_start_comment = false;
             } else if StringEngine::is_interp_start(ch) {
-                let s = StringEngine::scan_interpolated_string(&mut self.scanner)
-                    .unwrap_or_else(|e| panic!("{}", e));
+                let s = StringEngine::scan_interpolated_string(&mut self.scanner)?;
                 tokens.push(Token {
                     kind: "interp",
                     value: s,
@@ -96,6 +93,9 @@ impl<'a> TokenizerEngine<'a> {
                 });
                 self.can_start_comment = false;
             } else {
+                if ch == '\0' {
+                    return Err(format!("[line {}] unexpected null byte", start_line));
+                }
                 let sym = self.read_fast_symbol();
                 tokens.push(Token {
                     kind: "symbol",
@@ -114,7 +114,7 @@ impl<'a> TokenizerEngine<'a> {
             col: self.scanner.col(),
         });
 
-        (tokens, doc_comments)
+        Ok((tokens, doc_comments))
     }
 
     fn skip_whitespace_and_comments(&mut self, comments: &mut Vec<DocComment>) {
@@ -346,7 +346,7 @@ impl<'a> TokenizerEngine<'a> {
             _ => {
                 let advanced = self.scanner.advance();
                 if advanced == '\0' {
-                    panic!("Unexpected null byte at line {}", self.scanner.line());
+                    unreachable!("null bytes are rejected before symbol scanning");
                 }
                 advanced.to_string()
             }
@@ -361,7 +361,7 @@ mod tests {
     #[test]
     fn test_tokenizer_numbers_and_symbols() {
         let mut tokenizer = TokenizerEngine::new("0x1A + 0b101 * 3.14e-2");
-        let tokens = tokenizer.tokenize();
+        let tokens = tokenizer.tokenize().unwrap();
         assert_eq!(tokens[0].kind, "number");
         assert_eq!(tokens[0].value, "0x1A");
         assert_eq!(tokens[1].kind, "symbol");
@@ -378,7 +378,7 @@ mod tests {
     fn test_tokenizer_doc_comments() {
         let source = "---@param name string\nlocal name = \"neyuki\"";
         let mut tokenizer = TokenizerEngine::new(source);
-        let (tokens, docs) = tokenizer.tokenize_with_comments();
+        let (tokens, docs) = tokenizer.tokenize_with_comments().unwrap();
         assert_eq!(docs.len(), 1);
         assert_eq!(docs[0].tag.as_deref(), Some("@param"));
         assert_eq!(tokens[0].kind, "keyword");
@@ -388,7 +388,7 @@ mod tests {
     #[test]
     fn test_tokenizer_interpolated_string() {
         let mut tokenizer = TokenizerEngine::new("`hello {user}!`");
-        let tokens = tokenizer.tokenize();
+        let tokens = tokenizer.tokenize().unwrap();
         assert_eq!(tokens[0].kind, "interp");
         assert_eq!(tokens[0].value, "hello {user}!");
     }

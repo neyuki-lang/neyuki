@@ -16,6 +16,13 @@ pub use tokenizer::{DocComment, TokenizerEngine};
 
 use crate::lexer::Token;
 
+/// How deeply statements and expressions may nest. Every later pass (sema,
+/// folding, codegen, the IR builder) recurses over the tree, so this bounds
+/// their recursion too. Binary operator chains count one level per operator,
+/// since `a + b + c` builds a left-deep tree even though parsing it does not
+/// recurse.
+pub(crate) const MAX_PARSE_DEPTH: usize = 120;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ParserSnapshot {
     pub pos: usize,
@@ -31,6 +38,7 @@ pub struct ParserStats {
 #[derive(Clone, Debug)]
 pub struct Parser {
     pub(crate) tokens: Vec<Token>,
+    pub(crate) lex_error: Option<String>,
     pub(crate) pos: usize,
     pub(crate) depth: usize,
     pub(crate) span_pool: SpanPool,
@@ -40,9 +48,13 @@ pub struct Parser {
 impl Parser {
     pub fn new(source: &str) -> Self {
         let mut tokenizer = TokenizerEngine::new(source);
-        let tokens = tokenizer.tokenize();
+        let (tokens, lex_error) = match tokenizer.tokenize() {
+            Ok(tokens) => (tokens, None),
+            Err(err) => (vec![Self::eof_token()], Some(err)),
+        };
         Self {
             tokens,
+            lex_error,
             pos: 0,
             depth: 0,
             span_pool: SpanPool::new(),
@@ -52,10 +64,14 @@ impl Parser {
 
     pub fn with_comments(source: &str) -> (Self, Vec<DocComment>) {
         let mut tokenizer = TokenizerEngine::new(source);
-        let (tokens, comments) = tokenizer.tokenize_with_comments();
+        let ((tokens, comments), lex_error) = match tokenizer.tokenize_with_comments() {
+            Ok(lexed) => (lexed, None),
+            Err(err) => ((vec![Self::eof_token()], Vec::new()), Some(err)),
+        };
         (
             Self {
                 tokens,
+                lex_error,
                 pos: 0,
                 depth: 0,
                 span_pool: SpanPool::new(),
@@ -63,6 +79,29 @@ impl Parser {
             },
             comments,
         )
+    }
+
+    fn eof_token() -> Token {
+        Token {
+            kind: "eof",
+            value: String::new(),
+            line: 1,
+            col: 1,
+        }
+    }
+
+    /// Enters one nesting level, failing once `MAX_PARSE_DEPTH` is reached.
+    /// Callers restore `depth` when the nested construct is done.
+    pub(crate) fn enter(&mut self) -> Result<(), String> {
+        if self.depth >= MAX_PARSE_DEPTH {
+            return Err(format!(
+                "[line {}] parse recursion depth limit ({}) exceeded",
+                self.peek().line,
+                MAX_PARSE_DEPTH
+            ));
+        }
+        self.depth += 1;
+        Ok(())
     }
 
     pub fn snapshot(&self) -> ParserSnapshot {
@@ -118,6 +157,9 @@ impl Parser {
     }
 
     pub fn parse_program(&mut self) -> Result<(Vec<Stmt>, SpanPool), String> {
+        if let Some(err) = self.lex_error.take() {
+            return Err(err);
+        }
         let mut program = Vec::new();
         while !self.is_eof() {
             if self.check_keyword("end")
@@ -475,14 +517,39 @@ mod tests {
 
     #[test]
     fn test_parser_returns_err_on_depth_limit() {
+        // Deeply nested parentheses past the limit should return Err, not panic
         let mut expr = "1".to_string();
-        for _ in 0..130 {
+        for _ in 0..super::MAX_PARSE_DEPTH + 10 {
             expr = format!("({})", expr);
         }
         let mut parser = Parser::new(&expr);
         let res = parser.parse_program();
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("parse recursion depth limit"));
+    }
+
+    #[test]
+    fn test_parser_limits_nested_blocks_and_operator_chains() {
+        let depth = super::MAX_PARSE_DEPTH + 10;
+        let blocks = format!(
+            "{}print(1){}",
+            "if true then\n".repeat(depth),
+            "\nend".repeat(depth)
+        );
+        let chain = format!("local x = 1{}", " + 1".repeat(depth));
+        for source in [blocks, chain] {
+            let err = Parser::new(&source).parse_program().unwrap_err();
+            assert!(err.contains("parse recursion depth limit"), "{}", err);
+        }
+        // Chains well inside the limit still parse.
+        let fine = format!("local x = 1{}", " + 1".repeat(100));
+        assert!(Parser::new(&fine).parse_program().is_ok());
+    }
+
+    #[test]
+    fn test_parser_reports_lexer_errors() {
+        let err = Parser::new("print(\"abc").parse_program().unwrap_err();
+        assert!(err.contains("unfinished string literal"), "{}", err);
     }
 
     #[test]

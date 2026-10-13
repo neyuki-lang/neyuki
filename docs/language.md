@@ -112,6 +112,8 @@ end
 
 Conditions must evaluate to booleans. `break` and `continue` control loops.
 
+Statements and expressions may nest at most 120 levels deep. Each binary operator in a chain such as `a + b + c` counts as one level, so a single expression may chain at most about 120 operators of the same precedence; split longer ones across several statements.
+
 ## Strings
 
 Single-quoted, double-quoted, and long-bracket strings are supported. Backtick-style interpolation evaluates expressions inside braces:

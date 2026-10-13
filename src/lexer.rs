@@ -7,7 +7,7 @@ mod tests {
     #[test]
     fn tokenizes_keywords_numbers_and_strings() {
         let mut lexer = Lexer::new("local x = 42\nif x != 0 then\n  print(\"ok\")\nend");
-        let tokens = lexer.tokenize();
+        let tokens = lexer.tokenize().unwrap();
 
         assert_eq!(tokens[0].kind, "keyword");
         assert_eq!(tokens[0].value, "local");
@@ -34,7 +34,7 @@ mod tests {
     #[test]
     fn reads_long_bracket_strings() {
         let mut lexer = Lexer::new("local s = [[hello\nworld]]");
-        let tokens = lexer.tokenize();
+        let tokens = lexer.tokenize().unwrap();
         assert_eq!(tokens[3].kind, "string");
         assert_eq!(tokens[3].value, "hello\nworld");
     }
@@ -42,7 +42,7 @@ mod tests {
     #[test]
     fn tracks_line_and_column() {
         let mut lexer = Lexer::new("local x = 42\nif");
-        let tokens = lexer.tokenize();
+        let tokens = lexer.tokenize().unwrap();
         assert_eq!(tokens[0].line, 1);
         assert_eq!(tokens[0].col, 1); // "local" starts at col 1
         assert_eq!(tokens[1].col, 7); // "x" starts at col 7
@@ -50,6 +50,24 @@ mod tests {
         assert_eq!(tokens[3].col, 11); // "42" at col 11
         assert_eq!(tokens[4].line, 2);
         assert_eq!(tokens[4].col, 1); // "if" starts at col 1 of line 2
+    }
+
+    #[test]
+    fn reports_malformed_input_as_errors() {
+        let cases = [
+            (r#"local s = "abc"#, "unfinished string literal"),
+            ("local s = [[abc", "unfinished long bracket"),
+            ("local s = `abc", "unfinished interpolated string"),
+            (r#"local s = "\u{110000}""#, "not a Unicode scalar value"),
+            (r#"local s = "\u{41"#, "unfinished escape"),
+            (r#"local s = "\xZZ""#, "expected two hex digits"),
+        ];
+        for (source, expected) in cases {
+            let err = Lexer::new(source).tokenize().unwrap_err();
+            assert!(err.contains(expected), "{:?}: {}", source, err);
+        }
+        let tokens = Lexer::new(r#""\u{1F600}\x41""#).tokenize().unwrap();
+        assert_eq!(tokens[0].value, "\u{1F600}A");
     }
 }
 
@@ -74,12 +92,12 @@ impl Lexer {
         }
     }
 
-    pub fn tokenize(&mut self) -> Vec<Token> {
+    pub fn tokenize(&mut self) -> Result<Vec<Token>, String> {
         let mut engine = TokenizerEngine::new(&self.src);
         engine.tokenize()
     }
 
-    pub fn tokenize_with_comments(&mut self) -> (Vec<Token>, Vec<DocComment>) {
+    pub fn tokenize_with_comments(&mut self) -> Result<(Vec<Token>, Vec<DocComment>), String> {
         let mut engine = TokenizerEngine::new(&self.src);
         engine.tokenize_with_comments()
     }
