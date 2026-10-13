@@ -14,7 +14,7 @@ local function tracer(event: string)
     if info == nil then
         return
     end
-    if info.func == profile.start or info.func == profile.stop or info.func == profile.is_running then
+    if info.func == profile.start or info.func == profile.stop or info.func == profile.isRunning then
         return
     end
     if event == "call" or event == "tail call" then
@@ -60,7 +60,7 @@ function profile.stop(): string
     return table.concat(lines, "\n")
 end
 
-function profile.is_running(): boolean
+function profile.isRunning(): boolean
     return running
 end
 

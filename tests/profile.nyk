@@ -8,13 +8,13 @@ local function workload(n)
     return s
 end
 
-assert(profile.is_running() == false)
+assert(profile.isRunning() == false)
 profile.start()
-assert(profile.is_running() == true)
+assert(profile.isRunning() == true)
 local r = workload(100)
 assert(r == 5050)
 local report = profile.stop()
-assert(profile.is_running() == false)
+assert(profile.isRunning() == false)
 
 -- The profiled function must show up with an exact call count on its own
 -- report line; timing values are environment-dependent, so only presence
