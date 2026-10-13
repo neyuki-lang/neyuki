@@ -254,6 +254,16 @@ fn driver_name(options: &OpenOptions) -> Result<&'static str, String> {
     }
 }
 
+/// Whether `host` names this machine, so a connection to it never crosses a
+/// network.
+fn is_local_host(host: &str) -> bool {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
 fn open_postgres(options: &OpenOptions) -> Result<postgres::Client, String> {
     let mut config = match &options.url {
         Some(url) => url
@@ -279,6 +289,9 @@ fn open_postgres(options: &OpenOptions) -> Result<postgres::Client, String> {
     if let Some(timeout) = options.timeout {
         config.connect_timeout(timeout);
     }
+    if config.get_hosts().is_empty() {
+        config.host("localhost");
+    }
     match options.ssl {
         Some(true) => {
             config.ssl_mode(postgres::config::SslMode::Require);
@@ -286,10 +299,23 @@ fn open_postgres(options: &OpenOptions) -> Result<postgres::Client, String> {
         Some(false) => {
             config.ssl_mode(postgres::config::SslMode::Disable);
         }
-        None => {}
-    }
-    if config.get_hosts().is_empty() {
-        config.host("localhost");
+        None => {
+            // Left unset, the driver would try TLS but fall back to plaintext,
+            // which anyone on the path can force. Remote servers must use TLS
+            // unless the URL picks its own `sslmode`.
+            let url_sets_mode = options
+                .url
+                .as_ref()
+                .is_some_and(|url| url.to_ascii_lowercase().contains("sslmode="));
+            let all_local = config.get_hosts().iter().all(|host| match host {
+                postgres::config::Host::Tcp(name) => is_local_host(name),
+                #[allow(unreachable_patterns)]
+                _ => true,
+            });
+            if !url_sets_mode && !all_local {
+                config.ssl_mode(postgres::config::SslMode::Require);
+            }
+        }
     }
     if config.get_user().is_none() {
         return Err("user must be provided".to_string());
@@ -331,7 +357,15 @@ fn open_mysql(options: &OpenOptions) -> Result<mysql::Conn, String> {
     match options.ssl {
         Some(true) => builder = builder.ssl_opts(mysql::SslOpts::default()),
         Some(false) => builder = builder.ssl_opts(None),
-        None => {}
+        None => {
+            // Unset, the driver never uses TLS. Remote servers must, unless
+            // the URL already configures it.
+            let opts = mysql::Opts::from(builder.clone());
+            let remote = opts.get_socket().is_none() && !is_local_host(&opts.get_ip_or_hostname());
+            if remote && opts.get_ssl_opts().is_none() {
+                builder = builder.ssl_opts(mysql::SslOpts::default());
+            }
+        }
     }
     mysql::Conn::new(builder).map_err(my_error)
 }
@@ -1042,5 +1076,28 @@ mod tests {
         );
         assert!(driver_name(&options(None, None)).is_err());
         assert!(driver_name(&options(None, Some("nope"))).is_err());
+    }
+
+    #[test]
+    fn only_loopback_hosts_count_as_local() {
+        for host in [
+            "localhost",
+            "LOCALHOST",
+            "127.0.0.1",
+            "127.8.9.10",
+            "::1",
+            "[::1]",
+        ] {
+            assert!(is_local_host(host), "{} should be local", host);
+        }
+        for host in [
+            "db.example.com",
+            "10.0.0.5",
+            "192.168.1.2",
+            "::2",
+            "localhost.evil.com",
+        ] {
+            assert!(!is_local_host(host), "{} should be remote", host);
+        }
     }
 }

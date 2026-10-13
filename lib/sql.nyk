@@ -26,9 +26,10 @@ end
 -- Opens a connection. `target` is a URL such as
 -- "postgres://user:pass@host:5432/db" or "mysql://user:pass@host/db", or a
 -- table with `driver` ("postgres" or "mysql") plus `host`, `port`, `user`,
--- `password`, `database`, `ssl` (true to require TLS, false to refuse it)
--- and `timeout` (seconds to wait for the connection). A table may carry a
--- `url` too, with the other fields overriding parts of it.
+-- `password`, `database`, `ssl` (true to require TLS, false to refuse it;
+-- unset, TLS is required for any host but this machine unless a PostgreSQL
+-- URL sets `sslmode`) and `timeout` (seconds to wait for the connection). A
+-- table may carry a `url` too, with the other fields overriding parts of it.
 function sql.connect(target: string | ConnectOptions): Connection
     local options
     if (type(target) == "string") then
