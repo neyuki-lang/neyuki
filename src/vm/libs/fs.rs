@@ -6,9 +6,11 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 
-use crate::vm::libs::args::{array, bool_arg, str_arg};
+use std::time::UNIX_EPOCH;
+
+use crate::vm::libs::args::{array, bool_arg, frozen, str_arg};
 use crate::vm::machine::VM;
-use crate::vm::value::{NativeDef, Value};
+use crate::vm::value::{NativeDef, Value, VmTable};
 
 pub(crate) const NATIVES: &[NativeDef] = &[
     NativeDef {
@@ -46,6 +48,22 @@ pub(crate) const NATIVES: &[NativeDef] = &[
     NativeDef {
         name: "__fs_isdir",
         func: builtin_isdir,
+    },
+    NativeDef {
+        name: "__fs_copy",
+        func: builtin_copy,
+    },
+    NativeDef {
+        name: "__fs_info",
+        func: builtin_info,
+    },
+    NativeDef {
+        name: "__fs_cwd",
+        func: builtin_cwd,
+    },
+    NativeDef {
+        name: "__fs_absolute",
+        func: builtin_absolute,
     },
 ];
 
@@ -100,10 +118,15 @@ fn builtin_exists(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     Ok(vec![Value::Bool(fs::metadata(path).is_ok())])
 }
 
+/// `(path, recursive)`: removes a file, an empty directory, or with
+/// `recursive` a directory and everything in it.
 fn builtin_remove(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let path = str_arg(args, 0, "path")?;
-    let metadata = fs::metadata(path).map_err(|err| io_error("remove", path, err))?;
-    let result = if metadata.is_dir() {
+    let recursive = bool_arg(args, 1, "recursive")?;
+    let metadata = fs::symlink_metadata(path).map_err(|err| io_error("remove", path, err))?;
+    let result = if metadata.is_dir() && recursive {
+        fs::remove_dir_all(path)
+    } else if metadata.is_dir() {
         fs::remove_dir(path)
     } else {
         fs::remove_file(path)
@@ -147,4 +170,50 @@ fn builtin_isdir(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     Ok(vec![Value::Bool(
         fs::metadata(path).is_ok_and(|metadata| metadata.is_dir()),
     )])
+}
+
+/// `(from, to)`: copies a file, replacing `to`, and returns the bytes copied.
+fn builtin_copy(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let from = str_arg(args, 0, "from")?;
+    let to = str_arg(args, 1, "to")?;
+    let bytes =
+        fs::copy(from, to).map_err(|err| format!("cannot copy `{}` to `{}`: {}", from, to, err))?;
+    Ok(vec![Value::Int(bytes as i64)])
+}
+
+fn epoch_seconds(time: std::io::Result<std::time::SystemTime>) -> Value {
+    time.ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map_or(Value::Nil, |since| Value::Float(since.as_secs_f64()))
+}
+
+/// `(path)`: a table describing the file or directory, or nil when nothing
+/// is there. Symbolic links are followed.
+fn builtin_info(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let path = str_arg(args, 0, "path")?;
+    let Ok(metadata) = fs::metadata(path) else {
+        return Ok(vec![Value::Nil]);
+    };
+    let mut table = VmTable::new();
+    table.set_str("size", Value::Int(metadata.len() as i64));
+    table.set_str("isDir", Value::Bool(metadata.is_dir()));
+    table.set_str("isFile", Value::Bool(metadata.is_file()));
+    table.set_str("readonly", Value::Bool(metadata.permissions().readonly()));
+    table.set_str("modified", epoch_seconds(metadata.modified()));
+    table.set_str("created", epoch_seconds(metadata.created()));
+    Ok(vec![frozen(table)])
+}
+
+fn builtin_cwd(_vm: &mut VM, _args: &[Value]) -> Result<Vec<Value>, String> {
+    let dir = std::env::current_dir()
+        .map_err(|err| format!("cannot read the working directory: {}", err))?;
+    Ok(vec![Value::string(dir.to_string_lossy().into_owned())])
+}
+
+/// `(path)`: `path` made absolute against the working directory, without
+/// touching the filesystem or resolving links.
+fn builtin_absolute(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let path = str_arg(args, 0, "path")?;
+    let absolute = std::path::absolute(path).map_err(|err| io_error("resolve", path, err))?;
+    Ok(vec![Value::string(absolute.to_string_lossy().into_owned())])
 }

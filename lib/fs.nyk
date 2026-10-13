@@ -90,9 +90,12 @@ function fs.exists(path: string): boolean
     return __fs_exists(path)
 end
 
-function fs.remove(path: string): ()
+-- Removes a file or an empty directory; with `recursive`, a directory and
+-- everything in it.
+function fs.remove(path: string, recursive: boolean?): ()
     checkString(path, "path")
-    __fs_remove(path)
+    checkOptionalBoolean(recursive, "recursive")
+    __fs_remove(path, recursive ?? false)
 end
 
 function fs.rename(from: string, to: string): ()
@@ -115,6 +118,159 @@ end
 function fs.isDir(path: string): boolean
     checkString(path, "path")
     return __fs_isdir(path)
+end
+
+-- WHOLE FILES --------------------------------------------------------------
+
+-- The contents of a text file.
+function fs.read(path: string): string
+    checkString(path, "path")
+    return __fs_read(path)
+end
+
+-- Replaces the contents of a file, creating it if needed.
+function fs.write(path: string, text: string): ()
+    checkString(path, "path")
+    checkString(text, "text")
+    __fs_write(path, text, false)
+end
+
+-- Adds text to the end of a file, creating it if needed.
+function fs.append(path: string, text: string): ()
+    checkString(path, "path")
+    checkString(text, "text")
+    __fs_write(path, text, true)
+end
+
+-- An iterator over the lines of a file, without their line endings.
+function fs.lines(path: string): () -> string?
+    checkString(path, "path")
+    local lines = splitLines(__fs_read(path))
+    local index = 0
+    return function(): string?
+        index++
+        return lines[index]
+    end
+end
+
+-- Copies a file, replacing `to`, and returns the number of bytes copied.
+function fs.copy(from: string, to: string): number
+    checkString(from, "from")
+    checkString(to, "to")
+    return __fs_copy(from, to)
+end
+
+-- `{ size, isDir, isFile, readonly, modified, created }` for a path, or nil
+-- when nothing is there. Times are seconds since the Unix epoch.
+function fs.info(path: string): FileInfo?
+    checkString(path, "path")
+    return __fs_info(path)
+end
+
+function fs.isFile(path: string): boolean
+    checkString(path, "path")
+    local info = __fs_info(path)
+    return info != nil and info.isFile
+end
+
+-- Every file under a directory, as paths relative to it joined with "/",
+-- in sorted order. Directories themselves are not listed.
+function fs.walk(path: string): {string}
+    checkString(path, "path")
+    if (not __fs_isdir(path)) then error("`" .. path .. "` is not a directory") end
+    local found = {}
+    local function visit(dir: string, prefix: string)
+        for _, name in __fs_list(dir) do
+            local full = fs.join(dir, name)
+            local relative = prefix .. name
+            if (__fs_isdir(full)) then
+                visit(full, relative .. "/")
+            else
+                found[#found + 1] = relative
+            end
+        end
+    end
+    visit(path, "")
+    return found
+end
+
+-- PATHS --------------------------------------------------------------------
+
+function isSeparator(char: string): boolean
+    return char == "/" or char == "\\"
+end
+
+-- The index of the last separator in `path`, or 0.
+function lastSeparator(path: string): number
+    for index = #path, 1, -1 do
+        if (isSeparator(string.sub(path, index, index))) then return index end
+    end
+    return 0
+end
+
+-- Joins path parts with "/", which every platform accepts, without doubling
+-- separators. A part that is absolute starts over.
+function fs.join(...: string): string
+    local result = ""
+    for index, part in {...} do
+        if (type(part) != "string") then
+            error("part " .. tostring(index) .. " must be a string")
+        end
+        if (part == "") then continue end
+        local first = string.sub(part, 1, 1)
+        if (result == "" or isSeparator(first) or string.match(part, "^%a:") != nil) then
+            result = part
+        elseif (isSeparator(string.sub(result, -1))) then
+            result = result .. part
+        else
+            result = result .. "/" .. part
+        end
+    end
+    return result
+end
+
+-- The last part of a path: `basename("docs/guide.md")` is "guide.md".
+function fs.basename(path: string): string
+    checkString(path, "path")
+    while (#path > 1 and isSeparator(string.sub(path, -1))) do path = string.sub(path, 1, -2) end
+    return string.sub(path, lastSeparator(path) + 1)
+end
+
+-- Everything before the last part: `dirname("docs/guide.md")` is "docs",
+-- and a bare name gives ".".
+function fs.dirname(path: string): string
+    checkString(path, "path")
+    while (#path > 1 and isSeparator(string.sub(path, -1))) do path = string.sub(path, 1, -2) end
+    local at = lastSeparator(path)
+    if (at == 0) then return "." end
+    if (at == 1) then return string.sub(path, 1, 1) end
+    return string.sub(path, 1, at - 1)
+end
+
+-- The extension of the last part, dot included: ".md" for "guide.md" and ""
+-- for "Makefile" or ".gitignore".
+function fs.extension(path: string): string
+    local name = fs.basename(path)
+    local dot = nil
+    for index = #name, 2, -1 do
+        if (string.sub(name, index, index) == ".") then
+            dot = index
+            break
+        end
+    end
+    if (dot == nil) then return "" end
+    return string.sub(name, dot)
+end
+
+-- `path` made absolute against the working directory.
+function fs.absolute(path: string): string
+    checkString(path, "path")
+    return __fs_absolute(path)
+end
+
+-- The working directory.
+function fs.cwd(): string
+    return __fs_cwd()
 end
 
 return table.freeze(fs)

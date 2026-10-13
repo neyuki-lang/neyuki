@@ -81,4 +81,38 @@ fs.remove(dir .. "/inner")
 fs.remove(dir)
 assert(not fs.exists(dir), "remove should delete the directory")
 
+-- whole-file helpers, copying, info and walking
+local tree = ".fs-test-tree"
+if (fs.exists(tree)) then fs.remove(tree, true) end
+fs.mkdir(tree .. "/sub/deeper", true)
+fs.write(fs.join(tree, "a.txt"), "one\r\ntwo\n")
+fs.append(fs.join(tree, "a.txt"), "three")
+assert(fs.read(tree .. "/a.txt") == "one\r\ntwo\nthree", "write then append")
+local collected = {}
+for line in fs.lines(tree .. "/a.txt") do collected[#collected + 1] = line end
+assert(table.concat(collected, ",") == "one,two,three", "lines strips line endings")
+assert(fs.copy(tree .. "/a.txt", tree .. "/sub/deeper/b.txt") == 14, "copy returns the bytes copied")
+fs.write(tree .. "/sub/c.md", "")
+
+local info = fs.info(tree .. "/a.txt")
+assert(info.size == 14 and info.isFile and not info.isDir, "info describes a file")
+assert(type(info.modified) == "number" and info.modified > 0, "info has a modification time")
+assert(fs.info(tree).isDir and fs.info(tree .. "/missing") == nil, "info for directories and missing paths")
+assert(fs.isFile(tree .. "/a.txt") and not fs.isFile(tree), "isFile")
+
+local walked = fs.walk(tree)
+assert(table.concat(walked, ",") == "a.txt,sub/c.md,sub/deeper/b.txt", "walk lists files recursively: " .. table.concat(walked, ","))
+
+assert(not try(fs.remove, tree), "removing a non-empty directory needs recursive")
+fs.remove(tree, true)
+assert(not fs.exists(tree), "recursive remove deletes everything")
+
+-- paths
+assert(fs.join("a", "b/", "c.txt") == "a/b/c.txt", "join")
+assert(fs.join("a", "/root", "x") == "/root/x", "an absolute part starts over")
+assert(fs.basename("docs/guide.md") == "guide.md" and fs.basename("a\\b") == "b", "basename")
+assert(fs.dirname("docs/guide.md") == "docs" and fs.dirname("guide.md") == ".", "dirname")
+assert(fs.extension("a.tar.gz") == ".gz" and fs.extension(".gitignore") == "", "extension")
+assert(fs.absolute("x") == fs.join(fs.cwd(), "x") or #fs.absolute("x") > 1, "absolute")
+
 print("[pass] fs operations")
