@@ -1,0 +1,64 @@
+-- buffer: binary data of every width, both byte orders, bits and copies.
+
+local b = buffer.create(16)
+assert(buffer.len(b) == 16 and #b == 16, "length")
+
+buffer.writei8(b, 0, -5)
+assert(buffer.readi8(b, 0) == -5 and buffer.readu8(b, 0) == 251, "negative bytes")
+buffer.writei32(b, 0, -123456)
+assert(buffer.readi32(b, 0) == -123456, "negative i32")
+buffer.writeu32(b, 0, 0xDEADBEEF)
+assert(buffer.readu32(b, 0) == 0xDEADBEEF, "u32")
+assert(buffer.readu8(b, 0) == 0xEF, "little-endian by default")
+buffer.writeu16(b, 4, 0x1234, true)
+assert(buffer.readu8(b, 4) == 0x12 and buffer.readu16(b, 4, true) == 0x1234, "big-endian")
+buffer.writeu64(b, 8, 2 ^ 64 - 1)
+assert(buffer.readu64(b, 8) == 2 ^ 64 - 1, "u64 beyond i64")
+assert(buffer.readi64(b, 8) == -1, "the same bits as i64")
+buffer.writef64(b, 0, 1.5)
+assert(buffer.readf64(b, 0) == 1.5, "f64")
+buffer.writef32(b, 0, 0.25, true)
+assert(buffer.readf32(b, 0, true) == 0.25, "big-endian f32")
+buffer.writeu8(b, 0, 300)
+assert(buffer.readu8(b, 0) == 44, "writes keep the low bits")
+
+-- bytes by index
+b[1] = 7
+assert(b[1] == 7 and buffer.readu8(b, 1) == 7, "indexing reads and writes bytes")
+
+-- bits
+local bits = buffer.create(4)
+buffer.writebits(bits, 3, 5, 0b10110)
+assert(buffer.readbits(bits, 3, 5) == 0b10110, "bits round trip")
+assert(buffer.readu8(bits, 0) == 0b10110000, "bits land at their offset")
+
+-- strings, copies, fills and slices
+local text = buffer.fromstring("hello world")
+assert(buffer.readstring(text, 6, 5) == "world", "readstring")
+buffer.writestring(text, 0, "HELLO", 3)
+assert(buffer.tostring(text) == "HELlo world", "writestring with a count")
+buffer.copy(text, 0, text, 6, 5)
+assert(buffer.tostring(text) == "world world", "copy within one buffer")
+local other = buffer.create(5)
+buffer.copy(other, 0, text, 6)
+assert(buffer.tostring(other) == "world", "copy defaults to the rest of the source")
+buffer.fill(other, 1, 0x2D, 3)
+assert(buffer.tostring(other) == "w---d", "fill")
+local part = buffer.slice(text, 6)
+assert(buffer.tostring(part) == "world", "slice")
+buffer.resize(part, 7)
+assert(buffer.len(part) == 7 and buffer.readu8(part, 6) == 0, "resize grows with zeros")
+assert(buffer.equal(buffer.fromstring("ab"), buffer.fromstring("ab")), "equal compares bytes")
+
+-- lossless binary text
+local raw = buffer.create(3)
+buffer.writeu8(raw, 0, 0xFF)
+buffer.writeu8(raw, 2, 0x80)
+assert(buffer.tohex(raw) == "ff0080", "tohex")
+assert(buffer.equal(buffer.fromhex("ff0080"), raw), "fromhex")
+assert(buffer.equal(buffer.frombase64(buffer.tobase64(raw)), raw), "base64 round trip")
+
+local ok, err = try(buffer.readu32, b, 14)
+assert(not ok and string.find(err, "out of bounds") != nil, "reads past the end fail")
+
+print("[pass] buffer")

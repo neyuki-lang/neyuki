@@ -1,515 +1,458 @@
-// Standard raw binary buffer manipulation library for Neyuki VM.
+//! The `buffer` library: fixed blocks of bytes for binary data.
+//!
+//! Offsets are 0-based byte positions. Numbers are little-endian unless the
+//! optional last argument `bigEndian` is true. Writes keep the low bits of
+//! an integer that does not fit, as in Luau.
 
-use num_bigint::BigInt;
-use num_traits::ToPrimitive;
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use base64::Engine;
+use num_bigint::BigInt;
+use num_traits::ToPrimitive;
+
 use crate::vm::buffer::VmBuffer;
+use crate::vm::libs::args::{bool_arg, str_arg};
 use crate::vm::machine::VM;
 use crate::vm::value::{Value, VmTable};
 
-fn get_buf(val: &Value) -> Result<&Rc<RefCell<VmBuffer>>, String> {
-    match val {
-        Value::Buffer(b) => Ok(b),
-        _ => Err("buffer operation expects a buffer instance".to_string()),
+const MAX_SIZE: usize = 1024 * 1024 * 1024;
+
+fn buffer_arg<'a>(
+    args: &'a [Value],
+    index: usize,
+    name: &str,
+) -> Result<&'a Rc<RefCell<VmBuffer>>, String> {
+    match args.get(index) {
+        Some(Value::Buffer(b)) => Ok(b),
+        None | Some(Value::Nil) => Err(format!("{} must be provided", name)),
+        Some(other) => Err(format!(
+            "{} must be a buffer, got {}",
+            name,
+            other.type_name()
+        )),
     }
 }
 
-fn to_usize(val: &Value, name: &str) -> Result<usize, String> {
-    match val {
-        Value::Int(i) => {
-            if *i < 0 {
-                Err(format!("{} cannot be negative", name))
-            } else {
-                usize::try_from(*i).map_err(|_| format!("{} is out of bounds", name))
-            }
+fn size_arg(args: &[Value], index: usize, name: &str) -> Result<usize, String> {
+    match args.get(index) {
+        Some(Value::Int(i)) if *i >= 0 => Ok(*i as usize),
+        Some(Value::Float(f)) if *f >= 0.0 && f.fract() == 0.0 && *f < 9e15 => Ok(*f as usize),
+        Some(Value::Int(_) | Value::Float(_) | Value::BigInt(_)) => {
+            Err(format!("{} must be a non-negative integer", name))
         }
-        Value::BigInt(b) => {
-            if num_traits::Signed::is_negative(&**b) {
-                Err(format!("{} cannot be negative", name))
-            } else {
-                Err(format!("{} is out of bounds", name))
-            }
-        }
-        Value::Float(f) => {
-            if *f < 0.0 || f.is_nan() || f.is_infinite() {
-                Err(format!("{} cannot be negative, NaN or infinite", name))
-            } else if *f > usize::MAX as f64 {
-                Err(format!("{} is out of bounds", name))
-            } else {
-                Ok(*f as usize)
-            }
-        }
-        _ => Err(format!("{} expects an integer", name)),
+        None | Some(Value::Nil) => Err(format!("{} must be provided", name)),
+        Some(other) => Err(format!(
+            "{} must be a number, got {}",
+            name,
+            other.type_name()
+        )),
     }
 }
 
+fn opt_size_arg(args: &[Value], index: usize, name: &str, default: usize) -> Result<usize, String> {
+    match args.get(index) {
+        None | Some(Value::Nil) => Ok(default),
+        _ => size_arg(args, index, name),
+    }
+}
+
+/// The low 64 bits of an integer argument, in two's complement.
+fn bits_arg(args: &[Value], index: usize, name: &str) -> Result<u64, String> {
+    match args.get(index) {
+        Some(Value::Int(i)) => Ok(*i as u64),
+        Some(Value::BigInt(b)) => {
+            let low = (&**b & BigInt::from(u64::MAX)).to_u64().unwrap_or(0);
+            Ok(low)
+        }
+        Some(Value::Float(f)) if f.fract() == 0.0 && f.is_finite() => Ok(*f as i64 as u64),
+        None | Some(Value::Nil) => Err(format!("{} must be provided", name)),
+        Some(other) => Err(format!(
+            "{} must be an integer, got {}",
+            name,
+            other.type_name()
+        )),
+    }
+}
+
+fn float_arg(args: &[Value], index: usize, name: &str) -> Result<f64, String> {
+    crate::vm::libs::args::number_arg(args, index, name)
+}
+
+fn new_buffer(vm: &mut VM, data: Vec<u8>) -> Result<Vec<Value>, String> {
+    if vm.gc.should_collect() || vm.gc.sweeping {
+        vm.gc_auto_step()?;
+    }
+    let rc = Rc::new(RefCell::new(VmBuffer::from_bytes(data)));
+    vm.gc.register_buffer(&rc);
+    Ok(vec![Value::Buffer(rc)])
+}
+
+fn check_size(size: usize) -> Result<(), String> {
+    if size > MAX_SIZE {
+        return Err(format!("size {} exceeds the 1 GiB limit", size));
+    }
+    Ok(())
+}
+
+/// `buffer.create(size)`: `size` zero bytes.
 fn buf_create(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    if vm.gc.should_collect() || vm.gc.sweeping {
-        vm.gc_auto_step()?;
-    }
-    let size = to_usize(
-        args.first()
-            .ok_or_else(|| "buffer.create expects size".to_string())?,
-        "size",
-    )?;
-    const MAX_BUFFER_SIZE: usize = 100 * 1024 * 1024;
-    if size > MAX_BUFFER_SIZE {
-        return Err(format!(
-            "buffer.create requested size ({}) exceeds maximum limit (100MB)",
-            size
-        ));
-    }
-    let buf = VmBuffer::new(size);
-    let rc = Rc::new(RefCell::new(buf));
-    vm.gc.register_buffer(&rc);
-    Ok(vec![Value::Buffer(rc)])
+    let size = size_arg(args, 0, "size")?;
+    check_size(size)?;
+    new_buffer(vm, vec![0; size])
 }
 
+/// `buffer.fromstring(s)`: the bytes of `s`.
 fn buf_fromstring(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    if vm.gc.should_collect() || vm.gc.sweeping {
-        vm.gc_auto_step()?;
-    }
-    let s = match args
-        .first()
-        .ok_or_else(|| "buffer.fromstring expects string".to_string())?
-    {
-        Value::String(s) => s.as_bytes().to_vec(),
-        _ => return Err("buffer.fromstring expects string".to_string()),
-    };
-    let buf = VmBuffer::from_bytes(s);
-    let rc = Rc::new(RefCell::new(buf));
-    vm.gc.register_buffer(&rc);
-    Ok(vec![Value::Buffer(rc)])
+    let s = str_arg(args, 0, "s")?;
+    new_buffer(vm, s.as_bytes().to_vec())
 }
 
+fn bytes_to_string(bytes: &[u8]) -> Value {
+    Value::string(String::from_utf8_lossy(bytes).into_owned())
+}
+
+/// `buffer.tostring(b)`: the bytes as text; bytes that are not valid UTF-8
+/// become U+FFFD.
 fn buf_tostring(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let buf_rc = get_buf(
-        args.first()
-            .ok_or_else(|| "buffer.tostring expects buffer".to_string())?,
-    )?;
-    let s = String::from_utf8_lossy(&buf_rc.borrow().data).to_string();
-    Ok(vec![Value::string(s)])
+    let b = buffer_arg(args, 0, "b")?.borrow();
+    Ok(vec![bytes_to_string(&b.data)])
 }
 
 fn buf_len(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let buf_rc = get_buf(
-        args.first()
-            .ok_or_else(|| "buffer.len expects buffer".to_string())?,
-    )?;
-    let len = buf_rc.borrow().len();
-    Ok(vec![Value::from_bigint(BigInt::from(len))])
+    Ok(vec![Value::from_usize(
+        buffer_arg(args, 0, "b")?.borrow().len(),
+    )])
 }
 
-fn buf_readu8(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let buf_rc = get_buf(
-        args.first()
-            .ok_or_else(|| "buffer.readu8 expects buffer".to_string())?,
-    )?;
-    let offset = to_usize(
-        args.get(1)
-            .ok_or_else(|| "buffer.readu8 expects offset".to_string())?,
-        "offset",
-    )?;
-    let val = buf_rc.borrow().read_u8(offset)?;
-    Ok(vec![Value::from_bigint(BigInt::from(val))])
+fn read_int(args: &[Value], size: usize, signed: bool) -> Result<Vec<Value>, String> {
+    let b = buffer_arg(args, 0, "b")?.borrow();
+    let offset = size_arg(args, 1, "offset")?;
+    let big_endian = bool_arg(args, 2, "bigEndian")?;
+    let range = b.range(offset, size)?;
+    let mut raw = [0u8; 8];
+    if big_endian {
+        raw[8 - size..].copy_from_slice(&b.data[range]);
+        raw.reverse();
+    } else {
+        raw[..size].copy_from_slice(&b.data[range]);
+    }
+    let unsigned = u64::from_le_bytes(raw);
+    let value = if signed {
+        let shift = 64 - size * 8;
+        Value::Int(((unsigned << shift) as i64) >> shift)
+    } else {
+        Value::from_u64(unsigned)
+    };
+    Ok(vec![value])
 }
 
-fn buf_writeu8(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let buf_rc = get_buf(
-        args.first()
-            .ok_or_else(|| "buffer.writeu8 expects buffer".to_string())?,
-    )?;
-    let offset = to_usize(
-        args.get(1)
-            .ok_or_else(|| "buffer.writeu8 expects offset".to_string())?,
-        "offset",
-    )?;
-    let val = to_usize(
-        args.get(2)
-            .ok_or_else(|| "buffer.writeu8 expects value".to_string())?,
-        "value",
-    )? as u8;
-    buf_rc.borrow_mut().write_u8(offset, val)?;
-    Ok(vec![])
+fn write_int(args: &[Value], size: usize) -> Result<Vec<Value>, String> {
+    let mut b = buffer_arg(args, 0, "b")?.borrow_mut();
+    let offset = size_arg(args, 1, "offset")?;
+    let value = bits_arg(args, 2, "value")?;
+    let big_endian = bool_arg(args, 3, "bigEndian")?;
+    let range = b.range(offset, size)?;
+    let bytes = value.to_le_bytes();
+    let dest = &mut b.data[range];
+    dest.copy_from_slice(&bytes[..size]);
+    if big_endian {
+        dest.reverse();
+    }
+    Ok(Vec::new())
 }
 
-fn buf_readi8(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let buf_rc = get_buf(
-        args.first()
-            .ok_or_else(|| "buffer.readi8 expects buffer".to_string())?,
-    )?;
-    let offset = to_usize(
-        args.get(1)
-            .ok_or_else(|| "buffer.readi8 expects offset".to_string())?,
-        "offset",
-    )?;
-    let val = buf_rc.borrow().read_i8(offset)?;
-    Ok(vec![Value::from_bigint(BigInt::from(val))])
+macro_rules! ints {
+    ($($read:ident, $write:ident, $size:literal, $signed:literal;)*) => {
+        $(
+            fn $read(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+                read_int(args, $size, $signed)
+            }
+            fn $write(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+                write_int(args, $size)
+            }
+        )*
+    };
 }
 
-fn buf_writei8(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let buf_rc = get_buf(
-        args.first()
-            .ok_or_else(|| "buffer.writei8 expects buffer".to_string())?,
-    )?;
-    let offset = to_usize(
-        args.get(1)
-            .ok_or_else(|| "buffer.writei8 expects offset".to_string())?,
-        "offset",
-    )?;
-    let val = to_usize(
-        args.get(2)
-            .ok_or_else(|| "buffer.writei8 expects value".to_string())?,
-        "value",
-    )? as i8;
-    buf_rc.borrow_mut().write_i8(offset, val)?;
-    Ok(vec![])
-}
-
-fn buf_readu16(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let buf_rc = get_buf(
-        args.first()
-            .ok_or_else(|| "buffer.readu16 expects buffer".to_string())?,
-    )?;
-    let offset = to_usize(
-        args.get(1)
-            .ok_or_else(|| "buffer.readu16 expects offset".to_string())?,
-        "offset",
-    )?;
-    let val = buf_rc.borrow().read_u16(offset)?;
-    Ok(vec![Value::from_bigint(BigInt::from(val))])
-}
-
-fn buf_writeu16(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let buf_rc = get_buf(
-        args.first()
-            .ok_or_else(|| "buffer.writeu16 expects buffer".to_string())?,
-    )?;
-    let offset = to_usize(
-        args.get(1)
-            .ok_or_else(|| "buffer.writeu16 expects offset".to_string())?,
-        "offset",
-    )?;
-    let val = to_usize(
-        args.get(2)
-            .ok_or_else(|| "buffer.writeu16 expects value".to_string())?,
-        "value",
-    )? as u16;
-    buf_rc.borrow_mut().write_u16(offset, val)?;
-    Ok(vec![])
-}
-
-fn buf_readi16(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let buf_rc = get_buf(
-        args.first()
-            .ok_or_else(|| "buffer.readi16 expects buffer".to_string())?,
-    )?;
-    let offset = to_usize(
-        args.get(1)
-            .ok_or_else(|| "buffer.readi16 expects offset".to_string())?,
-        "offset",
-    )?;
-    let val = buf_rc.borrow().read_i16(offset)?;
-    Ok(vec![Value::from_bigint(BigInt::from(val))])
-}
-
-fn buf_writei16(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let buf_rc = get_buf(
-        args.first()
-            .ok_or_else(|| "buffer.writei16 expects buffer".to_string())?,
-    )?;
-    let offset = to_usize(
-        args.get(1)
-            .ok_or_else(|| "buffer.writei16 expects offset".to_string())?,
-        "offset",
-    )?;
-    let val = to_usize(
-        args.get(2)
-            .ok_or_else(|| "buffer.writei16 expects value".to_string())?,
-        "value",
-    )? as i16;
-    buf_rc.borrow_mut().write_i16(offset, val)?;
-    Ok(vec![])
-}
-
-fn buf_readu32(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let buf_rc = get_buf(
-        args.first()
-            .ok_or_else(|| "buffer.readu32 expects buffer".to_string())?,
-    )?;
-    let offset = to_usize(
-        args.get(1)
-            .ok_or_else(|| "buffer.readu32 expects offset".to_string())?,
-        "offset",
-    )?;
-    let val = buf_rc.borrow().read_u32(offset)?;
-    Ok(vec![Value::from_bigint(BigInt::from(val))])
-}
-
-fn buf_writeu32(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let buf_rc = get_buf(
-        args.first()
-            .ok_or_else(|| "buffer.writeu32 expects buffer".to_string())?,
-    )?;
-    let offset = to_usize(
-        args.get(1)
-            .ok_or_else(|| "buffer.writeu32 expects offset".to_string())?,
-        "offset",
-    )?;
-    let val = to_usize(
-        args.get(2)
-            .ok_or_else(|| "buffer.writeu32 expects value".to_string())?,
-        "value",
-    )? as u32;
-    buf_rc.borrow_mut().write_u32(offset, val)?;
-    Ok(vec![])
-}
-
-fn buf_readi32(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let buf_rc = get_buf(
-        args.first()
-            .ok_or_else(|| "buffer.readi32 expects buffer".to_string())?,
-    )?;
-    let offset = to_usize(
-        args.get(1)
-            .ok_or_else(|| "buffer.readi32 expects offset".to_string())?,
-        "offset",
-    )?;
-    let val = buf_rc.borrow().read_i32(offset)?;
-    Ok(vec![Value::from_bigint(BigInt::from(val))])
-}
-
-fn buf_writei32(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let buf_rc = get_buf(
-        args.first()
-            .ok_or_else(|| "buffer.writei32 expects buffer".to_string())?,
-    )?;
-    let offset = to_usize(
-        args.get(1)
-            .ok_or_else(|| "buffer.writei32 expects offset".to_string())?,
-        "offset",
-    )?;
-    let val = to_usize(
-        args.get(2)
-            .ok_or_else(|| "buffer.writei32 expects value".to_string())?,
-        "value",
-    )? as i32;
-    buf_rc.borrow_mut().write_i32(offset, val)?;
-    Ok(vec![])
+ints! {
+    buf_readi8, buf_writei8, 1, true;
+    buf_readu8, buf_writeu8, 1, false;
+    buf_readi16, buf_writei16, 2, true;
+    buf_readu16, buf_writeu16, 2, false;
+    buf_readi32, buf_writei32, 4, true;
+    buf_readu32, buf_writeu32, 4, false;
+    buf_readi64, buf_writei64, 8, true;
+    buf_readu64, buf_writeu64, 8, false;
 }
 
 fn buf_readf32(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let buf_rc = get_buf(
-        args.first()
-            .ok_or_else(|| "buffer.readf32 expects buffer".to_string())?,
-    )?;
-    let offset = to_usize(
-        args.get(1)
-            .ok_or_else(|| "buffer.readf32 expects offset".to_string())?,
-        "offset",
-    )?;
-    let val = buf_rc.borrow().read_f32(offset)?;
-    Ok(vec![Value::Float(val as f64)])
+    let b = buffer_arg(args, 0, "b")?.borrow();
+    let range = b.range(size_arg(args, 1, "offset")?, 4)?;
+    let raw: [u8; 4] = b.data[range].try_into().unwrap();
+    let value = if bool_arg(args, 2, "bigEndian")? {
+        f32::from_be_bytes(raw)
+    } else {
+        f32::from_le_bytes(raw)
+    };
+    Ok(vec![Value::Float(value as f64)])
 }
 
 fn buf_writef32(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let buf_rc = get_buf(
-        args.first()
-            .ok_or_else(|| "buffer.writef32 expects buffer".to_string())?,
-    )?;
-    let offset = to_usize(
-        args.get(1)
-            .ok_or_else(|| "buffer.writef32 expects offset".to_string())?,
-        "offset",
-    )?;
-    let f = match args
-        .get(2)
-        .ok_or_else(|| "buffer.writef32 expects value".to_string())?
-    {
-        Value::Float(f) => *f as f32,
-        Value::Int(i) => i.to_f32().unwrap_or(0.0),
-        _ => return Err("buffer.writef32 expects float value".to_string()),
+    let mut b = buffer_arg(args, 0, "b")?.borrow_mut();
+    let range = b.range(size_arg(args, 1, "offset")?, 4)?;
+    let value = float_arg(args, 2, "value")? as f32;
+    let raw = if bool_arg(args, 3, "bigEndian")? {
+        value.to_be_bytes()
+    } else {
+        value.to_le_bytes()
     };
-    buf_rc.borrow_mut().write_f32(offset, f)?;
-    Ok(vec![])
+    b.data[range].copy_from_slice(&raw);
+    Ok(Vec::new())
 }
 
 fn buf_readf64(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let buf_rc = get_buf(
-        args.first()
-            .ok_or_else(|| "buffer.readf64 expects buffer".to_string())?,
-    )?;
-    let offset = to_usize(
-        args.get(1)
-            .ok_or_else(|| "buffer.readf64 expects offset".to_string())?,
-        "offset",
-    )?;
-    let val = buf_rc.borrow().read_f64(offset)?;
-    Ok(vec![Value::Float(val)])
+    let b = buffer_arg(args, 0, "b")?.borrow();
+    let range = b.range(size_arg(args, 1, "offset")?, 8)?;
+    let raw: [u8; 8] = b.data[range].try_into().unwrap();
+    let value = if bool_arg(args, 2, "bigEndian")? {
+        f64::from_be_bytes(raw)
+    } else {
+        f64::from_le_bytes(raw)
+    };
+    Ok(vec![Value::Float(value)])
 }
 
 fn buf_writef64(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let buf_rc = get_buf(
-        args.first()
-            .ok_or_else(|| "buffer.writef64 expects buffer".to_string())?,
-    )?;
-    let offset = to_usize(
-        args.get(1)
-            .ok_or_else(|| "buffer.writef64 expects offset".to_string())?,
-        "offset",
-    )?;
-    let f = match args
-        .get(2)
-        .ok_or_else(|| "buffer.writef64 expects value".to_string())?
-    {
-        Value::Float(f) => *f,
-        Value::Int(i) => i.to_f64().unwrap_or(0.0),
-        _ => return Err("buffer.writef64 expects float value".to_string()),
+    let mut b = buffer_arg(args, 0, "b")?.borrow_mut();
+    let range = b.range(size_arg(args, 1, "offset")?, 8)?;
+    let value = float_arg(args, 2, "value")?;
+    let raw = if bool_arg(args, 3, "bigEndian")? {
+        value.to_be_bytes()
+    } else {
+        value.to_le_bytes()
     };
-    buf_rc.borrow_mut().write_f64(offset, f)?;
-    Ok(vec![])
+    b.data[range].copy_from_slice(&raw);
+    Ok(Vec::new())
 }
 
+/// `buffer.readstring(b, offset, count)`.
 fn buf_readstring(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let buf_rc = get_buf(
-        args.first()
-            .ok_or_else(|| "buffer.readstring expects buffer".to_string())?,
-    )?;
-    let offset = to_usize(
-        args.get(1)
-            .ok_or_else(|| "buffer.readstring expects offset".to_string())?,
-        "offset",
-    )?;
-    let count = to_usize(
-        args.get(2)
-            .ok_or_else(|| "buffer.readstring expects count".to_string())?,
-        "count",
-    )?;
-    let s = buf_rc.borrow().read_string(offset, count)?;
-    Ok(vec![Value::string(s)])
+    let b = buffer_arg(args, 0, "b")?.borrow();
+    let range = b.range(size_arg(args, 1, "offset")?, size_arg(args, 2, "count")?)?;
+    Ok(vec![bytes_to_string(&b.data[range])])
 }
 
+/// `buffer.writestring(b, offset, s, count?)`: the first `count` bytes of
+/// `s` (all of them by default).
 fn buf_writestring(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let buf_rc = get_buf(
-        args.first()
-            .ok_or_else(|| "buffer.writestring expects buffer".to_string())?,
-    )?;
-    let offset = to_usize(
-        args.get(1)
-            .ok_or_else(|| "buffer.writestring expects offset".to_string())?,
-        "offset",
-    )?;
-    let s = match args
-        .get(2)
-        .ok_or_else(|| "buffer.writestring expects string".to_string())?
-    {
-        Value::String(s) => s,
-        _ => return Err("buffer.writestring expects string".to_string()),
-    };
-    buf_rc.borrow_mut().write_string(offset, s)?;
-    Ok(vec![])
+    let mut b = buffer_arg(args, 0, "b")?.borrow_mut();
+    let offset = size_arg(args, 1, "offset")?;
+    let s = str_arg(args, 2, "s")?.as_bytes();
+    let count = opt_size_arg(args, 3, "count", s.len())?;
+    if count > s.len() {
+        return Err(format!("count {} is longer than the string", count));
+    }
+    let range = b.range(offset, count)?;
+    b.data[range].copy_from_slice(&s[..count]);
+    Ok(Vec::new())
 }
 
+/// `buffer.readbits(b, bitOffset, bitCount)`: up to 32 bits starting at
+/// any bit, least significant bit first.
+fn buf_readbits(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let b = buffer_arg(args, 0, "b")?.borrow();
+    let bit_offset = size_arg(args, 1, "bitOffset")?;
+    let bit_count = size_arg(args, 2, "bitCount")?;
+    if bit_count > 32 {
+        return Err("bitCount must be at most 32".to_string());
+    }
+    b.range(0, (bit_offset + bit_count).div_ceil(8))?;
+    let mut value = 0u64;
+    for i in 0..bit_count {
+        let bit = bit_offset + i;
+        if b.data[bit / 8] >> (bit % 8) & 1 == 1 {
+            value |= 1 << i;
+        }
+    }
+    Ok(vec![Value::Int(value as i64)])
+}
+
+/// `buffer.writebits(b, bitOffset, bitCount, value)`.
+fn buf_writebits(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let mut b = buffer_arg(args, 0, "b")?.borrow_mut();
+    let bit_offset = size_arg(args, 1, "bitOffset")?;
+    let bit_count = size_arg(args, 2, "bitCount")?;
+    let value = bits_arg(args, 3, "value")?;
+    if bit_count > 32 {
+        return Err("bitCount must be at most 32".to_string());
+    }
+    b.range(0, (bit_offset + bit_count).div_ceil(8))?;
+    for i in 0..bit_count {
+        let bit = bit_offset + i;
+        let mask = 1u8 << (bit % 8);
+        if value >> i & 1 == 1 {
+            b.data[bit / 8] |= mask;
+        } else {
+            b.data[bit / 8] &= !mask;
+        }
+    }
+    Ok(Vec::new())
+}
+
+/// `buffer.copy(target, targetOffset, source, sourceOffset?, count?)`:
+/// copies `count` bytes (the rest of the source by default). The two may
+/// be the same buffer, with overlapping ranges.
 fn buf_copy(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let target = get_buf(
-        args.first()
-            .ok_or_else(|| "buffer.copy expects target".to_string())?,
-    )?;
-    let target_offset = to_usize(
-        args.get(1)
-            .ok_or_else(|| "buffer.copy expects target offset".to_string())?,
-        "target_offset",
-    )?;
-    let source = get_buf(
-        args.get(2)
-            .ok_or_else(|| "buffer.copy expects source".to_string())?,
-    )?;
-    let source_offset = to_usize(
-        args.get(3)
-            .ok_or_else(|| "buffer.copy expects source offset".to_string())?,
-        "source_offset",
-    )?;
-    let count = to_usize(
-        args.get(4)
-            .ok_or_else(|| "buffer.copy expects count".to_string())?,
-        "count",
-    )?;
-    target
-        .borrow_mut()
-        .copy(target_offset, &source.borrow(), source_offset, count)?;
-    Ok(vec![])
+    let target = buffer_arg(args, 0, "target")?;
+    let target_offset = size_arg(args, 1, "targetOffset")?;
+    let source = buffer_arg(args, 2, "source")?;
+    let source_offset = opt_size_arg(args, 3, "sourceOffset", 0)?;
+    if Rc::ptr_eq(target, source) {
+        let mut b = target.borrow_mut();
+        let rest = b.len().saturating_sub(source_offset);
+        let count = opt_size_arg(args, 4, "count", rest)?;
+        let from = b.range(source_offset, count)?;
+        b.range(target_offset, count)?;
+        b.data.copy_within(from, target_offset);
+        return Ok(Vec::new());
+    }
+    let src = source.borrow();
+    let rest = src.len().saturating_sub(source_offset);
+    let count = opt_size_arg(args, 4, "count", rest)?;
+    let from = src.range(source_offset, count)?;
+    let mut dst = target.borrow_mut();
+    let to = dst.range(target_offset, count)?;
+    dst.data[to].copy_from_slice(&src.data[from]);
+    Ok(Vec::new())
 }
 
+/// `buffer.fill(b, offset, value, count?)`.
 fn buf_fill(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let buf_rc = get_buf(
-        args.first()
-            .ok_or_else(|| "buffer.fill expects buffer".to_string())?,
-    )?;
-    let offset = to_usize(
-        args.get(1)
-            .ok_or_else(|| "buffer.fill expects offset".to_string())?,
-        "offset",
-    )?;
-    let val = to_usize(
-        args.get(2)
-            .ok_or_else(|| "buffer.fill expects value".to_string())?,
-        "value",
-    )? as u8;
-    let count = to_usize(
-        args.get(3)
-            .ok_or_else(|| "buffer.fill expects count".to_string())?,
-        "count",
-    )?;
-    buf_rc.borrow_mut().fill(offset, val, count)?;
-    Ok(vec![])
+    let mut b = buffer_arg(args, 0, "b")?.borrow_mut();
+    let offset = size_arg(args, 1, "offset")?;
+    let value = bits_arg(args, 2, "value")? as u8;
+    let rest = b.len().saturating_sub(offset);
+    let count = opt_size_arg(args, 3, "count", rest)?;
+    let range = b.range(offset, count)?;
+    b.data[range].fill(value);
+    Ok(Vec::new())
 }
 
-fn buf_isempty(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let buf_rc = get_buf(
-        args.first()
-            .ok_or_else(|| "buffer.isempty expects a buffer".to_string())?,
-    )?;
-    Ok(vec![Value::Bool(buf_rc.borrow().is_empty())])
+/// `buffer.slice(b, offset?, count?)`: a new buffer with a copy of part of
+/// `b`.
+fn buf_slice(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let data = {
+        let b = buffer_arg(args, 0, "b")?.borrow();
+        let offset = opt_size_arg(args, 1, "offset", 0)?;
+        let count = opt_size_arg(args, 2, "count", b.len().saturating_sub(offset))?;
+        let range = b.range(offset, count)?;
+        b.data[range].to_vec()
+    };
+    new_buffer(vm, data)
+}
+
+/// `buffer.resize(b, size)`: grows (with zero bytes) or shrinks `b`.
+fn buf_resize(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let b = buffer_arg(args, 0, "b")?;
+    let size = size_arg(args, 1, "size")?;
+    check_size(size)?;
+    b.borrow_mut().data.resize(size, 0);
+    Ok(vec![Value::Buffer(b.clone())])
+}
+
+/// `buffer.equal(a, b)`: whether two buffers hold the same bytes.
+fn buf_equal(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let a = buffer_arg(args, 0, "a")?;
+    let b = buffer_arg(args, 1, "b")?;
+    Ok(vec![Value::Bool(
+        Rc::ptr_eq(a, b) || a.borrow().data == b.borrow().data,
+    )])
+}
+
+fn buf_tohex(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let b = buffer_arg(args, 0, "b")?.borrow();
+    let mut out = String::with_capacity(b.len() * 2);
+    for byte in &b.data {
+        out.push_str(&format!("{:02x}", byte));
+    }
+    Ok(vec![Value::string(out)])
+}
+
+fn buf_fromhex(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let s = str_arg(args, 0, "s")?;
+    if s.len() % 2 != 0 {
+        return Err("hex text must have an even length".to_string());
+    }
+    let data = (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16))
+        .collect::<Result<Vec<u8>, _>>()
+        .map_err(|_| "invalid hex text".to_string())?;
+    new_buffer(vm, data)
+}
+
+fn buf_tobase64(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let b = buffer_arg(args, 0, "b")?.borrow();
+    Ok(vec![Value::string(
+        base64::engine::general_purpose::STANDARD.encode(&b.data),
+    )])
+}
+
+fn buf_frombase64(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let s = str_arg(args, 0, "s")?;
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(s.trim())
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(s.trim()))
+        .map_err(|_| "invalid base64 text".to_string())?;
+    new_buffer(vm, data)
 }
 
 pub fn create_buffer_lib() -> Value {
     let mut table = VmTable::new();
-    table.set_str("create", crate::native!("buffer.create", buf_create));
-    table.set_str(
-        "fromstring",
-        crate::native!("buffer.fromstring", buf_fromstring),
-    );
-    table.set_str("tostring", crate::native!("buffer.tostring", buf_tostring));
-    table.set_str("len", crate::native!("buffer.len", buf_len));
-    table.set_str("isempty", crate::native!("buffer.isempty", buf_isempty));
-    table.set_str("readu8", crate::native!("buffer.readu8", buf_readu8));
-    table.set_str("writeu8", crate::native!("buffer.writeu8", buf_writeu8));
-    table.set_str("readi8", crate::native!("buffer.readi8", buf_readi8));
-    table.set_str("writei8", crate::native!("buffer.writei8", buf_writei8));
-    table.set_str("readu16", crate::native!("buffer.readu16", buf_readu16));
-    table.set_str("writeu16", crate::native!("buffer.writeu16", buf_writeu16));
-    table.set_str("readi16", crate::native!("buffer.readi16", buf_readi16));
-    table.set_str("writei16", crate::native!("buffer.writei16", buf_writei16));
-    table.set_str("readu32", crate::native!("buffer.readu32", buf_readu32));
-    table.set_str("writeu32", crate::native!("buffer.writeu32", buf_writeu32));
-    table.set_str("readi32", crate::native!("buffer.readi32", buf_readi32));
-    table.set_str("writei32", crate::native!("buffer.writei32", buf_writei32));
-    table.set_str("readf32", crate::native!("buffer.readf32", buf_readf32));
-    table.set_str("writef32", crate::native!("buffer.writef32", buf_writef32));
-    table.set_str("readf64", crate::native!("buffer.readf64", buf_readf64));
-    table.set_str("writef64", crate::native!("buffer.writef64", buf_writef64));
-    table.set_str(
-        "readstring",
-        crate::native!("buffer.readstring", buf_readstring),
-    );
-    table.set_str(
-        "writestring",
-        crate::native!("buffer.writestring", buf_writestring),
-    );
-    table.set_str("copy", crate::native!("buffer.copy", buf_copy));
-    table.set_str("fill", crate::native!("buffer.fill", buf_fill));
-    table.frozen = true;
-    Value::Table(Rc::new(RefCell::new(table)))
+    macro_rules! reg {
+        ($($name:literal => $func:ident),* $(,)?) => {
+            $(table.set_str($name, crate::native!(concat!("buffer.", $name), $func));)*
+        };
+    }
+    reg! {
+        "copy" => buf_copy,
+        "create" => buf_create,
+        "equal" => buf_equal,
+        "fill" => buf_fill,
+        "frombase64" => buf_frombase64,
+        "fromhex" => buf_fromhex,
+        "fromstring" => buf_fromstring,
+        "len" => buf_len,
+        "readbits" => buf_readbits,
+        "readf32" => buf_readf32,
+        "readf64" => buf_readf64,
+        "readi16" => buf_readi16,
+        "readi32" => buf_readi32,
+        "readi64" => buf_readi64,
+        "readi8" => buf_readi8,
+        "readstring" => buf_readstring,
+        "readu16" => buf_readu16,
+        "readu32" => buf_readu32,
+        "readu64" => buf_readu64,
+        "readu8" => buf_readu8,
+        "resize" => buf_resize,
+        "slice" => buf_slice,
+        "tobase64" => buf_tobase64,
+        "tohex" => buf_tohex,
+        "tostring" => buf_tostring,
+        "writebits" => buf_writebits,
+        "writef32" => buf_writef32,
+        "writef64" => buf_writef64,
+        "writei16" => buf_writei16,
+        "writei32" => buf_writei32,
+        "writei64" => buf_writei64,
+        "writei8" => buf_writei8,
+        "writestring" => buf_writestring,
+        "writeu16" => buf_writeu16,
+        "writeu32" => buf_writeu32,
+        "writeu64" => buf_writeu64,
+        "writeu8" => buf_writeu8,
+    }
+    crate::vm::libs::args::frozen(table)
 }

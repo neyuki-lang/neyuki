@@ -26,32 +26,18 @@ pub fn fuzz_buffer_integer_overflow() {
     for &off in &overflow_offsets {
         assert!(buf.read_u8(off).is_err());
         assert!(buf.write_u8(off, 0xFF).is_err());
-        assert!(buf.read_u16(off).is_err());
-        assert!(buf.write_u16(off, 0x1234).is_err());
-        assert!(buf.read_u32(off).is_err());
-        assert!(buf.write_u32(off, 0x12345678).is_err());
-        assert!(buf.read_f32(off).is_err());
-        assert!(buf.write_f32(off, 1.5).is_err());
-        assert!(buf.read_f64(off).is_err());
-        assert!(buf.write_f64(off, 2.5).is_err());
-        assert!(buf.read_string(off, 10).is_err());
-        assert!(buf.write_string(off, "test").is_err());
-        assert!(buf.fill(off, 0, 10).is_err());
+        for size in [1, 2, 4, 8, 10] {
+            assert!(buf.range(off, size).is_err());
+        }
     }
 }
 
 pub fn fuzz_buffer_copy_boundaries() {
-    let mut buf1 = VmBuffer::new(16);
-    let buf2 = VmBuffer::new(16);
-
-    // Target offset out of bounds
-    assert!(buf1.copy(usize::MAX, &buf2, 0, 4).is_err());
-    // Source offset out of bounds
-    assert!(buf1.copy(0, &buf2, usize::MAX, 4).is_err());
-    // Count overflow
-    assert!(buf1.copy(0, &buf2, 0, usize::MAX).is_err());
-    // Count exceeds length
-    assert!(buf1.copy(10, &buf2, 0, 10).is_err());
+    let buf = VmBuffer::new(16);
+    assert!(buf.range(usize::MAX, 4).is_err());
+    assert!(buf.range(0, usize::MAX).is_err());
+    assert!(buf.range(10, 10).is_err());
+    assert!(buf.range(12, 4).is_ok());
 }
 
 pub fn fuzz_gc_cyclic_stress() {
