@@ -302,6 +302,47 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
     }
     let single_use = |var: IrVar| use_count.get(&var).copied().unwrap_or(0) == 1;
 
+    // Table keys that are always one constant string are read straight from
+    // the constant pool (`GetTableK`/`SetTableK`). When a key is used for
+    // nothing else, its `LoadK` is not emitted at all.
+    let mut def_count: HashMap<IrVar, usize> = HashMap::new();
+    let mut const_keys: HashMap<IrVar, &str> = HashMap::new();
+    for inst in &func.instructions {
+        for var in inst.def_vars() {
+            *def_count.entry(var).or_insert(0) += 1;
+        }
+        if let IrInst::LoadConst {
+            dst,
+            val: IrConstant::String(s),
+        } = inst
+        {
+            const_keys.insert(*dst, s.as_str());
+        }
+    }
+    const_keys.retain(|var, _| def_count.get(var) == Some(&1));
+    let mut key_uses: HashMap<IrVar, usize> = HashMap::new();
+    for inst in &func.instructions {
+        match inst {
+            IrInst::GetTable { table, key, .. } if table != key => {
+                *key_uses.entry(*key).or_insert(0) += 1;
+            }
+            IrInst::SetTable { table, key, val } if table != key && val != key => {
+                *key_uses.entry(*key).or_insert(0) += 1;
+            }
+            IrInst::DebugLocal { var, .. } => {
+                key_uses.remove(var);
+                const_keys.remove(var);
+            }
+            _ => {}
+        }
+    }
+    let key_only = |var: &IrVar| {
+        const_keys.contains_key(var)
+            && key_uses
+                .get(var)
+                .is_some_and(|n| Some(n) == use_count.get(var))
+    };
+
     // Whether an instruction may leave its result in any register at all.
     // Calls and loops write fixed windows, so only these can be redirected.
     let places_freely = |inst: &IrInst| match inst {
@@ -390,6 +431,7 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
             IrInst::Label(l) => {
                 label_positions.insert(*l, proto.instructions.len());
             }
+            IrInst::LoadConst { dst, .. } if key_only(dst) => {}
             IrInst::LoadConst { dst, val } => {
                 let r = regs.get(*dst, &mut proto);
                 match val {
@@ -644,6 +686,19 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
                 let rd = regs.get(*dst, &mut proto);
                 proto.emit(Instruction::NewTable { dst: rd }, 1);
             }
+            IrInst::GetTable { dst, table, key } if const_keys.contains_key(key) => {
+                let rd = regs.get(*dst, &mut proto);
+                let rt = regs.get(*table, &mut proto);
+                let key_k = proto.add_constant(Constant::String(const_keys[key].to_string()));
+                proto.emit(
+                    Instruction::GetTableK {
+                        dst: rd,
+                        table: rt,
+                        key_k,
+                    },
+                    1,
+                );
+            }
             IrInst::GetTable { dst, table, key } => {
                 let rd = regs.get(*dst, &mut proto);
                 let rt = regs.get(*table, &mut proto);
@@ -653,6 +708,19 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
                         dst: rd,
                         table: rt,
                         key: rk,
+                    },
+                    1,
+                );
+            }
+            IrInst::SetTable { table, key, val } if const_keys.contains_key(key) => {
+                let rt = regs.get(*table, &mut proto);
+                let rv = regs.get(*val, &mut proto);
+                let key_k = proto.add_constant(Constant::String(const_keys[key].to_string()));
+                proto.emit(
+                    Instruction::SetTableK {
+                        table: rt,
+                        key_k,
+                        val: rv,
                     },
                     1,
                 );
