@@ -472,19 +472,45 @@ impl<'a> SemanticAnalyzer<'a> {
                             self.diagnostics.push(diag);
                         }
                     } else {
-                        let actual_ret = self.infer_expr_type(&exprs[0]);
-                        if actual_ret != NeyukiType::Any
-                            && !actual_ret.is_assignable_to(expected_ret)
-                        {
-                            let span = self.find_expr_span(&exprs[0]);
-                            let diag = Diagnostic::error(format!(
-                                "type mismatch: function declared with return type '{}' returns '{}'",
-                                expected_ret.display_name(),
-                                actual_ret.display_name()
-                            ))
-                            .with_code(ErrorCode::E0003)
-                            .with_label(span, format!("expected '{}', found '{}'", expected_ret.display_name(), actual_ret.display_name()));
-                            self.diagnostics.push(diag);
+                        // `(A, B)` return types are records with `_0`, `_1`, ...
+                        // fields; each returned value is checked against its
+                        // position, and values left out are nil.
+                        let expected: Vec<NeyukiType> = match expected_ret {
+                            NeyukiType::Record(fields)
+                                if fields.first().is_some_and(|(name, _)| name == "_0") =>
+                            {
+                                fields.iter().map(|(_, ty)| ty.clone()).collect()
+                            }
+                            other => vec![other.clone()],
+                        };
+                        let spreads = matches!(
+                            exprs.last(),
+                            Some(Expr::Call { .. } | Expr::MethodCall { .. } | Expr::Vararg { .. })
+                        );
+                        for (index, want) in expected.iter().enumerate() {
+                            if spreads && index + 1 >= exprs.len() {
+                                break;
+                            }
+                            let (actual_ret, span) = match exprs.get(index) {
+                                Some(expr) => {
+                                    (self.infer_expr_type(expr), self.find_expr_span(expr))
+                                }
+                                None => (
+                                    NeyukiType::Nil,
+                                    self.find_expr_span(&exprs[exprs.len() - 1]),
+                                ),
+                            };
+                            if actual_ret != NeyukiType::Any && !actual_ret.is_assignable_to(want) {
+                                let diag = Diagnostic::error(format!(
+                                    "type mismatch: function declared with return type '{}' returns '{}'",
+                                    want.display_name(),
+                                    actual_ret.display_name()
+                                ))
+                                .with_code(ErrorCode::E0003)
+                                .with_label(span, format!("expected '{}', found '{}'", want.display_name(), actual_ret.display_name()));
+                                self.diagnostics.push(diag);
+                                break;
+                            }
                         }
                     }
                 }
@@ -535,6 +561,20 @@ impl<'a> SemanticAnalyzer<'a> {
                             ),
                         );
                         self.diagnostics.push(diag);
+                    } else if let Some(decl_type) = &sym.declared_type {
+                        // Assigning a value that cannot be nil narrows an
+                        // optional variable (`x = x ?? default`) until the
+                        // next assignment. Branches are not merged, so this
+                        // only ever removes diagnostics.
+                        sym.inferred_type = match decl_type {
+                            NeyukiType::Optional(inner)
+                                if val_type != NeyukiType::Any
+                                    && val_type.is_assignable_to(inner) =>
+                            {
+                                (**inner).clone()
+                            }
+                            _ => decl_type.clone(),
+                        };
                     }
                 } else if !self.is_known_global(name) {
                     let diag = Diagnostic::error(format!(

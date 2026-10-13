@@ -23,3 +23,17 @@ if activeUser != "guest" then
 else
     print("running as fallback guest")
 end
+
+-- an optional parameter given a default is no longer optional
+local function withDefault(count: number?): number
+    count = count ?? 1
+    return count
+end
+assert(withDefault() == 1 and withDefault(4) == 4, "defaults narrow optionals")
+
+-- values left out of a multi-value return are nil
+local function lookup(found: boolean): (number?, string?)
+    if (not found) then return nil end
+    return 1, "one"
+end
+assert(lookup(false) == nil and select(2, lookup(true)) == "one", "partial returns")
