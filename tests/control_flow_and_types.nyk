@@ -37,3 +37,11 @@ local function lookup(found: boolean): (number?, string?)
     return 1, "one"
 end
 assert(lookup(false) == nil and select(2, lookup(true)) == "one", "partial returns")
+
+-- a return type ends where the body starts, even on one line
+local touched = 0
+local function touch(): () touched = touched + 1 end
+touch()
+assert(touched == 1, "one-line bodies after a return type")
+local function passAll(...: any): ...any return ... end
+assert(select("#", passAll(1, nil, 3)) == 3, "variadic return types accept any values")

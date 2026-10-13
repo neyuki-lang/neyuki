@@ -26,7 +26,9 @@ pub enum TypeExpr {
 impl TypeExpr {
     pub fn parse(s: &str) -> Self {
         let trimmed = s.trim();
-        if trimmed.is_empty() || trimmed == "any" {
+        // `...T` stands for any number of values, which no single type
+        // describes.
+        if trimmed.is_empty() || trimmed == "any" || trimmed.starts_with("...") {
             return Self::Any;
         }
         if trimmed == "nil" {

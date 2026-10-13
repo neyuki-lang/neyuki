@@ -25,6 +25,22 @@ impl TypeParserEngine {
             {
                 break;
             }
+            // Types never put two names side by side, so a name right after a
+            // complete type starts the body: `function f(): () x = 1 end`.
+            if braces == 0
+                && brackets == 0
+                && parens == 0
+                && token.kind == "name"
+                && parts.last().is_some_and(|prev: &String| {
+                    prev == ")"
+                        || prev == "}"
+                        || prev == "]"
+                        || prev == "?"
+                        || prev.starts_with(|c: char| c.is_alphanumeric() || c == '_')
+                })
+            {
+                break;
+            }
             last_line = Some(token.line);
             if token.kind == "symbol" {
                 if braces == 0
