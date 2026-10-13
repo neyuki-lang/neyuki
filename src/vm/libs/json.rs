@@ -20,6 +20,11 @@ pub fn create_json_lib() -> Value {
 
 const MAX_JSON_DEPTH: usize = 256;
 
+/// The longest JSON text `encode` produces. A table that shares a subtable
+/// under several keys, level after level, encodes to exponentially much text
+/// while staying under the depth limit.
+const MAX_JSON_OUTPUT: usize = 64 * 1024 * 1024;
+
 pub(crate) fn encode_to_string(val: &Value) -> Result<String, String> {
     let mut out = String::new();
     encode_value(val, &mut out, 0)?;
@@ -35,6 +40,12 @@ fn json_encode(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 fn encode_value(val: &Value, out: &mut String, depth: usize) -> Result<(), String> {
     if depth >= MAX_JSON_DEPTH {
         return Err("JSON nesting depth limit (256) exceeded during encode".to_string());
+    }
+    if out.len() > MAX_JSON_OUTPUT {
+        return Err(format!(
+            "JSON output exceeds the {} MiB limit during encode",
+            MAX_JSON_OUTPUT / (1024 * 1024)
+        ));
     }
     match val {
         Value::Nil => out.push_str("null"),

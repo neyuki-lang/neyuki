@@ -20,10 +20,23 @@ use crate::vm::value::{StrRef, Value, VmTable};
 /// recurse forever.
 const MAX_CONVERT_DEPTH: usize = 64;
 
-fn to_runtime(value: &Value, depth: usize) -> Result<crate::runtime::Value, String> {
+/// How many values one call may copy across. The depth cap alone still lets a
+/// table that shares a subtable under several keys, level after level, expand
+/// into exponentially many copies.
+const MAX_CONVERT_VALUES: usize = 1_000_000;
+
+fn to_runtime(
+    value: &Value,
+    depth: usize,
+    budget: &mut usize,
+) -> Result<crate::runtime::Value, String> {
     if depth > MAX_CONVERT_DEPTH {
         return Err("value nests too deeply to pass to a native function".to_string());
     }
+    if *budget == 0 {
+        return Err("value is too large to pass to a native function".to_string());
+    }
+    *budget -= 1;
     Ok(match value {
         Value::Nil => crate::runtime::Value::Nil,
         Value::Bool(b) => crate::runtime::Value::Bool(*b),
@@ -41,12 +54,12 @@ fn to_runtime(value: &Value, depth: usize) -> Result<crate::runtime::Value, Stri
                 metatable: None,
             };
             for item in &source.array {
-                table.array.push(to_runtime(item, depth + 1)?);
+                table.array.push(to_runtime(item, depth + 1, budget)?);
             }
             for (key, item) in &source.fields {
                 table
                     .fields
-                    .insert(key.to_string(), to_runtime(item, depth + 1)?);
+                    .insert(key.to_string(), to_runtime(item, depth + 1, budget)?);
             }
             crate::runtime::Value::Table(Rc::new(RefCell::new(table)))
         }
@@ -105,9 +118,10 @@ pub(crate) fn call_primitive(
     primitive: crate::runtime::Native,
     args: &[Value],
 ) -> Result<Vec<Value>, String> {
+    let mut budget = MAX_CONVERT_VALUES;
     let converted = args
         .iter()
-        .map(|arg| to_runtime(arg, 0))
+        .map(|arg| to_runtime(arg, 0, &mut budget))
         .collect::<Result<Vec<_>, _>>()?;
     let results = primitive(converted)?;
     let mut out = Vec::with_capacity(results.len());
