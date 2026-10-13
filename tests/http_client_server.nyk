@@ -31,6 +31,8 @@ assert(not try(http.request, "http://localhost/", { method = 5 }), "method must 
 assert(not try(http.request, "http://localhost/", { headers = { a = {} } }), "header values must be strings or numbers")
 assert(not try(http.request, "http://localhost/", { timeout = "soon" }), "timeout must be a number")
 assert(not try(http.request, "http://localhost/", { follow = "yes" }), "follow must be a boolean")
+assert(not try(http.request, "http://localhost/", { maxBody = "big" }), "maxBody must be a number")
+assert(not try(http.request, "http://localhost/", { maxBody = -1 }), "maxBody must not be negative")
 assert(not try(http.post, "http://localhost/", 42), "post body must be a string")
 ok, err = try(http.get, "not a url")
 assert(not ok, "an invalid url should error")
@@ -68,6 +70,7 @@ assert(not ok, "a request to a closed port should error")
 assert(not try(http.listen, { port = "eighty" }), "port must be a number")
 assert(not try(http.listen, { host = 1 }), "host must be a string")
 assert(not try(http.listen, { port = 70000 }), "port must fit in 16 bits")
+assert(not try(http.listen, { port = 0, maxBody = "big" }), "maxBody must be a number")
 
 -- forward binds like listen, reports where it points and frees its port on close.
 local forward = http.forward({ host = "127.0.0.1", port = 0 }, 5173)

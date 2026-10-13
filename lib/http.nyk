@@ -65,6 +65,8 @@ end
 --   body     the request body string
 --   timeout  seconds to wait for the whole exchange (default: no limit)
 --   follow   whether redirects are followed (default true)
+--   maxBody  the largest response body accepted, in bytes (default 64 MiB);
+--            a larger one raises an error
 -- Only transport failures raise errors; any status code is returned as a
 -- `Response` with `ok` set for 2xx.
 function http.request(url: string, options: RequestOptions?): Response
@@ -76,6 +78,7 @@ function http.request(url: string, options: RequestOptions?): Response
     checkOptionalString(options.body, "body")
     checkOptionalNumber(options.timeout, "timeout")
     checkOptionalBoolean(options.follow, "follow")
+    checkOptionalNumber(options.maxBody, "maxBody")
 
     local raw = __http_request(
         options.method ?? "GET",
@@ -83,7 +86,8 @@ function http.request(url: string, options: RequestOptions?): Response
         options.headers,
         options.body,
         options.timeout,
-        options.follow ?? true
+        options.follow ?? true,
+        options.maxBody
     )
     return makeResponse(raw)
 end
@@ -284,16 +288,19 @@ function makeRequest(raw: {[string]: any}): Request
 end
 
 -- Opens a listening socket. `options` may be a port number or a table with
--- `host` (default "127.0.0.1") and `port` (default 8080; 0 picks a free one).
+-- `host` (default "127.0.0.1"), `port` (default 8080; 0 picks a free one) and
+-- `maxBody` (the largest request body accepted, in bytes; default 64 MiB).
+-- Larger requests are answered with 413 and never returned by `accept`.
 function http.listen(options: ServerOptions | number | nil): Server
     if (type(options) == "number") then options = { port = options } end
     checkOptionalTable(options, "options")
     options = options ?? {}
     checkOptionalString(options.host, "host")
     checkOptionalNumber(options.port, "port")
+    checkOptionalNumber(options.maxBody, "maxBody")
     local host = options.host ?? "127.0.0.1"
 
-    local id, port = __http_listen(host, options.port ?? 8080)
+    local id, port = __http_listen(host, options.port ?? 8080, options.maxBody)
     local closed = false
     local server = {}
     server.host = host

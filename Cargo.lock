@@ -1692,7 +1692,7 @@ dependencies = [
  "softbuffer",
  "subtle",
  "tiny-skia",
- "tiny_http",
+ "tiny_http_dh",
  "ureq",
  "winit",
  "x25519-dalek",
@@ -3115,10 +3115,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "tiny_http"
-version = "0.12.0"
+name = "tiny_http_dh"
+version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "389915df6413a2e74fb181895f933386023c71110878cd0825588928e64cdc82"
+checksum = "6bba70d332c19cbaf738b2687041007bfe3492ef313f7c7077ca65774fe104a3"
 dependencies = [
  "ascii",
  "chunked_transfer",

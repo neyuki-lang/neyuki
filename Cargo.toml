@@ -21,7 +21,11 @@ num-bigint = "0.4"
 num-integer = "0.1"
 num-traits = "0.2"
 rand = "0.8"
-tiny_http = "0.12"
+# A maintained fork of `tiny_http` 0.12, kept under the original name. Upstream
+# drains an unread request body by allocating a buffer of the remaining
+# declared Content-Length, so a client claiming a huge body and hanging up
+# aborts the process; the fork reads it through a fixed-size buffer.
+tiny_http = { package = "tiny_http_dh", version = "0.12.2" }
 # `native-tls` keeps the build free of C compilers (rustls needs `ring`/`aws-lc`).
 # schannel 0.1.28+ links Windows APIs with `raw-dylib`, which needs `dlltool`
 # on the windows-gnu toolchain; older versions use prebuilt import libraries.

@@ -50,7 +50,8 @@ struct Forward {
 }
 
 thread_local! {
-    static SERVERS: RefCell<HashMap<u64, tiny_http::Server>> = RefCell::new(HashMap::new());
+    // Each server with the largest request body it accepts.
+    static SERVERS: RefCell<HashMap<u64, (tiny_http::Server, u64)>> = RefCell::new(HashMap::new());
     // Each parked request keeps its raw body so a proxy can pass it on
     // byte-for-byte; the table Neyuki sees holds the (lossy) string copy.
     static PENDING: RefCell<HashMap<u64, (tiny_http::Request, Vec<u8>)>> = RefCell::new(HashMap::new());
@@ -92,6 +93,19 @@ fn integer_arg(args: &[Value], index: usize, name: &str) -> Result<u64, String> 
         return Err(format!("{} must be a non-negative integer", name));
     }
     Ok(number as u64)
+}
+
+/// The largest body a request or response may carry unless `maxBody` says
+/// otherwise. Without a cap, one peer could make the process buffer
+/// gigabytes.
+const DEFAULT_MAX_BODY: u64 = 64 * 1024 * 1024;
+
+/// A body size limit in bytes; nil or absent means `DEFAULT_MAX_BODY`.
+fn max_body_arg(args: &[Value], index: usize) -> Result<u64, String> {
+    match args.get(index) {
+        None | Some(Value::Nil) => Ok(DEFAULT_MAX_BODY),
+        _ => integer_arg(args, index, "maxBody"),
+    }
 }
 
 /// A timeout in seconds; nil, absent or zero means "no timeout".
@@ -207,9 +221,10 @@ fn integer(value: u64) -> Value {
     Value::Integer(Int::from_bigint(BigInt::from(value)))
 }
 
-/// `__http_request(method, url, headers?, body?, timeout?, follow?)` performs
-/// one request and returns `{ status, headers, body, url }`. Only transport
-/// failures (DNS, connection, TLS, timeout, too many redirects) are errors.
+/// `__http_request(method, url, headers?, body?, timeout?, follow?, maxBody?)`
+/// performs one request and returns `{ status, headers, body, url }`. Only
+/// transport failures (DNS, connection, TLS, timeout, too many redirects) and
+/// a response body over `maxBody` bytes are errors.
 fn builtin_request(args: Vec<Value>) -> Result<Vec<Value>, String> {
     let method = string_arg(&args, 0, "method")?.to_ascii_uppercase();
     let url = string_arg(&args, 1, "url")?;
@@ -217,6 +232,7 @@ fn builtin_request(args: Vec<Value>) -> Result<Vec<Value>, String> {
     let body = optional_string_arg(&args, 3, "body")?;
     let timeout = timeout_arg(&args, 4, "timeout")?;
     let follow = bool_arg(&args, 5, "follow", true)?;
+    let max_body = max_body_arg(&args, 6)?;
 
     // The crate is built with only the platform TLS backend (see Cargo.toml),
     // so it must be selected explicitly.
@@ -256,9 +272,16 @@ fn builtin_request(args: Vec<Value>) -> Result<Vec<Value>, String> {
     let bytes = response
         .body_mut()
         .with_config()
-        .limit(u64::MAX)
+        // ureq rejects a body that reaches the limit, not one past it.
+        .limit(max_body.saturating_add(1))
         .read_to_vec()
-        .map_err(|err| format!("cannot read response from `{}`: {}", url, err))?;
+        .map_err(|err| match err {
+            ureq::Error::BodyExceedsLimit(_) => format!(
+                "response from `{}` is larger than maxBody ({} bytes)",
+                url, max_body
+            ),
+            err => format!("cannot read response from `{}`: {}", url, err),
+        })?;
 
     Ok(vec![record(vec![
         ("status", integer(status)),
@@ -268,11 +291,14 @@ fn builtin_request(args: Vec<Value>) -> Result<Vec<Value>, String> {
     ])])
 }
 
-/// `__http_listen(host, port)` binds a server and returns its id followed by
-/// the bound port (port 0 asks the OS for a free one).
+/// `__http_listen(host, port, maxBody?)` binds a server and returns its id
+/// followed by the bound port (port 0 asks the OS for a free one). Requests
+/// with a body over `maxBody` bytes are answered with 413 and never reach
+/// `__http_accept`.
 fn builtin_listen(args: Vec<Value>) -> Result<Vec<Value>, String> {
     let host = string_arg(&args, 0, "host")?;
     let port = integer_arg(&args, 1, "port")?;
+    let max_body = max_body_arg(&args, 2)?;
     if port > u64::from(u16::MAX) {
         return Err(format!("port {} is out of range (0-65535)", port));
     }
@@ -285,7 +311,7 @@ fn builtin_listen(args: Vec<Value>) -> Result<Vec<Value>, String> {
         .map(|addr| u64::from(addr.port()))
         .unwrap_or(port);
     let id = next_id();
-    SERVERS.with(|servers| servers.borrow_mut().insert(id, server));
+    SERVERS.with(|servers| servers.borrow_mut().insert(id, (server, max_body)));
     Ok(vec![integer(id), integer(bound_port)])
 }
 
@@ -303,6 +329,52 @@ fn is_upgrade(request: &tiny_http::Request) -> bool {
     })
 }
 
+/// What reading a request's body found.
+enum RequestBody {
+    Complete(Vec<u8>),
+    /// Longer than the server's `maxBody`.
+    TooLarge,
+    /// The client stopped before sending all it declared, or the read failed.
+    Incomplete,
+}
+
+fn read_request_body(request: &mut tiny_http::Request, max_body: u64) -> RequestBody {
+    let declared = request.body_length().map(|length| length as u64);
+    if declared.is_some_and(|length| length > max_body) {
+        return RequestBody::TooLarge;
+    }
+    let limit = if is_upgrade(request) {
+        // tiny_http hands over the raw socket as the body of an upgrade
+        // request (a WebSocket handshake, say), so reading to EOF would block
+        // until the client hangs up. Take only what Content-Length promises.
+        match declared {
+            Some(length) => length,
+            None => return RequestBody::Complete(Vec::new()),
+        }
+    } else {
+        // One byte past the limit tells an oversized body apart from one
+        // that fits exactly.
+        max_body.saturating_add(1)
+    };
+    let mut bytes = Vec::new();
+    if request
+        .as_reader()
+        .take(limit)
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
+        return RequestBody::Incomplete;
+    }
+    let read = bytes.len() as u64;
+    if read > max_body {
+        RequestBody::TooLarge
+    } else if declared.is_some_and(|length| read < length) {
+        RequestBody::Incomplete
+    } else {
+        RequestBody::Complete(bytes)
+    }
+}
+
 /// `__http_accept(server, timeout?)` waits for the next request and returns
 /// `{ id, method, path, headers, body, remote }`, or nil once `timeout`
 /// seconds pass without one.
@@ -310,39 +382,35 @@ fn builtin_accept(args: Vec<Value>) -> Result<Vec<Value>, String> {
     let id = integer_arg(&args, 0, "server")?;
     let timeout = timeout_arg(&args, 1, "timeout")?;
 
-    let received = SERVERS.with(|servers| {
-        let servers = servers.borrow();
-        let server = servers
-            .get(&id)
-            .ok_or_else(|| "server is closed".to_string())?;
-        match timeout {
-            Some(duration) => server.recv_timeout(duration),
-            None => server.recv().map(Some),
-        }
-        .map_err(|err| format!("cannot accept request: {}", err))
-    })?;
-    let Some(mut request) = received else {
-        return Ok(vec![Value::Nil]);
-    };
+    let deadline = timeout.map(|duration| std::time::Instant::now() + duration);
 
-    let mut bytes = Vec::new();
-    if is_upgrade(&request) {
-        // tiny_http hands over the raw socket as the body of an upgrade
-        // request (a WebSocket handshake, say), so reading to EOF would block
-        // until the client hangs up. Take only what Content-Length promises.
-        if let Some(length) = request.body_length() {
-            request
-                .as_reader()
-                .take(length as u64)
-                .read_to_end(&mut bytes)
-                .map_err(|err| format!("cannot read request body: {}", err))?;
+    let (request, bytes) = loop {
+        let (received, max_body) = SERVERS.with(|servers| {
+            let servers = servers.borrow();
+            let (server, max_body) = servers
+                .get(&id)
+                .ok_or_else(|| "server is closed".to_string())?;
+            match deadline {
+                Some(deadline) => server
+                    .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())),
+                None => server.recv().map(Some),
+            }
+            .map(|received| (received, *max_body))
+            .map_err(|err| format!("cannot accept request: {}", err))
+        })?;
+        let Some(mut request) = received else {
+            return Ok(vec![Value::Nil]);
+        };
+        // A request that is too large is answered here and one whose client
+        // went away is dropped; either way the wait goes on for the next.
+        match read_request_body(&mut request, max_body) {
+            RequestBody::Complete(bytes) => break (request, bytes),
+            RequestBody::TooLarge => {
+                let _ = request.respond(tiny_http::Response::empty(413));
+            }
+            RequestBody::Incomplete => {}
         }
-    } else {
-        request
-            .as_reader()
-            .read_to_end(&mut bytes)
-            .map_err(|err| format!("cannot read request body: {}", err))?;
-    }
+    };
     let headers = headers_table(
         request
             .headers()
@@ -401,7 +469,7 @@ fn builtin_respond(args: Vec<Value>) -> Result<Vec<Value>, String> {
 /// still open. Requests accepted but not yet answered are dropped.
 fn builtin_close(args: Vec<Value>) -> Result<Vec<Value>, String> {
     let id = integer_arg(&args, 0, "server")?;
-    let Some(server) = SERVERS.with(|servers| servers.borrow_mut().remove(&id)) else {
+    let Some((server, _)) = SERVERS.with(|servers| servers.borrow_mut().remove(&id)) else {
         return Ok(vec![Value::Bool(false)]);
     };
     let address = server.server_addr().to_ip();
@@ -549,7 +617,7 @@ fn proxy_upstream(
     let bytes = response
         .body_mut()
         .with_config()
-        .limit(u64::MAX)
+        .limit(DEFAULT_MAX_BODY + 1)
         .read_to_vec()
         .map_err(|err| format!("cannot read response: {}", err))?;
 
@@ -1032,5 +1100,83 @@ mod tests {
         // The request is gone either way.
         assert!(builtin_respond(vec![request_id, integer(200)]).is_err());
         builtin_close(vec![integer(server)]).unwrap();
+    }
+
+    #[test]
+    fn test_accept_answers_413_for_oversized_bodies_and_keeps_waiting() {
+        let listen = builtin_listen(vec![
+            Value::String("127.0.0.1".into()),
+            integer(0),
+            integer(8),
+        ])
+        .unwrap();
+        let server = number_result(Ok(listen.clone()), 0);
+        let port = number_result(Ok(listen), 1) as u16;
+        let client = std::thread::spawn(move || {
+            let send = |body: &str| {
+                let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+                let request = format!(
+                    "POST /x HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\
+                     Content-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(request.as_bytes()).unwrap();
+                String::from_utf8_lossy(&read_message(&mut stream)).to_string()
+            };
+            (send("far too long a body"), send("fits"))
+        });
+        let accepted = builtin_accept(vec![integer(server), integer(10)]).unwrap();
+        let Value::Table(table) = &accepted[0] else {
+            panic!("accept should return a table");
+        };
+        let body = table.borrow().fields.get("body").cloned().unwrap();
+        assert!(
+            matches!(&body, Value::String(s) if s == "fits"),
+            "only the request that fits should be accepted"
+        );
+        let request_id = table.borrow().fields.get("id").cloned().unwrap();
+        builtin_respond(vec![request_id, integer(200)]).unwrap();
+        let (rejected, answered) = client.join().unwrap();
+        assert!(rejected.starts_with("HTTP/1.1 413 "), "{}", rejected);
+        assert!(answered.starts_with("HTTP/1.1 200 "), "{}", answered);
+        builtin_close(vec![integer(server)]).unwrap();
+    }
+
+    #[test]
+    fn test_request_rejects_responses_over_max_body() {
+        let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = upstream.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = upstream.accept().unwrap();
+                read_message(&mut stream);
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\n0123456789",
+                    )
+                    .unwrap();
+            }
+        });
+        let url = Value::String(format!("http://127.0.0.1:{}/", port));
+        let request = |max_body: u64| {
+            builtin_request(vec![
+                Value::String("GET".into()),
+                url.clone(),
+                Value::Nil,
+                Value::Nil,
+                integer(10),
+                Value::Bool(true),
+                integer(max_body),
+            ])
+        };
+        let Err(err) = request(4) else {
+            panic!("a body over maxBody should be an error");
+        };
+        assert!(err.contains("larger than maxBody (4 bytes)"), "{}", err);
+        if let Err(err) = request(10) {
+            panic!("a body of exactly maxBody should be accepted: {}", err);
+        }
+        server.join().unwrap();
     }
 }
