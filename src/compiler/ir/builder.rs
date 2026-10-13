@@ -273,15 +273,8 @@ impl IrBuilder {
     /// Returns `None` when `expr` is not a call, so the caller falls back to
     /// evaluating it as a single value.
     fn compile_call_results(&mut self, expr: &Expr, count: usize) -> Option<Vec<IrVar>> {
-        let (callee, args) = match expr {
-            Expr::Call { callee, args, .. } => {
-                let callee_var = self.compile_expr(callee, None);
-                let arg_vars = args
-                    .iter()
-                    .map(|arg| self.compile_expr(arg, None))
-                    .collect::<Vec<_>>();
-                (callee_var, arg_vars)
-            }
+        let (callee, receiver, args) = match expr {
+            Expr::Call { callee, args, .. } => (self.compile_expr(callee, None), None, args),
             Expr::MethodCall {
                 object,
                 method,
@@ -300,22 +293,41 @@ impl IrBuilder {
                     table: tbl,
                     key,
                 });
-                let mut arg_vars = vec![tbl];
-                for arg in args {
-                    arg_vars.push(self.compile_expr(arg, None));
-                }
-                (callee, arg_vars)
+                (callee, Some(tbl), args)
             }
             _ => return None,
         };
 
+        let spreads = Self::last_spreads(args);
+        let fixed = if spreads {
+            &args[..args.len() - 1]
+        } else {
+            &args[..]
+        };
+        let mut arg_vars: Vec<IrVar> = receiver.into_iter().collect();
+        for arg in fixed {
+            arg_vars.push(self.compile_expr(arg, None));
+        }
         let dsts: Vec<IrVar> = (0..count).map(|_| self.alloc_var()).collect();
-        self.emit(IrInst::Call {
-            dsts: dsts.clone(),
-            callee,
-            args,
-            retc: count as u8,
-        });
+        if spreads {
+            let source = self.spread_source(&args[args.len() - 1]);
+            self.emit(IrInst::Spread {
+                source,
+                sink: SpreadSink::Call {
+                    dsts: dsts.clone(),
+                    callee,
+                    fixed_args: arg_vars,
+                    retc: count as u8,
+                },
+            });
+        } else {
+            self.emit(IrInst::Call {
+                dsts: dsts.clone(),
+                callee,
+                args: arg_vars,
+                retc: count as u8,
+            });
+        }
         Some(dsts)
     }
 
