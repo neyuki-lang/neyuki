@@ -40,6 +40,11 @@ pub struct DapSession {
 }
 
 impl DapSession {
+    /// Whether the debugger needs to see every new line.
+    pub fn wants_lines(&self) -> bool {
+        false
+    }
+
     pub fn stdio() -> Self {
         Self {
             reader: Box::new(std::io::BufReader::new(std::io::stdin())),
@@ -81,6 +86,11 @@ impl DapSession {
         };
         (session, out)
     }
+}
+
+/// Pauses at a line breakpoint or step target.
+pub fn check_line(_vm: &mut VM, _line: u32) -> Result<(), String> {
+    Ok(())
 }
 
 fn ok_response(req_seq: f64, command: &str, server_seq: u64, body: Json) -> Json {

@@ -121,6 +121,8 @@ pub struct IrFunction {
     /// Parallel to `upvalues`: where each captured value comes from. A
     /// descriptor's `index` is meaningless until it is resolved from this.
     pub upvalue_vars: Vec<UpvalSource>,
+    /// Parallel to `upvalues`: the captured variables' names.
+    pub upvalue_names: Vec<String>,
     pub cfg: Option<ControlFlowGraph>,
 }
 
@@ -135,6 +137,7 @@ impl IrFunction {
             protos: Vec::new(),
             upvalues: Vec::new(),
             upvalue_vars: Vec::new(),
+            upvalue_names: Vec::new(),
             cfg: None,
         }
     }

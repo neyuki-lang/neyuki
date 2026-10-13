@@ -193,6 +193,7 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
     }
     let mut proto = Proto::new(func.name.clone(), func.num_params, func.is_vararg);
     proto.upvalues = func.upvalues.clone();
+    proto.upvalue_names = func.upvalue_names.clone();
 
     let allocation = allocate_registers(&build_cfg(&func.instructions), func.num_params);
     let mut regs = match &allocation {

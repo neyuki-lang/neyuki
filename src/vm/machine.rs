@@ -55,14 +55,16 @@ pub struct CoroutineState {
     pub open_upvalues: Vec<ParkedUpvalue>,
 }
 
-/// A `debug.sethook` hook (v1: call/return events only). `None` means no
-/// hook is set, in which case event checks cost a single predictable
-/// branch at call/return boundaries and nothing in the dispatch loop.
+/// A `debug.sethook` hook. `None` means no hook is set, in which case event
+/// checks cost a single predictable branch.
 #[derive(Clone)]
 pub struct DebugHook {
     pub func: Value,
     pub on_call: bool,
     pub on_return: bool,
+    pub on_line: bool,
+    /// Fire a "count" event every this many instructions (0: never).
+    pub count: u32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -137,6 +139,12 @@ pub struct VM {
     pub hook: Option<DebugHook>,
     /// True while a hook function itself runs: hooks never trigger hooks.
     pub in_hook: bool,
+    /// Instructions left until the next count event.
+    pub hook_countdown: u32,
+    /// Set while anything needs to see every instruction (a line or count
+    /// hook, or a debugger stepping or holding line breakpoints). The
+    /// dispatch loop tests only this.
+    pub trap: bool,
     /// Active DAP debug session, if any (`neyuki dap`). `None` keeps
     /// breakpoint checks to a single predictable branch.
     pub dap: Option<DapSession>,
@@ -187,6 +195,8 @@ impl VM {
             yield_floor: 0,
             hook: None,
             in_hook: false,
+            hook_countdown: 0,
+            trap: false,
             dap: None,
             in_eval: false,
             open_upvalues: Vec::new(),
@@ -546,6 +556,54 @@ impl VM {
         self.in_hook = true;
         let arg = Value::str(event.name());
         let res = self.call_function(func, &[arg]);
+        self.in_hook = false;
+        res.map(|_| ())
+    }
+
+    /// Recomputes `trap` after a hook or debugger setting changed.
+    pub fn update_trap(&mut self) {
+        let hook_wants = self.hook.as_ref().is_some_and(|h| h.on_line || h.count > 0);
+        let debugger_wants = self.dap.as_ref().is_some_and(|d| d.wants_lines());
+        self.trap = hook_wants || debugger_wants;
+    }
+
+    /// Line and count events for the instruction at `ip` of the running
+    /// frame, and the debugger's line breakpoints and stepping.
+    fn instruction_hook(&mut self, ip: usize) -> Result<(), String> {
+        if self.in_hook || self.in_eval {
+            return Ok(());
+        }
+        let frame = self.frames.last_mut().unwrap();
+        let line = frame.closure.proto.lines.get(ip).copied().unwrap_or(0);
+        // A new line, or a jump back into the same one (a loop), starts a
+        // new line event.
+        let new_line = line != 0 && (line != frame.hook_line || ip <= frame.hook_ip);
+        frame.hook_line = line;
+        frame.hook_ip = ip;
+
+        if self.dap.is_some() && new_line {
+            crate::dap::check_line(self, line)?;
+        }
+        let Some(hook) = self.hook.clone() else {
+            return Ok(());
+        };
+        if hook.count > 0 {
+            if self.hook_countdown <= 1 {
+                self.hook_countdown = hook.count;
+                self.call_hook(&hook.func, &[Value::str("count")])?;
+            } else {
+                self.hook_countdown -= 1;
+            }
+        }
+        if hook.on_line && new_line {
+            self.call_hook(&hook.func, &[Value::str("line"), Value::Int(line as i64)])?;
+        }
+        Ok(())
+    }
+
+    fn call_hook(&mut self, func: &Value, args: &[Value]) -> Result<(), String> {
+        self.in_hook = true;
+        let res = self.call_function(func.clone(), args);
         self.in_hook = false;
         res.map(|_| ())
     }
@@ -960,6 +1018,12 @@ impl VM {
                 consts = current_closure.proto.values();
                 continue;
             };
+            if self.trap {
+                // The frame's ip points past the instruction about to run,
+                // as it does while that instruction executes.
+                self.frames.last_mut().unwrap().ip = ip + 1;
+                self.instruction_hook(ip)?;
+            }
             ip += 1;
 
             match inst {
@@ -2599,14 +2663,10 @@ mod tests {
         assert_eq!(res.to_string(), "1");
     }
 
-    // Deferred to v3: per-instruction line numbers are not plumbed yet
-    // (both compilers emit line 1; the parser's SpanPool is dropped in
-    // `compile_source`). Needs spans threaded AST -> IR/bytecode emit.
     #[test]
-    #[ignore]
     fn test_vm_debug_hook_line_events() {
         let code = "local lines = {}\nlocal function tracer(ev)\n  if ev == \"line\" then\n    local info = debug.getinfo(2)\n    lines[#lines + 1] = info.currentline\n  end\nend\ndebug.sethook(tracer, \"l\")\nlocal a = 1\nlocal b = 2\nlocal c = a + b\ndebug.sethook(nil)\nreturn table.concat(lines, \",\")";
-        let res = run_code(code);
+        let res = run_debug(code);
         assert_eq!(res.to_string(), "9,10,11,12");
     }
 
@@ -2748,7 +2808,7 @@ return val2";
     fn test_vm_debug_getinfo_and_traceback() {
         let code = "local d = require(\"@neyuki/debug\")\n\
 local info = d.getinfo(d.traceback)\n\
-assert(info.what == \"C\")\n\
+assert(info.what == \"native\")\n\
 assert(info.name == \"debug.traceback\")\n\
 local tb = d.traceback(\"error message\")\n\
 assert(string.len(tb) > 10)\n\

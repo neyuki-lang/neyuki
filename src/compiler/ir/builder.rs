@@ -41,6 +41,7 @@ pub struct IrBuilder {
     parent_scopes: Vec<Vec<HashMap<String, IrVar>>>,
     upvalues: Vec<UpvalueDesc>,
     upvalue_vars: Vec<UpvalSource>,
+    upvalue_names: Vec<String>,
 }
 
 impl Default for IrBuilder {
@@ -66,6 +67,7 @@ impl IrBuilder {
             parent_scopes: Vec::new(),
             upvalues: Vec::new(),
             upvalue_vars: Vec::new(),
+            upvalue_names: Vec::new(),
         }
     }
 
@@ -161,7 +163,7 @@ impl IrBuilder {
             for scope in self.parent_scopes[p].iter().rev() {
                 if let Some(&var) = scope.get(name) {
                     let levels_up = num_parents - 1 - p;
-                    return Some(self.capture(var, levels_up));
+                    return Some(self.capture(var, levels_up, name));
                 }
             }
         }
@@ -174,7 +176,7 @@ impl IrBuilder {
     /// the enclosing function too, which is settled once this one is attached
     /// to it. Each descriptor's `index` is filled in then, or at lowering for
     /// a parent's register.
-    fn capture(&mut self, var: IrVar, levels_up: usize) -> u8 {
+    fn capture(&mut self, var: IrVar, levels_up: usize, name: &str) -> u8 {
         let wanted = if levels_up == 0 {
             UpvalSource::ParentLocal(var)
         } else {
@@ -189,6 +191,7 @@ impl IrBuilder {
             index: 0,
         });
         self.upvalue_vars.push(wanted);
+        self.upvalue_names.push(name.to_string());
         idx
     }
 
@@ -750,7 +753,8 @@ impl IrBuilder {
             if let UpvalSource::Pending { var, levels_up } = sub_builder.upvalue_vars[slot] {
                 // One level closer from here: the child's grandparent is this
                 // function's parent.
-                sub_builder.upvalues[slot].index = self.capture(var, levels_up - 1);
+                let name = sub_builder.upvalue_names[slot].clone();
+                sub_builder.upvalues[slot].index = self.capture(var, levels_up - 1, &name);
                 sub_builder.upvalue_vars[slot] = UpvalSource::ParentUpvalue;
             }
         }
@@ -772,6 +776,7 @@ impl IrBuilder {
             protos: sub_builder.child_protos,
             upvalues: sub_builder.upvalues,
             upvalue_vars: sub_builder.upvalue_vars,
+            upvalue_names: sub_builder.upvalue_names,
             cfg: None,
         });
         proto_idx
@@ -1286,6 +1291,14 @@ pub fn ast_to_ir_with(
     }
     let has_terminal = matches!(builder.instructions.last(), Some(IrInst::Return(_)));
     if !has_terminal {
+        // The chunk's own locals end with it.
+        let vars = std::mem::take(&mut builder.scope_vars[0]);
+        if !vars.is_empty() {
+            builder.emit(IrInst::DebugScopeEnd {
+                vars,
+                keep_alive: builder.keep_locals,
+            });
+        }
         let nil_var = builder.alloc_var();
         builder.emit(IrInst::LoadNil { dst: nil_var });
         builder.emit(IrInst::Return(vec![nil_var]));
@@ -1301,6 +1314,7 @@ pub fn ast_to_ir_with(
             protos: builder.child_protos,
             upvalues: Vec::new(),
             upvalue_vars: Vec::new(),
+            upvalue_names: Vec::new(),
             cfg: None,
         },
     }

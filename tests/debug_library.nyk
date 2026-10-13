@@ -1,0 +1,92 @@
+-- debug: frames, locals, upvalues, hooks and tracebacks.
+
+local function where(): any
+    return debug.getinfo(2)
+end
+
+local function probe(): any
+    local info = where()
+    return info
+end
+
+local info = probe()
+assert(info.name == "probe", "getinfo names the frame")
+assert(info.currentline == 8, "currentline is the calling line, got " .. tostring(info.currentline))
+assert(string.find(info.source, "debug_library.nyk") != nil, "source is the file")
+assert(info.short_src == "debug_library.nyk", "short_src drops the directory")
+assert(info.linedefined == 8 and info.what == "Neyuki", "linedefined and what")
+
+local about = debug.getinfo(string.upper)
+assert(about.what == "native" and about.name == "string.upper", "natives describe themselves")
+
+-- locals in declaration order, readable and writable
+local function locals(): any
+    local first = 10
+    local second = "two"
+    local name1, value1 = debug.getlocal(1, 1)
+    local name2, value2 = debug.getlocal(1, 2)
+    debug.setlocal(1, 1, 99)
+    return name1, value1, name2, value2, first, second
+end
+local n1, v1, n2, v2, f, s = locals()
+assert(n1 == "first" and v1 == 10, "first local")
+assert(n2 == "second" and v2 == "two", "second local")
+assert(f == 99 and s == "two", "setlocal writes through")
+
+local function params(alpha: any, beta: any) end
+assert(debug.getlocal(params, 1) == "alpha" and debug.getlocal(params, 2) == "beta", "parameter names")
+
+local function varargs(...: any): any
+    return debug.getlocal(1, -2)
+end
+local vname, vvalue = varargs("a", "b")
+assert(vname == "(vararg)" and vvalue == "b", "negative indices read varargs")
+
+-- upvalues by name
+local counter = 0
+local function bump()
+    counter += 1
+end
+local upname, upvalue = debug.getupvalue(bump, 1)
+assert(upname == "counter" and upvalue == 0, "upvalue name and value")
+debug.setupvalue(bump, 1, 41)
+bump()
+assert(counter == 42, "setupvalue writes the shared variable")
+
+-- line and count hooks
+local lines = {}
+local function record(event: string, line: number)
+    lines[#lines + 1] = line
+end
+local box = { 0 }
+local start = debug.getinfo(1).currentline
+debug.sethook(record, "l")
+box[1] += 1
+box[1] += 2
+debug.sethook()
+local expected = tostring(start + 2) .. "," .. tostring(start + 3) .. "," .. tostring(start + 4)
+assert(table.concat(lines, ",") == expected, "line events: " .. table.concat(lines, ","))
+assert(box[1] == 3, "the traced code ran")
+
+local counted = 0
+debug.sethook(function(event: string)
+    counted += 1
+end, "", 1)
+local x = 1 + 2
+debug.sethook()
+assert(counted > 0, "count events fire")
+local hook, mask, count = debug.gethook()
+assert(hook == nil, "hook removed")
+
+-- tracebacks name file and line
+local function fails()
+    error("boom")
+end
+local ok, trace = xpcall(fails, function(err: string): string
+    return debug.traceback(err)
+end)
+assert(not ok and string.find(trace, "boom") == 1, "traceback starts with the message")
+assert(string.find(trace, "stack traceback:", 1, true) != nil, "traceback header")
+assert(string.find(trace, "debug_library.nyk:", 1, true) != nil, "traceback names the file")
+
+print("[pass] debug library")

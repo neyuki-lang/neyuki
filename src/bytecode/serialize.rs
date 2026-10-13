@@ -444,9 +444,10 @@ fn write_proto(buf: &mut Vec<u8>, proto: &Proto, parent_source: Option<&str>) {
     }
 
     write_u32(buf, proto.upvalues.len() as u32);
-    for upval in &proto.upvalues {
+    for (i, upval) in proto.upvalues.iter().enumerate() {
         write_u8(buf, if upval.in_stack { 1 } else { 0 });
         write_u8(buf, upval.index);
+        write_string(buf, proto.upvalue_names.get(i).map_or("", String::as_str));
     }
 
     write_u32(buf, proto.lines.len() as u32);

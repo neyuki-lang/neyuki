@@ -49,6 +49,8 @@ pub struct Proto {
     pub local_names: Vec<LocalVarInfo>,
     /// The chunk this function was compiled from, such as a file path.
     pub source: Option<Rc<str>>,
+    /// Parallel to `upvalues`: the captured variables' names.
+    pub upvalue_names: Vec<String>,
     // Runtime-derived state the VM attaches on first execution.
     pub cache: ProtoCache,
 }
@@ -119,6 +121,7 @@ impl Proto {
             lines: Vec::new(),
             local_names: Vec::new(),
             source: None,
+            upvalue_names: Vec::new(),
             cache: ProtoCache::default(),
         }
     }

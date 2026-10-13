@@ -11,6 +11,5 @@ pub mod parser;
 pub mod pkg;
 pub mod repl;
 pub mod sema;
-pub mod stack_trace;
 pub mod tests;
 pub mod vm;

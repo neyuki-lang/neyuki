@@ -11,6 +11,9 @@ pub struct CallFrame {
     pub varargs: Vec<Value>,
     // How many values the caller's `Call` asked for; MULTRET means "all of them"
     pub want_ret: u8,
+    /// The line and instruction a line hook last reported in this frame.
+    pub hook_line: u32,
+    pub hook_ip: usize,
 }
 
 impl CallFrame {
@@ -21,6 +24,8 @@ impl CallFrame {
             base,
             varargs: Vec::new(),
             want_ret: 1,
+            hook_line: 0,
+            hook_ip: 0,
         }
     }
 
@@ -31,6 +36,8 @@ impl CallFrame {
             base,
             varargs,
             want_ret: 1,
+            hook_line: 0,
+            hook_ip: 0,
         }
     }
 

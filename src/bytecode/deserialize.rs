@@ -465,10 +465,12 @@ fn read_proto(
         ));
     }
     let mut upvalues = Vec::with_capacity(num_upvalues);
+    let mut upvalue_names = Vec::with_capacity(num_upvalues);
     for _ in 0..num_upvalues {
         let in_stack = read_u8(bytes, cursor)? != 0;
         let index = read_u8(bytes, cursor)?;
         upvalues.push(UpvalueDesc { in_stack, index });
+        upvalue_names.push(read_string(bytes, cursor)?);
     }
 
     let num_lines = read_u32(bytes, cursor)? as usize;
@@ -516,6 +518,7 @@ fn read_proto(
         lines,
         local_names,
         source,
+        upvalue_names,
         cache: Default::default(),
     })
 }

@@ -357,6 +357,7 @@ return #collected * 100 + total(table.unpack(collected))";
                 protos: Vec::new(),
                 upvalues: Vec::new(),
                 upvalue_vars: Vec::new(),
+                upvalue_names: Vec::new(),
                 cfg: Some(cfg),
             },
         })
