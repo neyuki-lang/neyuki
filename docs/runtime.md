@@ -18,7 +18,7 @@ cargo run -- test
 
 The base runtime provides `print`, `tostring`, `type`, `typeof`, `assert`, `int`, `float`, `try`, and `require`. `type` groups integers and floats as `number`; `typeof` reports `bigint` for arbitrary-precision integers and `float` for floating-point values.
 
-`try(function, ...)` returns a leading boolean followed by the function result or an error message. The bundled `@neyuki/crypto`, `@neyuki/fs`, `@neyuki/http`, `@neyuki/io`, `@neyuki/math`, `@neyuki/sql`, `@neyuki/string`, `@neyuki/table` and `@neyuki/ui` modules can be loaded with `require`.
+`try(function, ...)` returns a leading boolean followed by the function result or an error message. The bundled `@neyuki/crypto`, `@neyuki/fs`, `@neyuki/hid`, `@neyuki/http`, `@neyuki/io`, `@neyuki/math`, `@neyuki/sql`, `@neyuki/string`, `@neyuki/table` and `@neyuki/ui` modules can be loaded with `require`.
 
 ```lua
 local math = require("@neyuki/math")
@@ -180,10 +180,32 @@ ui.run(function(events: {Event}, dt: number)
 end)
 ```
 
+`@neyuki/hid` sends keyboard and mouse input to whichever window has focus, exactly as if a person typed or clicked, and reads the screen size and clipboard. It drives SendInput on Windows, CoreGraphics on macOS and XTest on X11 (Wayland sessions need XWayland). Keys are single characters (`"a"`, `"7"`, `"/"`) or case-insensitive names: `enter`, `tab`, `space`, `backspace`, `delete`, `escape`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`, `shift`, `ctrl`, `alt`, `meta` (also `win`, `cmd`, `super`), `capslock`, `f1` to `f20`, `numpad0` to `numpad9`, `volumeup`, `volumedown`, `mute`, `playpause`, `nexttrack` and `prevtrack`. Mouse buttons are `"left"` (the default), `"right"`, `"middle"`, `"back"` and `"forward"`; coordinates are pixels from the top-left of the main display.
+
+- `hid.keyboard`: `press(key)` and `release(key)` hold and let go of a key, `tap(key, times?)` presses and releases it, `write(text)` types any text (including characters the layout has no key for), `combo(...)` presses keys in order and releases them in reverse (`combo("ctrl", "c")` or `combo("ctrl+c")`), `hold(keys, action)` runs `action` while `keys` are held and releases them even when it fails, and `isKey(name)` checks a key name.
+- `hid.mouse`: `move(x, y)`, `moveBy(dx, dy)`, `glide(x, y, seconds?)` (a straight line over 0.25 s by default), `position()` (two numbers), `click(button?, count?)`, `press(button?)`, `release(button?)`, `drag(x, y, button?, seconds?)` and `scroll(amount, horizontal?)`, where positive amounts scroll down or right.
+- `hid.screen.size()` returns the main display's width and height; `hid.clipboard.get()` returns its text (or `nil`) and `hid.clipboard.set(text)` replaces it.
+
+```lua
+local hid = require("@neyuki/hid")
+local os = require("@neyuki/os")
+
+local w, h = hid.screen.size()
+hid.mouse.glide(w / 2, h / 2)
+hid.mouse.click()
+hid.keyboard.write("Hello from Neyuki")
+hid.keyboard.combo("ctrl+a")
+hid.keyboard.combo("ctrl+c")
+os.sleep(0.1)
+print(hid.clipboard.get())
+```
+
+`@neyuki/os` provides `clock()` (seconds as a float, for timing), `time()` (whole seconds since the Unix epoch), `difftime(t2, t1)`, `getenv(name)` (common non-secret variables such as `PATH`, `HOME` and `LANG`; others read as `nil`), `sleep(seconds)` and `exit(code?)`, which flushes output and ends the process with 0 (nothing or `true`), 1 (`false`) or the given integer.
+
 ## Current boundaries
 
 The compiler currently validates syntax rather than enforcing the declared type annotations. Runtime modules are resolved from the project checkout, and the base `require` implementation recognizes only the bundled modules listed above. User-defined functions return their explicit `return` values; a function without a return produces `nil` when called.
 
 A coroutine can only yield from its own Neyuki frames. Calling `coroutine.yield` from inside a function that a native function called back (a `try` or `pcall` body, a `table.sort` comparator, a metamethod) raises "attempt to yield across a native function call" instead. The handle `coroutine.create` returns is frozen, and only that handle resumes its coroutine.
 
-A few limits keep one script from exhausting memory: `json.encode` stops at 64 MiB of output, and a table passed to a native function (the `@neyuki/http`, `fs`, `io`, `sql`, `crypto`, `string` and `ui` primitives) may hold at most a million values, counting a subtable once for every place it appears.
+A few limits keep one script from exhausting memory: `json.encode` stops at 64 MiB of output, and a table passed to a native function (the `@neyuki/http`, `fs`, `hid`, `io`, `sql`, `crypto`, `string` and `ui` primitives) may hold at most a million values, counting a subtable once for every place it appears.

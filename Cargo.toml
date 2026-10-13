@@ -77,6 +77,12 @@ tiny-skia = "0.11"
 fontdue = "0.9"
 png = "0.18"
 
+# `@neyuki/hid` drives the keyboard and mouse through `enigo` (SendInput on
+# Windows, CoreGraphics on macOS, XTest over the pure-Rust `x11rb` on Linux)
+# and the clipboard through `arboard`. Neither needs a C compiler.
+enigo = "0.6"
+arboard = { version = "3", default-features = false }
+
 [target.'cfg(windows)'.dependencies]
 schannel = ">=0.1.23, <0.1.28"
 

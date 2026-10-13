@@ -11,6 +11,7 @@ pub mod coroutine;
 pub mod crypto;
 pub mod debug;
 pub mod fs;
+pub mod hid;
 pub mod http;
 pub mod io;
 pub mod json;
@@ -45,6 +46,7 @@ pub fn register_natives(vm: &mut VM) {
     for natives in [
         crypto::NATIVES,
         fs::NATIVES,
+        hid::NATIVES,
         http::NATIVES,
         io::NATIVES,
         sql::NATIVES,
