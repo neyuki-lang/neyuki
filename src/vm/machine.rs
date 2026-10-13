@@ -654,7 +654,7 @@ impl VM {
     fn settle_queue(
         &mut self,
         queue: &[(Rc<RefCell<VmTable>>, Value)],
-        internal: &HashMap<*const RefCell<VmTable>, usize>,
+        internal: &crate::vm::hash::FxHashMap<*const RefCell<VmTable>, usize>,
     ) -> (Vec<*const RefCell<VmTable>>, usize, Option<String>) {
         let mut settled_cleared = Vec::new();
         let mut settled_freed = 0;
@@ -802,8 +802,24 @@ impl VM {
     }
 
     fn run_loop(&mut self, target_depth: usize) -> Result<Value, String> {
+        // Hooks and the debugger need a check before every instruction, so
+        // the loop is compiled twice and code without them never pays for
+        // it. Either copy hands over (`None`) when `trap` changes.
+        loop {
+            let done = if self.trap {
+                self.run_mode::<true>(target_depth)?
+            } else {
+                self.run_mode::<false>(target_depth)?
+            };
+            if let Some(value) = done {
+                return Ok(value);
+            }
+        }
+    }
+
+    fn run_mode<const TRAP: bool>(&mut self, target_depth: usize) -> Result<Option<Value>, String> {
         if self.frames.len() <= target_depth {
-            return Ok(Value::Nil);
+            return Ok(Some(Value::Nil));
         }
         let (closure, mut base, mut ip) = {
             let f = self.frames.last().unwrap();
@@ -1014,21 +1030,29 @@ impl VM {
                 }
                 if self.frames.len() == target_depth {
                     self.returned.clear();
-                    return Ok(Value::Nil);
+                    return Ok(Some(Value::Nil));
                 }
                 let caller_frame = self.frames.last().unwrap();
                 current_closure = caller_frame.closure.clone();
                 base = caller_frame.base;
                 ip = caller_frame.ip;
+                if self.trap != TRAP {
+                    sync_ip!();
+                    return Ok(None);
+                }
                 code = &current_closure.proto.instructions;
                 consts = current_closure.proto.values();
                 continue;
             };
-            if self.trap {
+            if TRAP {
                 // The frame's ip points past the instruction about to run,
                 // as it does while that instruction executes.
                 self.frames.last_mut().unwrap().ip = ip + 1;
                 self.instruction_hook(ip)?;
+                if !self.trap {
+                    sync_ip!();
+                    return Ok(None);
+                }
             }
             ip += 1;
 
@@ -1858,6 +1882,10 @@ impl VM {
                                         return Err(err);
                                     }
                                     self.store_call_results(callee, retc, &results);
+                                    if self.trap != TRAP {
+                                        sync_ip!();
+                                        return Ok(None);
+                                    }
                                 }
                                 Err(err) if self.is_yielding => {
                                     if let Some(co_id) = self.current_co
@@ -1881,6 +1909,10 @@ impl VM {
                                 call_args.extend_from_slice(&self.stack[args_start..args_end]);
                                 let results = self.call_function(handler, &call_args)?;
                                 self.store_call_results(callee, retc, &results);
+                                if self.trap != TRAP {
+                                    sync_ip!();
+                                    return Ok(None);
+                                }
                             } else {
                                 throw!("attempted to call non-function ({:?})", callee_val);
                             }
@@ -1913,7 +1945,7 @@ impl VM {
                         self.returned
                             .extend(self.stack[ret_start..ret_end].iter().cloned());
                         let top_val = self.returned.first().cloned().unwrap_or(Value::Nil);
-                        return Ok(top_val);
+                        return Ok(Some(top_val));
                     }
                     // The results land where the caller's `Call` put the callee.
                     let caller_dest = frame.base - 1;
@@ -1969,6 +2001,10 @@ impl VM {
                     current_closure = caller_frame.closure.clone();
                     base = caller_frame.base;
                     ip = caller_frame.ip;
+                    if self.trap != TRAP {
+                        sync_ip!();
+                        return Ok(None);
+                    }
                     code = &current_closure.proto.instructions;
                     consts = current_closure.proto.values();
                     continue;

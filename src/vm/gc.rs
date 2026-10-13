@@ -2,11 +2,10 @@
 //! pass frees tables and closures that only keep each other alive.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
 
 use crate::vm::buffer::VmBuffer;
-use crate::vm::hash::FxHashMap;
+use crate::vm::hash::{FxHashMap, FxHashSet};
 use crate::vm::value::{StrRef, Value, VmTable};
 
 /// The VM's global table, passed in as a GC root.
@@ -87,8 +86,12 @@ pub struct GcTracker {
 
     pub current_white: GcColor,
     pub state: GCState,
-    pub tables: HashMap<*const RefCell<VmTable>, (Weak<RefCell<VmTable>>, GcHeader)>,
-    pub buffers: HashMap<*const RefCell<VmBuffer>, (Weak<RefCell<VmBuffer>>, GcHeader)>,
+    pub tables: FxHashMap<*const RefCell<VmTable>, (Weak<RefCell<VmTable>>, GcHeader)>,
+    pub buffers: FxHashMap<*const RefCell<VmBuffer>, (Weak<RefCell<VmBuffer>>, GcHeader)>,
+    /// Tables registered since the last cycle, with their size and
+    /// creation id. Most die young, so only those still alive when a
+    /// collection starts are moved into `tables`.
+    pub young: Vec<(Weak<RefCell<VmTable>>, usize, u64)>,
     pub gray_stack: Vec<*const RefCell<VmTable>>,
     pub last_freed: usize,
     /// Next table creation id (see `GcHeader::alloc_id`).
@@ -97,17 +100,16 @@ pub struct GcTracker {
     /// refcounting cannot destroy them before a sweep runs their
     /// finalizer. Entries leave here exactly once: at settle time, or
     /// when the metatable stops providing `__gc`. Never scanned as roots.
-    pub pinned: HashMap<*const RefCell<VmTable>, Rc<RefCell<VmTable>>>,
+    pub pinned: FxHashMap<*const RefCell<VmTable>, Rc<RefCell<VmTable>>>,
     /// Incremental sweep cursor: remaining work when `sweeping` is true.
-    /// Plain tables still to clear, dropped ptrs still to remove, buffers
+    /// Plain tables still to clear, buffers
     /// still to remove, weak survivors still to prune, and the doomed
     /// sets plus freed accumulator shared across slices.
     pub sweep_plain: Vec<Rc<RefCell<VmTable>>>,
-    pub sweep_dropped: Vec<*const RefCell<VmTable>>,
     pub sweep_buf_remove: Vec<*const RefCell<VmBuffer>>,
     pub sweep_weak: Vec<Rc<RefCell<VmTable>>>,
-    pub sweep_doomed_tables: HashSet<*const RefCell<VmTable>>,
-    pub sweep_doomed_buffers: HashSet<*const RefCell<VmBuffer>>,
+    pub sweep_doomed_tables: FxHashSet<*const RefCell<VmTable>>,
+    pub sweep_doomed_buffers: FxHashSet<*const RefCell<VmBuffer>>,
     pub sweep_freed: usize,
     pub sweeping: bool,
 }
@@ -117,9 +119,10 @@ pub struct GcTracker {
 /// for resurrection checks. Nothing is cleared or recolored yet.
 pub struct SweepPlan {
     pub plain: Vec<Rc<RefCell<VmTable>>>,
-    pub dropped: Vec<*const RefCell<VmTable>>,
+    /// Bytes of the tables refcounting freed since the last cycle.
+    pub dropped: usize,
     pub queue: Vec<(Rc<RefCell<VmTable>>, Value)>,
-    pub internal: HashMap<*const RefCell<VmTable>, usize>,
+    pub internal: FxHashMap<*const RefCell<VmTable>, usize>,
 }
 
 impl Default for GcTracker {
@@ -140,18 +143,18 @@ impl GcTracker {
 
             current_white: GcColor::White0,
             state: GCState::Pause,
-            tables: HashMap::new(),
-            buffers: HashMap::new(),
+            tables: FxHashMap::default(),
+            buffers: FxHashMap::default(),
+            young: Vec::new(),
             gray_stack: Vec::new(),
             last_freed: 0,
             next_alloc_id: 0,
-            pinned: HashMap::new(),
+            pinned: FxHashMap::default(),
             sweep_plain: Vec::new(),
-            sweep_dropped: Vec::new(),
             sweep_buf_remove: Vec::new(),
             sweep_weak: Vec::new(),
-            sweep_doomed_tables: HashSet::new(),
-            sweep_doomed_buffers: HashSet::new(),
+            sweep_doomed_tables: FxHashSet::default(),
+            sweep_doomed_buffers: FxHashSet::default(),
             sweep_freed: 0,
             sweeping: false,
         }
@@ -171,24 +174,32 @@ impl GcTracker {
     }
 
     pub fn register_table(&mut self, rc: &Rc<RefCell<VmTable>>) {
-        let ptr = Rc::as_ptr(rc);
         let size = 64 + rc.borrow().array.capacity() * std::mem::size_of::<Value>();
         self.bytes_allocated += size;
         self.total_allocations += 1;
         let alloc_id = self.next_alloc_id;
         self.next_alloc_id = self.next_alloc_id.wrapping_add(1);
-        self.tables.insert(
-            ptr,
-            (
-                Rc::downgrade(rc),
-                GcHeader {
-                    color: self.current_white,
-                    size,
-                    alloc_id,
-                    finalized: false,
-                },
-            ),
-        );
+        self.young.push((Rc::downgrade(rc), size, alloc_id));
+    }
+
+    /// Moves the young tables that are still alive into `tables` and
+    /// returns the bytes of those that already died.
+    pub fn flush_young(&mut self) -> usize {
+        let mut dropped = 0;
+        for (weak, size, alloc_id) in std::mem::take(&mut self.young) {
+            if weak.strong_count() == 0 {
+                dropped += size;
+                continue;
+            }
+            let header = GcHeader {
+                color: self.current_white,
+                size,
+                alloc_id,
+                finalized: false,
+            };
+            self.tables.insert(weak.as_ptr(), (weak, header));
+        }
+        dropped
     }
 
     pub fn register_buffer(&mut self, rc: &Rc<RefCell<VmBuffer>>) {
@@ -343,6 +354,7 @@ impl GcTracker {
     /// untouched (except marking); clearing, pruning and flips happen in
     /// `sweep_finish` after the driver settles finalizers.
     pub fn collect_plan(&mut self, stack: &[Value], globals: &Globals) -> SweepPlan {
+        let mut dropped = self.flush_young();
         if self.state == GCState::Pause {
             self.mark_roots(stack, globals);
         }
@@ -351,31 +363,37 @@ impl GcTracker {
         }
         // From here the state stays Sweep until `sweep_finish`, which also
         // makes nested collections back out instead of re-entering.
-        let mut dropped = Vec::new();
-        let mut white_tables: HashMap<*const RefCell<VmTable>, Rc<RefCell<VmTable>>> =
-            HashMap::new();
+        // Tables that refcounting already freed only need their entry gone,
+        // which also releases the memory their weak handle still holds.
+        self.tables.retain(|_, (weak_rc, header)| {
+            let live = weak_rc.strong_count() > 0;
+            if !live {
+                dropped += header.size;
+            }
+            live
+        });
+        let mut white_tables: FxHashMap<*const RefCell<VmTable>, Rc<RefCell<VmTable>>> =
+            FxHashMap::default();
         for (&ptr, (weak_rc, header)) in &self.tables {
-            if header.color == GcColor::White0 || header.color == GcColor::White1 {
-                if let Some(rc) = weak_rc.upgrade() {
-                    white_tables.insert(ptr, rc);
-                } else {
-                    // Already dropped by Rust
-                    dropped.push(ptr);
-                }
+            if (header.color == GcColor::White0 || header.color == GcColor::White1)
+                && let Some(rc) = weak_rc.upgrade()
+            {
+                white_tables.insert(ptr, rc);
             }
         }
 
         // Count internal references between candidate white tables, plus
         // references held by live weak tables: a value kept only through
         // weak links is garbage, so those links count as internal.
-        let mut internal_ref_counts: HashMap<*const RefCell<VmTable>, usize> = HashMap::new();
+        let mut internal_ref_counts: FxHashMap<*const RefCell<VmTable>, usize> =
+            FxHashMap::default();
         {
             let count_ref = |val: &Value,
-                             white_tables: &HashMap<
+                             white_tables: &FxHashMap<
                 *const RefCell<VmTable>,
                 Rc<RefCell<VmTable>>,
             >,
-                             internal_ref_counts: &mut HashMap<
+                             internal_ref_counts: &mut FxHashMap<
                 *const RefCell<VmTable>,
                 usize,
             >| {
@@ -483,7 +501,7 @@ impl GcTracker {
         &mut self,
         rc: &Rc<RefCell<VmTable>>,
         ran_ok: bool,
-        internal: &HashMap<*const RefCell<VmTable>, usize>,
+        internal: &FxHashMap<*const RefCell<VmTable>, usize>,
     ) -> (Option<*const RefCell<VmTable>>, usize) {
         let ptr = Rc::as_ptr(rc);
         let Some((_, header)) = self.tables.get_mut(&ptr) else {
@@ -530,8 +548,8 @@ impl GcTracker {
     /// rather than being removed, so later indices keep their positions.
     fn prune_weak_table(
         tbl: &mut VmTable,
-        doomed_tables: &HashSet<*const RefCell<VmTable>>,
-        doomed_buffers: &HashSet<*const RefCell<VmBuffer>>,
+        doomed_tables: &FxHashSet<*const RefCell<VmTable>>,
+        doomed_buffers: &FxHashSet<*const RefCell<VmBuffer>>,
     ) {
         let dead = |v: &Value| match v {
             Value::Table(t) => doomed_tables.contains(&Rc::as_ptr(t)),
@@ -566,16 +584,17 @@ impl GcTracker {
     pub fn sweep_begin(
         &mut self,
         plain: Vec<Rc<RefCell<VmTable>>>,
-        dropped: Vec<*const RefCell<VmTable>>,
+        dropped: usize,
         settled_cleared: Vec<*const RefCell<VmTable>>,
         settled_freed: usize,
     ) {
-        let mut doomed_tables: HashSet<*const RefCell<VmTable>> = HashSet::new();
+        self.bytes_allocated = self.bytes_allocated.saturating_sub(dropped);
+        let mut doomed_tables: FxHashSet<*const RefCell<VmTable>> = FxHashSet::default();
         for ptr in settled_cleared {
             doomed_tables.insert(ptr);
         }
 
-        let mut doomed_buffers: HashSet<*const RefCell<VmBuffer>> = HashSet::new();
+        let mut doomed_buffers: FxHashSet<*const RefCell<VmBuffer>> = FxHashSet::default();
         let mut to_remove_buffers = Vec::new();
         for (&ptr, (weak_buf, header)) in self.buffers.iter_mut() {
             if header.color == GcColor::White0 || header.color == GcColor::White1 {
@@ -613,12 +632,11 @@ impl GcTracker {
             .collect();
 
         self.sweep_plain = plain;
-        self.sweep_dropped = dropped;
         self.sweep_buf_remove = to_remove_buffers;
         self.sweep_weak = weak_black;
         self.sweep_doomed_tables = doomed_tables;
         self.sweep_doomed_buffers = doomed_buffers;
-        self.sweep_freed = settled_freed;
+        self.sweep_freed = settled_freed + dropped;
         self.sweeping = true;
     }
 
@@ -652,17 +670,6 @@ impl GcTracker {
                 remaining -= 1;
                 continue;
             }
-            if let Some(ptr) = self.sweep_dropped.pop() {
-                if let Some((_, header)) = self.tables.get(&ptr) {
-                    self.sweep_freed += header.size;
-                    self.bytes_allocated = self.bytes_allocated.saturating_sub(header.size);
-                }
-                self.tables.remove(&ptr);
-                self.pinned.remove(&ptr);
-                self.sweep_doomed_tables.insert(ptr);
-                remaining -= 1;
-                continue;
-            }
             if let Some(ptr) = self.sweep_buf_remove.pop() {
                 if let Some((_, header)) = self.buffers.get(&ptr) {
                     self.sweep_freed += header.size;
@@ -674,10 +681,7 @@ impl GcTracker {
             }
             break;
         }
-        if !self.sweep_plain.is_empty()
-            || !self.sweep_dropped.is_empty()
-            || !self.sweep_buf_remove.is_empty()
-        {
+        if !self.sweep_plain.is_empty() || !self.sweep_buf_remove.is_empty() {
             return false;
         }
         for rc in std::mem::take(&mut self.sweep_weak) {
@@ -704,7 +708,7 @@ impl GcTracker {
     pub fn sweep_finish(
         &mut self,
         plain: Vec<Rc<RefCell<VmTable>>>,
-        dropped: Vec<*const RefCell<VmTable>>,
+        dropped: usize,
         settled_cleared: Vec<*const RefCell<VmTable>>,
         settled_freed: usize,
     ) {
@@ -743,6 +747,10 @@ mod tests {
     use super::*;
     use crate::vm::value::{Value, VmTable};
     use std::cell::RefCell;
+
+    fn tracked(gc: &GcTracker) -> usize {
+        gc.tables.len() + gc.young.len()
+    }
     use std::rc::Rc;
 
     /// Full collection for tests without finalizers: plan, assert nothing
@@ -765,12 +773,12 @@ mod tests {
         gc.register_table(&rc);
         rc.borrow_mut().set_str("self", Value::Table(rc.clone()));
 
-        assert_eq!(gc.tables.len(), 1);
+        assert_eq!(tracked(&gc), 1);
         drop(rc);
 
         let freed = collect_all(&mut gc, &stack, &globals);
         assert!(freed > 0);
-        assert_eq!(gc.tables.len(), 0);
+        assert_eq!(tracked(&gc), 0);
     }
 
     #[test]
@@ -787,13 +795,13 @@ mod tests {
         a.borrow_mut().set_str("other", Value::Table(b.clone()));
         b.borrow_mut().set_str("other", Value::Table(a.clone()));
 
-        assert_eq!(gc.tables.len(), 2);
+        assert_eq!(tracked(&gc), 2);
         drop(a);
         drop(b);
 
         let freed = collect_all(&mut gc, &stack, &globals);
         assert!(freed > 0);
-        assert_eq!(gc.tables.len(), 0);
+        assert_eq!(tracked(&gc), 0);
     }
 
     #[test]
@@ -813,14 +821,14 @@ mod tests {
         b.borrow_mut().set_str("next", Value::Table(c.clone()));
         c.borrow_mut().set_str("next", Value::Table(a.clone()));
 
-        assert_eq!(gc.tables.len(), 3);
+        assert_eq!(tracked(&gc), 3);
         drop(a);
         drop(b);
         drop(c);
 
         let freed = collect_all(&mut gc, &stack, &globals);
         assert!(freed > 0);
-        assert_eq!(gc.tables.len(), 0);
+        assert_eq!(tracked(&gc), 0);
     }
 
     #[test]
@@ -843,7 +851,7 @@ mod tests {
 
         let freed = collect_all(&mut gc, &stack, &globals);
         assert_eq!(freed, 0);
-        assert_eq!(gc.tables.len(), 2);
+        assert_eq!(tracked(&gc), 2);
     }
 
     #[test]
@@ -882,6 +890,7 @@ mod tests {
 
         let parent_rc = Rc::new(RefCell::new(VmTable::new()));
         gc.register_table(&parent_rc);
+        gc.flush_young();
 
         let p_ptr = Rc::as_ptr(&parent_rc);
         if let Some((_, h)) = gc.tables.get_mut(&p_ptr) {
@@ -890,6 +899,7 @@ mod tests {
 
         let child_rc = Rc::new(RefCell::new(VmTable::new()));
         gc.register_table(&child_rc);
+        gc.flush_young();
 
         let parent_val = Value::Table(parent_rc.clone());
         let child_val = Value::Table(child_rc.clone());
@@ -974,7 +984,7 @@ mod tests {
         while !g2.sweep_slice(1) {}
         assert!(weak_entry_gone(&g2));
 
-        assert_eq!(g1.tables.len(), g2.tables.len());
+        assert_eq!(tracked(&g1), tracked(&g2));
         assert_eq!(g1.bytes_allocated, g2.bytes_allocated);
         assert_eq!(g1.last_freed, g2.last_freed);
         assert_eq!(g1.current_white, g2.current_white);

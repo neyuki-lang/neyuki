@@ -59,12 +59,16 @@ impl Hasher for FxHasher {
 
     #[inline]
     fn finish(&self) -> u64 {
-        self.hash
+        // The multiply leaves the entropy in the high bits, but the table
+        // picks buckets from the low ones: aligned pointers and small
+        // integers would otherwise all share a handful of buckets.
+        self.hash.rotate_left(26)
     }
 }
 
 pub type FxBuildHasher = BuildHasherDefault<FxHasher>;
 pub type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
+pub type FxHashSet<K> = std::collections::HashSet<K, FxBuildHasher>;
 
 /// `FxHashMap::new()` is not available because the hasher is not
 /// `RandomState`; this is the equivalent constructor.
