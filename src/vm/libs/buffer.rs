@@ -381,6 +381,9 @@ fn buf_tohex(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 
 fn buf_fromhex(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let s = str_arg(args, 0, "s")?;
+    if !s.is_ascii() {
+        return Err("invalid hex text".to_string());
+    }
     if s.len() % 2 != 0 {
         return Err("hex text must have an even length".to_string());
     }

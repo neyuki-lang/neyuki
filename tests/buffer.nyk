@@ -56,6 +56,7 @@ buffer.writeu8(raw, 0, 0xFF)
 buffer.writeu8(raw, 2, 0x80)
 assert(buffer.tohex(raw) == "ff0080", "tohex")
 assert(buffer.equal(buffer.fromhex("ff0080"), raw), "fromhex")
+assert(not try(buffer.fromhex, "aéb"), "fromhex rejects non-ASCII text")
 assert(buffer.equal(buffer.frombase64(buffer.tobase64(raw)), raw), "base64 round trip")
 
 local ok, err = try(buffer.readu32, b, 14)
