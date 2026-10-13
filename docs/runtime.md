@@ -12,7 +12,7 @@ cargo run -- disasm examples/hello.nyk
 cargo run -- test
 ```
 
-`lint` reports syntax errors, undefined names, `const` writes, type mismatches and unused or unreachable code with their positions; `lint --json` prints them as a JSON array for editors and `lint --stdin <path>` checks source read from standard input. `compile` compiles a file to `.nykb` bytecode. `run` compiles the file (or loads a `.nykb`) and executes it on the register VM. `disasm` prints the bytecode the compiler emits, and `dump-ir` the intermediate representation before and after optimization. `test` runs every `.nyk` file in `tests/`.
+`lint` reports syntax errors, undefined names, `const` writes, type mismatches and unused or unreachable code with their positions; `lint --json` prints them as a JSON array for editors and `lint --stdin <path>` checks source read from standard input. `compile` compiles a file to `.nykb` bytecode. `run` compiles the file (or loads a `.nykb`) and executes it on the register VM; `neyuki script.nyk` is short for `neyuki run script.nyk`, and arguments after the path reach the script through `os.args()`. `neyuki help` lists every command and `neyuki --version` prints the version. `disasm` prints the bytecode the compiler emits, and `dump-ir` the intermediate representation before and after optimization. `test` runs every `.nyk` file in `tests/`.
 
 ## Builtins
 
@@ -208,7 +208,7 @@ os.sleep(0.1)
 print(hid.clipboard.get())
 ```
 
-`@neyuki/os` provides `clock()` (seconds as a float, for timing), `time()` (whole seconds since the Unix epoch), `difftime(t2, t1)`, `getenv(name)` (common non-secret variables such as `PATH`, `HOME` and `LANG`; others read as `nil`), `sleep(seconds)` and `exit(code?)`, which flushes output and ends the process with 0 (nothing or `true`), 1 (`false`) or the given integer.
+`@neyuki/os` provides `clock()` (seconds as a float, for timing), `time()` (whole seconds since the Unix epoch), `difftime(t2, t1)`, `getenv(name)` (common non-secret variables such as `PATH`, `HOME` and `LANG`; others read as `nil`), `args()` (the command-line arguments after the script path, as a list of strings), `sleep(seconds)` and `exit(code?)`, which flushes output and ends the process with 0 (nothing or `true`), 1 (`false`) or the given integer.
 
 ## Current boundaries
 

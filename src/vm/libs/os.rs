@@ -43,6 +43,22 @@ fn os_difftime(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     Ok(vec![Value::Float(t2 - t1)])
 }
 
+static SCRIPT_ARGS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+/// Records the command-line arguments that follow the script path, for
+/// `os.args`. Only the first call has an effect.
+pub fn set_script_args(args: Vec<String>) {
+    let _ = SCRIPT_ARGS.set(args);
+}
+
+/// The script's command-line arguments as a new list of strings.
+fn os_args(_vm: &mut VM, _args: &[Value]) -> Result<Vec<Value>, String> {
+    let args = SCRIPT_ARGS.get().map(Vec::as_slice).unwrap_or_default();
+    Ok(vec![crate::vm::libs::args::array(
+        args.iter().map(|a| Value::string(a.clone())).collect(),
+    )])
+}
+
 /// Blocks the script for `seconds` (fractions allowed).
 fn os_sleep(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let seconds = crate::vm::libs::args::number_arg(args, 0, "seconds")?;
@@ -108,6 +124,7 @@ pub fn create_os_lib() -> Value {
     table.set_str("getenv", crate::native!("os.getenv", os_getenv));
     table.set_str("sleep", crate::native!("os.sleep", os_sleep));
     table.set_str("exit", crate::native!("os.exit", os_exit));
+    table.set_str("args", crate::native!("os.args", os_args));
     table.frozen = true;
     Value::Table(Rc::new(RefCell::new(table)))
 }

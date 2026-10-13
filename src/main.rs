@@ -28,16 +28,42 @@ fn main() {
     }
 }
 
+const USAGE: &str = "Usage: neyuki <command> [arguments]
+
+Commands:
+  run <file> [args...]    Run a .nyk script or .nykb bytecode file
+  <file> [args...]        Same as run
+  lint [--json] [--stdin] <file>
+                          Report errors and warnings without running
+  compile <file> [out]    Compile to .nykb bytecode
+  test                    Run every script in tests/
+  repl                    Start an interactive session
+  pkg <command>           Manage packages
+  dap                     Serve the Debug Adapter Protocol on stdio
+  disasm <file>           Print the bytecode the compiler emits
+  dump-ir <file>          Print the IR before and after optimization
+  assemble <file> [out]   Assemble bytecode from its text form
+  bench, fuzz             Run the built-in benchmarks or fuzzers
+  help, version";
+
 fn run_cli() {
-    let args: Vec<String> = env::args().collect();
+    let mut args: Vec<String> = env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: {} <action> [path]", args[0]);
+        eprintln!("{}", USAGE);
         process::exit(1);
+    }
+    // `neyuki script.nyk ...` runs the script.
+    if args[1].ends_with(".nyk") || args[1].ends_with(".nykb") {
+        args.insert(1, "run".to_string());
     }
 
     let action = &args[1];
 
-    if action == "lint" {
+    if matches!(action.as_str(), "help" | "--help" | "-h") {
+        println!("{}", USAGE);
+    } else if matches!(action.as_str(), "version" | "--version" | "-V") {
+        println!("neyuki {}", env!("CARGO_PKG_VERSION"));
+    } else if action == "lint" {
         if let Err(err) = lint::run_cli(&args[2..]) {
             eprintln!("{}", err);
             process::exit(1);
@@ -71,6 +97,7 @@ fn run_cli() {
             eprintln!("Usage: {} run <path> [args...]", args[0]);
             process::exit(1);
         };
+        vm::libs::os::set_script_args(args[3..].to_vec());
         if let Err(err) = vm::run_file(path) {
             eprintln!("error: {}", err);
             process::exit(1);
@@ -163,7 +190,12 @@ fn run_cli() {
             process::exit(1);
         }
     } else {
-        eprintln!("Unknown action: {}", action);
+        eprintln!(
+            "Unknown command: {}
+
+{}",
+            action, USAGE
+        );
         process::exit(1);
     }
 }
