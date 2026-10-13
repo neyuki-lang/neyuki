@@ -88,4 +88,14 @@ assert(os.time({ year = 2024, month = 13, day = 1 }) == os.time({ year = 2025, m
 assert(not try(os.date, "%Q"), "unknown format codes are errors")
 assert(not try(os.time, { year = 2024 }), "date tables need a month and day")
 
+-- os.run waits for a program and captures its output
+local echoed = os.run("echo hello")
+assert(echoed.ok and echoed.code == 0 and string.trim(echoed.stdout) == "hello", "run through the shell")
+local failed = os.run("exit 3")
+assert(not failed.ok and failed.code == 3, "exit codes come back")
+local sorted = os.run("sort", { stdin = "b\na\n" })
+assert(string.sub(sorted.stdout, 1, 1) == "a", "stdin is fed to the program")
+assert(not try(os.run, { "neyuki-no-such-program" }), "a missing program is an error")
+assert(not try(os.run, {}), "an empty command is an error")
+
 print("[pass] standard libraries")

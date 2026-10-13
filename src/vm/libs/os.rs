@@ -193,6 +193,164 @@ fn os_args(_vm: &mut VM, _args: &[Value]) -> Result<Vec<Value>, String> {
     )])
 }
 
+fn string_field(table: &VmTable, name: &str) -> Result<Option<String>, String> {
+    match table.get_str(name) {
+        Value::Nil => Ok(None),
+        Value::String(s) => Ok(Some(s.to_string())),
+        other => Err(format!(
+            "{} must be a string, got {}",
+            name,
+            other.type_name()
+        )),
+    }
+}
+
+/// `run(command, options?)`: runs a program and waits for it. A string runs
+/// through the system shell (`cmd /C` on Windows, `sh -c` elsewhere); a list
+/// runs its first element with the rest as arguments, with no shell
+/// involved. `options` may hold `cwd`, `env` (variables to add or override),
+/// `stdin` (text to feed it) and `capture` (default true; false lets output
+/// go straight to the terminal). Returns `{ ok, code, stdout, stderr }`.
+fn os_run(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut command = match args.first() {
+        Some(Value::String(line)) => {
+            let mut command = if cfg!(windows) {
+                Command::new("cmd")
+            } else {
+                Command::new("sh")
+            };
+            command
+                .arg(if cfg!(windows) { "/C" } else { "-c" })
+                .arg(&**line);
+            command
+        }
+        Some(Value::Table(list)) => {
+            let list = list.borrow();
+            let mut parts = Vec::with_capacity(list.array.len());
+            for (index, part) in list.array.iter().enumerate() {
+                match part {
+                    Value::String(s) => parts.push(s.to_string()),
+                    other => {
+                        return Err(format!(
+                            "command[{}] must be a string, got {}",
+                            index + 1,
+                            other.type_name()
+                        ));
+                    }
+                }
+            }
+            let (program, rest) = parts.split_first().ok_or("command must not be empty")?;
+            let mut command = Command::new(program);
+            command.args(rest);
+            command
+        }
+        None | Some(Value::Nil) => return Err("command must be provided".to_string()),
+        Some(other) => {
+            return Err(format!(
+                "command must be a string or a list of strings, got {}",
+                other.type_name()
+            ));
+        }
+    };
+
+    let mut capture = true;
+    let mut input = None;
+    match args.get(1) {
+        None | Some(Value::Nil) => {}
+        Some(Value::Table(options)) => {
+            let options = options.borrow();
+            if let Some(cwd) = string_field(&options, "cwd")? {
+                command.current_dir(cwd);
+            }
+            input = string_field(&options, "stdin")?;
+            match options.get_str("capture") {
+                Value::Nil => {}
+                Value::Bool(b) => capture = b,
+                other => {
+                    return Err(format!(
+                        "capture must be a boolean, got {}",
+                        other.type_name()
+                    ));
+                }
+            }
+            match options.get_str("env") {
+                Value::Nil => {}
+                Value::Table(env) => {
+                    for (key, value) in env.borrow().fields.iter() {
+                        match value {
+                            Value::String(v) => {
+                                command.env(&**key, &**v);
+                            }
+                            other => {
+                                return Err(format!(
+                                    "env.{} must be a string, got {}",
+                                    &**key,
+                                    other.type_name()
+                                ));
+                            }
+                        }
+                    }
+                }
+                other => {
+                    return Err(format!("env must be a table, got {}", other.type_name()));
+                }
+            }
+        }
+        Some(other) => {
+            return Err(format!(
+                "options must be a table, got {}",
+                other.type_name()
+            ));
+        }
+    }
+
+    command.stdin(if input.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::inherit()
+    });
+    if capture {
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|err| format!("cannot run command: {}", err))?;
+    if let Some(text) = input
+        && let Some(mut stdin) = child.stdin.take()
+    {
+        // Fed from a thread so a program that writes before reading all of
+        // its input cannot deadlock against us.
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(text.as_bytes());
+        });
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|err| format!("cannot run command: {}", err))?;
+
+    let mut result = VmTable::new();
+    result.set_str("ok", Value::Bool(output.status.success()));
+    result.set_str(
+        "code",
+        output
+            .status
+            .code()
+            .map_or(Value::Nil, |c| Value::Int(c as i64)),
+    );
+    result.set_str(
+        "stdout",
+        Value::string(String::from_utf8_lossy(&output.stdout).into_owned()),
+    );
+    result.set_str(
+        "stderr",
+        Value::string(String::from_utf8_lossy(&output.stderr).into_owned()),
+    );
+    Ok(vec![Value::Table(Rc::new(RefCell::new(result)))])
+}
+
 /// Blocks the script for `seconds` (fractions allowed).
 fn os_sleep(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let seconds = crate::vm::libs::args::number_arg(args, 0, "seconds")?;
@@ -249,6 +407,7 @@ pub fn create_os_lib() -> Value {
     table.set_str("sleep", crate::native!("os.sleep", os_sleep));
     table.set_str("exit", crate::native!("os.exit", os_exit));
     table.set_str("args", crate::native!("os.args", os_args));
+    table.set_str("run", crate::native!("os.run", os_run));
     table.frozen = true;
     Value::Table(Rc::new(RefCell::new(table)))
 }
