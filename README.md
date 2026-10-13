@@ -29,25 +29,24 @@ Neyuki aims to feel lightweight and readable without the usual Lua rough edges:
 
 ```text
 neyuki/
-├── Cargo.toml
-├── README.md
-├── examples/
-│   └── hello.nyk
-├── lib/
-│   └── math.nyk
 ├── src/
-│   ├── compiler.rs
-│   ├── lexer.rs
-│   ├── lint.rs
-│   ├── main.rs
-│   ├── parser.rs
-│   ├── runtime.rs
-│   └── tests.rs
-├── tests/
-│   ├── control_flow_and_types.nyk
-│   ├── number_stress.nyk
-│   └── runtime_and_errors.nyk
-└── target/
+│   ├── main.rs          # CLI: run, compile, lint, test, repl, dap, ...
+│   ├── lexer.rs, parser/  # tokenizer and parser
+│   ├── ast/             # syntax tree, spans, visitors
+│   ├── sema/            # scopes, const and type checks
+│   ├── lint/            # lint rules
+│   ├── compiler/        # constant folding, SSA IR and its passes, codegen
+│   ├── bytecode/        # instruction format, (de)serializer, verifier, disassembler
+│   ├── vm/              # register VM, garbage collector, built-in libraries
+│   ├── runtime.rs       # tree-walking interpreter (`run --tree-walker`)
+│   ├── *_lib.rs         # natives behind @neyuki/http, sql, crypto, fs, io, string, ui
+│   ├── repl.rs, dap.rs  # interactive REPL and debug adapter
+│   └── diagnostics/
+├── lib/                 # bundled @neyuki/* modules written in Neyuki
+├── examples/
+├── tests/               # .nyk test scripts (`neyuki test`)
+├── bench/, fuzz/        # `neyuki bench` and `neyuki fuzz`
+└── docs/
 ```
 
 ## Quick start
