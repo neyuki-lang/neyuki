@@ -1,0 +1,108 @@
+-- Keys of every kind, nil removal, and loops that see every entry once.
+
+local function keys_of(t: {any}): string
+    local out = {}
+    for k, v in t do
+        out[#out + 1] = tostring(k) .. "=" .. tostring(v)
+    end
+    return table.concat(out, " ")
+end
+
+-- far integer keys stay sparse instead of growing the array
+local sparse = {}
+sparse[50000000] = true
+assert(#sparse == 0, "a far key is not part of the array")
+assert(sparse[50000000] == true, "a far key reads back")
+sparse[1] = "a"
+sparse[2] = "b"
+assert(#sparse == 2, "the array grows from 1")
+
+-- integer keys that close a gap move into the array
+local grow = {}
+grow[2] = "b"
+grow[1] = "a"
+assert(#grow == 2 and grow[2] == "b", "a filled gap joins the array")
+
+-- integral floats are the same key as integers
+local f = {}
+f[2.0] = "two"
+f[1] = "one"
+assert(f[2] == "two" and #f == 2, "2.0 and 2 are one key")
+
+-- assigning nil removes, and shrinks #t from the end
+local list = { 1, 2, 3 }
+list[#list] = nil
+assert(#list == 2, "t[#t] = nil pops")
+local rec = { a = 1, b = 2 }
+rec.a = nil
+assert(keys_of(rec) == "b=2", "a removed field is not iterated")
+
+-- mixed tables iterate the array, then numbers, strings and the rest
+local mixed = { 10, 20, y = 4, x = 3 }
+mixed[true] = "t"
+mixed[1.5] = "f"
+mixed[100] = "far"
+assert(keys_of(mixed) == "1=10 2=20 1.5=f 100=far x=3 y=4 true=t", keys_of(mixed))
+
+-- table keys keep their identity
+local key = {}
+local by_table = {}
+by_table[key] = "found"
+local seen = nil
+for k, v in by_table do
+    seen = k
+end
+assert(seen == key and by_table[key] == "found", "a table key comes back as itself")
+
+-- single-variable loops see values
+local sum = 0
+for v in { 1, 2, 3, extra = 4 } do
+    sum += v
+end
+assert(sum == 10, "values of every key")
+
+-- pairs, ipairs, next and select
+local count = 0
+for k, v in pairs({ a = 1, b = 2, 3 }) do
+    count += 1
+end
+assert(count == 3, "pairs visits every key")
+local ip = {}
+for i, v in ipairs({ "a", "b", nil, "d" }) do
+    ip[i] = v
+end
+assert(#ip == 2, "ipairs stops at the first nil")
+assert(next({}) == nil, "next on an empty table")
+local k1, v1 = next({ x = 5 })
+assert(k1 == "x" and v1 == 5, "next returns the first entry")
+assert(select("#", 1, nil, 3) == 3, "select counts nils")
+assert(select(2, "a", "b", "c") == "b", "select from an index")
+assert(select(-1, "a", "b", "c") == "c", "select from the end")
+
+-- user-written stateful iterators
+local function step(state: {any}, i: number)
+    i = i + 1
+    if i > #state then return nil end
+    return i, state[i]
+end
+local function each(t: {any}): any
+    return step, t, 0
+end
+local visited = {}
+for i, v in each({ "p", "q" }) do
+    visited[i] = v
+end
+assert(visited[1] == "p" and visited[2] == "q", "iterator, state and control all arrive")
+
+-- several return values come back in order
+local function rotate(a: any, b: any, c: any): (any, any, any)
+    return b, c, a
+end
+local x, y, z = rotate(1, 2, 3)
+assert(x == 2 and y == 3 and z == 1, "multiple returns keep their order")
+
+-- globals
+assert(_G.print == print, "_G reads globals")
+assert(string.find(_VERSION, "Neyuki") == 1, "_VERSION")
+
+print("[pass] tables and iteration")

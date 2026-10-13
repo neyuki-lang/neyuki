@@ -11,6 +11,7 @@ use std::rc::Rc;
 use crate::bytecode::proto::Proto;
 use crate::vm::buffer::VmBuffer;
 use crate::vm::hash::{FxHashMap, new_map};
+use crate::vm::table::TableKey;
 
 pub type NativeFn = fn(&mut crate::vm::machine::VM, &[Value]) -> Result<Vec<Value>, String>;
 
@@ -139,7 +140,10 @@ pub enum Value {
 pub struct VmTable {
     pub array: Vec<Value>,
     pub fields: FxHashMap<StrRef, Value>,
-    pub general: Option<Box<FxHashMap<crate::vm::table::TableKey, Value>>>,
+    /// Every other key: integers outside the array part, floats, booleans,
+    /// tables, functions and buffers. Each entry keeps its key value, so
+    /// iteration can hand it back and a table key stays alive.
+    pub general: Option<Box<FxHashMap<TableKey, (Value, Value)>>>,
     pub frozen: bool,
     pub metatable: Option<Rc<RefCell<VmTable>>>,
     /// Strong owner of a coroutine's execution state when this table is a
@@ -190,16 +194,112 @@ impl VmTable {
         }
     }
 
-    pub fn get_general(&self, key: &crate::vm::table::TableKey) -> Option<&Value> {
-        self.general.as_ref().and_then(|g| g.get(key))
+    pub fn get_general(&self, key: &TableKey) -> Option<&Value> {
+        self.general
+            .as_ref()
+            .and_then(|g| g.get(key))
+            .map(|(_, v)| v)
     }
 
-    pub fn set_general(&mut self, key: crate::vm::table::TableKey, val: Value) {
-        if !self.frozen {
-            let map = self
-                .general
-                .get_or_insert_with(|| Box::new(crate::vm::hash::new_map()));
-            map.insert(key, val);
+    /// Reads a key without metamethods. Nil and NaN keys read as nil.
+    pub fn raw_get(&self, key: &Value) -> Value {
+        if let Value::Float(f) = key
+            && f.fract() == 0.0
+            && f.abs() < i64::MAX as f64
+        {
+            return self.raw_get(&Value::Int(*f as i64));
+        }
+        match key {
+            Value::String(k) => self.fields.get(&**k).cloned().unwrap_or(Value::Nil),
+            Value::Int(i) if *i >= 1 && (*i as u64) <= self.array.len() as u64 => {
+                self.array[*i as usize - 1].clone()
+            }
+            _ if self.general.is_none() => Value::Nil,
+            other => TableKey::from_value(other)
+                .ok()
+                .and_then(|k| self.get_general(&k).cloned())
+                .unwrap_or(Value::Nil),
+        }
+    }
+
+    /// Writes a key without metamethods or the frozen check. Assigning nil
+    /// removes the entry; trailing nils are trimmed off the array part so
+    /// `#t` shrinks with `t[#t] = nil`.
+    pub fn raw_set(&mut self, key: Value, val: Value) -> Result<(), String> {
+        match key {
+            Value::String(k) => {
+                if matches!(val, Value::Nil) {
+                    self.fields.remove(&*k);
+                } else {
+                    self.fields.insert(k, val);
+                }
+                return Ok(());
+            }
+            Value::Int(i) if i >= 1 => {
+                let len = self.array.len() as u64;
+                let idx = i as u64;
+                if idx <= len {
+                    self.array[i as usize - 1] = val;
+                    if idx == len {
+                        self.trim_array();
+                    }
+                    return Ok(());
+                }
+                if idx == len + 1 {
+                    if matches!(val, Value::Nil) {
+                        self.remove_general(&TableKey::Int(i));
+                    } else {
+                        self.array.push(val);
+                        self.absorb_general();
+                    }
+                    return Ok(());
+                }
+            }
+            Value::Float(f) if f.fract() == 0.0 && f >= 1.0 && f < i64::MAX as f64 => {
+                return self.raw_set(Value::Int(f as i64), val);
+            }
+            _ => {}
+        }
+        let tk = TableKey::from_value(&key).map_err(|e| e.to_string())?;
+        if matches!(val, Value::Nil) {
+            self.remove_general(&tk);
+        } else {
+            self.general
+                .get_or_insert_with(|| Box::new(crate::vm::hash::new_map()))
+                .insert(tk, (key, val));
+        }
+        Ok(())
+    }
+
+    fn remove_general(&mut self, key: &TableKey) {
+        if let Some(general) = &mut self.general {
+            general.remove(key);
+            if general.is_empty() {
+                self.general = None;
+            }
+        }
+    }
+
+    fn trim_array(&mut self) {
+        while matches!(self.array.last(), Some(Value::Nil)) {
+            self.array.pop();
+        }
+    }
+
+    /// Moves integer keys that now continue the array part into it.
+    pub fn absorb_general(&mut self) {
+        let Some(general) = &mut self.general else {
+            return;
+        };
+        loop {
+            let next = TableKey::Int(self.array.len() as i64 + 1);
+            match general.remove(&next) {
+                Some((_, v)) => self.array.push(v),
+                None => break,
+            }
+        }
+        if general.is_empty() {
+            self.general = None;
         }
     }
 

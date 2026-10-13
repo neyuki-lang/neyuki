@@ -89,27 +89,121 @@ impl TableKey {
     }
 }
 
-/// The non-array keys of a table in iteration order: string keys sorted.
+/// Where a non-array key sorts: numbers first (ascending), then strings,
+/// booleans, and everything else by identity.
+fn key_rank(key: &Value) -> u8 {
+    match key {
+        Value::Int(_) | Value::BigInt(_) | Value::Float(_) => 0,
+        Value::String(_) => 1,
+        Value::Bool(_) => 2,
+        _ => 3,
+    }
+}
+
+fn identity(key: &Value) -> usize {
+    match key {
+        Value::Table(t) => Rc::as_ptr(t) as *const u8 as usize,
+        Value::Closure(c) => Rc::as_ptr(c) as *const u8 as usize,
+        Value::Native(d) => *d as *const NativeDef as usize,
+        Value::Buffer(b) => Rc::as_ptr(b) as *const u8 as usize,
+        _ => 0,
+    }
+}
+
+fn compare_keys(a: &Value, b: &Value) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    key_rank(a).cmp(&key_rank(b)).then_with(|| match (a, b) {
+        (Value::String(x), Value::String(y)) => x.cmp(y),
+        (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
+        _ if key_rank(a) == 0 => {
+            if crate::vm::ops::eval_lt(a, b).unwrap_or(false) {
+                Ordering::Less
+            } else if crate::vm::ops::eval_lt(b, a).unwrap_or(false) {
+                Ordering::Greater
+            } else {
+                Ordering::Equal
+            }
+        }
+        _ => identity(a).cmp(&identity(b)),
+    })
+}
+
+/// The keys outside the array part, in iteration order: numbers ascending,
+/// strings sorted, then booleans and the rest. The array part always comes
+/// first, so a table iterates the same way every run.
 pub fn sorted_keys(table: &VmTable) -> Vec<Value> {
-    let mut keys: Vec<&StrRef> = table.fields.keys().collect();
-    keys.sort();
-    keys.into_iter().map(|k| Value::String(k.clone())).collect()
+    let mut keys: Vec<Value> = table
+        .fields
+        .iter()
+        .filter(|(_, v)| !matches!(v, Value::Nil))
+        .map(|(k, _)| Value::String(k.clone()))
+        .collect();
+    if let Some(general) = &table.general {
+        keys.extend(general.values().map(|(k, _)| k.clone()));
+    }
+    keys.sort_by(compare_keys);
+    keys
 }
 
 /// A raw lookup that ignores metatables.
 pub fn raw_get(table: &VmTable, key: &Value) -> Value {
-    match key {
-        Value::String(k) => table.fields.get(&**k).cloned().unwrap_or(Value::Nil),
-        Value::Int(i) if *i >= 1 => table
-            .array
-            .get(*i as usize - 1)
-            .cloned()
-            .unwrap_or(Value::Nil),
-        other => TableKey::from_value(other)
-            .ok()
-            .and_then(|k| table.get_general(&k).cloned())
-            .unwrap_or(Value::Nil),
+    table.raw_get(key)
+}
+
+/// The entry after `key` in iteration order, as `next` returns it.
+pub fn next_entry(table: &VmTable, key: &Value) -> Result<Option<(Value, Value)>, String> {
+    let array_start = match key {
+        Value::Nil => Some(0),
+        Value::Int(i) if *i >= 1 && (*i as u64) <= table.array.len() as u64 => Some(*i as usize),
+        _ => None,
+    };
+    if let Some(start) = array_start {
+        for (i, v) in table.array.iter().enumerate().skip(start) {
+            if !matches!(v, Value::Nil) {
+                return Ok(Some((Value::from_usize(i + 1), v.clone())));
+            }
+        }
+        if table.fields.is_empty() && table.general.is_none() {
+            return Ok(None);
+        }
+        // Without a previous hash key the smallest one is next, which a
+        // scan finds without sorting.
+        let mut best: Option<Value> = None;
+        for k in table
+            .fields
+            .iter()
+            .filter(|(_, v)| !matches!(v, Value::Nil))
+            .map(|(k, _)| Value::String(k.clone()))
+            .chain(
+                table
+                    .general
+                    .iter()
+                    .flat_map(|g| g.values().map(|(k, _)| k.clone())),
+            )
+        {
+            if best
+                .as_ref()
+                .is_none_or(|b| compare_keys(&k, b) == std::cmp::Ordering::Less)
+            {
+                best = Some(k);
+            }
+        }
+        return Ok(best.map(|k| {
+            let v = table.raw_get(&k);
+            (k, v)
+        }));
     }
+    let keys = sorted_keys(table);
+    let Some(pos) = keys
+        .iter()
+        .position(|k| compare_keys(k, key) == std::cmp::Ordering::Equal && k == key)
+    else {
+        return Err("invalid key to 'next'".to_string());
+    };
+    Ok(keys.into_iter().nth(pos + 1).map(|k| {
+        let v = table.raw_get(&k);
+        (k, v)
+    }))
 }
 
 #[cfg(test)]

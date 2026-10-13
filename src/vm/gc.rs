@@ -311,6 +311,14 @@ impl GcTracker {
                             self.mark_value(val);
                         }
                     }
+                    if let Some(general) = &tbl.general {
+                        for (key, val) in general.values() {
+                            self.mark_value(key);
+                            if !(weak && is_collectible(val)) {
+                                self.mark_value(val);
+                            }
+                        }
+                    }
                     if let Some(mt) = &tbl.metatable {
                         let mt_val = Value::Table(mt.clone());
                         self.mark_value(&mt_val);
@@ -386,6 +394,10 @@ impl GcTracker {
                 for val in tbl.fields.values() {
                     count_ref(val, &white_tables, &mut internal_ref_counts);
                 }
+                for (key, val) in tbl.general.iter().flat_map(|g| g.values()) {
+                    count_ref(key, &white_tables, &mut internal_ref_counts);
+                    count_ref(val, &white_tables, &mut internal_ref_counts);
+                }
                 if let Some(mt) = &tbl.metatable {
                     let target_ptr = Rc::as_ptr(mt);
                     if white_tables.contains_key(&target_ptr) {
@@ -407,7 +419,8 @@ impl GcTracker {
                 }
                 let _ = ptr;
                 let tbl = rc.borrow();
-                for val in tbl.array.iter().chain(tbl.fields.values()) {
+                let general = tbl.general.iter().flat_map(|g| g.values().map(|(_, v)| v));
+                for val in tbl.array.iter().chain(tbl.fields.values()).chain(general) {
                     count_ref(val, &white_tables, &mut internal_ref_counts);
                 }
             }
@@ -502,6 +515,7 @@ impl GcTracker {
             let mut tbl = rc.borrow_mut();
             tbl.array.clear();
             tbl.fields.clear();
+            tbl.general = None;
             tbl.metatable = None;
         }
         self.tables.remove(&ptr);
@@ -512,22 +526,33 @@ impl GcTracker {
         (Some(ptr), freed)
     }
 
-    /// Removes a dead value from a surviving weak table entry-wise.
+    /// Drops dead values from a surviving weak table. Array slots become nil
+    /// rather than being removed, so later indices keep their positions.
     fn prune_weak_table(
         tbl: &mut VmTable,
         doomed_tables: &HashSet<*const RefCell<VmTable>>,
         doomed_buffers: &HashSet<*const RefCell<VmBuffer>>,
     ) {
-        tbl.array.retain(|v| match v {
-            Value::Table(t) => !doomed_tables.contains(&Rc::as_ptr(t)),
-            Value::Buffer(b) => !doomed_buffers.contains(&Rc::as_ptr(b)),
-            _ => true,
-        });
-        tbl.fields.retain(|_, v| match v {
-            Value::Table(t) => !doomed_tables.contains(&Rc::as_ptr(t)),
-            Value::Buffer(b) => !doomed_buffers.contains(&Rc::as_ptr(b)),
-            _ => true,
-        });
+        let dead = |v: &Value| match v {
+            Value::Table(t) => doomed_tables.contains(&Rc::as_ptr(t)),
+            Value::Buffer(b) => doomed_buffers.contains(&Rc::as_ptr(b)),
+            _ => false,
+        };
+        for slot in tbl.array.iter_mut() {
+            if dead(slot) {
+                *slot = Value::Nil;
+            }
+        }
+        while matches!(tbl.array.last(), Some(Value::Nil)) {
+            tbl.array.pop();
+        }
+        tbl.fields.retain(|_, v| !dead(v));
+        if let Some(general) = &mut tbl.general {
+            general.retain(|_, (_, v)| !dead(v));
+            if general.is_empty() {
+                tbl.general = None;
+            }
+        }
     }
 
     /// Finishes a collection started by `collect_plan`: clears plain
@@ -618,6 +643,7 @@ impl GcTracker {
                     let mut tbl = rc.borrow_mut();
                     tbl.array.clear();
                     tbl.fields.clear();
+                    tbl.general = None;
                     tbl.metatable = None;
                 }
                 self.tables.remove(&ptr);

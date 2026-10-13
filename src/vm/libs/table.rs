@@ -52,10 +52,7 @@ fn table_length(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         .filter(|v| !matches!(v, Value::Nil))
         .count();
     if let Some(general) = &t.general {
-        n += general
-            .values()
-            .filter(|v| !matches!(v, Value::Nil))
-            .count();
+        n += general.len();
     }
     Ok(vec![Value::from_usize(n)])
 }

@@ -1124,26 +1124,22 @@ impl VM {
                     let v = &reg!(val);
                     if let (Value::Table(t), Value::Int(i)) = (tbl_val, k)
                         && *i >= 1
+                        && !matches!(v, Value::Nil)
                     {
                         let mut tbl = t.borrow_mut();
                         if !tbl.frozen {
                             let idx = *i as usize - 1;
                             if idx < tbl.array.len() {
                                 match (v, &mut tbl.array[idx]) {
-                                    (Value::Int(n), Value::Int(o)) => {
-                                        *o = *n;
-                                        continue;
-                                    }
-                                    (Value::Float(n), Value::Float(o)) => {
-                                        *o = *n;
-                                        continue;
-                                    }
-                                    (v_other, slot) => {
-                                        *slot = v_other.clone();
-                                        continue;
-                                    }
+                                    (Value::Int(n), Value::Int(o)) => *o = *n,
+                                    (Value::Float(n), Value::Float(o)) => *o = *n,
+                                    (v_other, slot) => *slot = v_other.clone(),
                                 }
-                            } else if idx == tbl.array.len() && tbl.metatable.is_none() {
+                                continue;
+                            } else if idx == tbl.array.len()
+                                && tbl.metatable.is_none()
+                                && tbl.general.is_none()
+                            {
                                 tbl.array.push(v.clone());
                                 continue;
                             }
@@ -1878,55 +1874,23 @@ impl VM {
         let state = self.stack[base + b as usize + 1].clone();
         let ctrl = self.stack[base + b as usize + 2].clone();
         let results = match &iter_fn {
-            Value::Table(t) => {
-                let has_call = t.borrow().metamethod("__call");
-                if has_call.is_some() {
-                    self.call_function(iter_fn, &[state, ctrl])?
-                } else {
-                    let tbl = t.borrow();
-                    if retc > 1 && !tbl.array.is_empty() {
-                        let next_idx = match ctrl {
-                            Value::Nil => 0,
-                            Value::Int(i) => usize::try_from(i).unwrap_or(tbl.array.len()),
-                            _ => tbl.array.len(),
-                        };
-                        if next_idx < tbl.array.len() {
-                            vec![Value::from_usize(next_idx + 1), tbl.array[next_idx].clone()]
-                        } else {
-                            vec![Value::Nil, Value::Nil]
-                        }
-                    } else if retc > 1 {
-                        let mut keys: Vec<&StrRef> = tbl.fields.keys().collect();
-                        keys.sort();
-                        let next_key = match &ctrl {
-                            Value::Nil => keys.first().copied(),
-                            Value::String(prev_k) => keys
-                                .iter()
-                                .position(|k| ***k == **prev_k)
-                                .and_then(|pos| keys.get(pos + 1).copied()),
-                            _ => None,
-                        };
-                        if let Some(k) = next_key {
-                            let v = tbl.fields.get(k).cloned().unwrap_or(Value::Nil);
-                            vec![Value::String(k.clone()), v]
-                        } else {
-                            vec![Value::Nil, Value::Nil]
-                        }
-                    } else {
-                        let next_idx = match state {
-                            Value::Nil => 0,
-                            Value::Int(i) => usize::try_from(i).unwrap_or(tbl.array.len()),
-                            _ => tbl.array.len(),
-                        };
-                        if next_idx < tbl.array.len() {
-                            let val = tbl.array[next_idx].clone();
-                            drop(tbl);
-                            self.stack[base + b as usize + 1] = Value::from_usize(next_idx + 1);
-                            vec![val]
-                        } else {
-                            vec![Value::Nil]
-                        }
+            Value::Table(t) if t.borrow().metamethod("__call").is_none() => {
+                let t = t.clone();
+                self.table_for_step(&t, base + b as usize + 1, retc)
+            }
+            // `pairs(t)` hands back `next`: iterate the table directly,
+            // which visits every key once without re-sorting per step.
+            Value::Native(def)
+                if std::ptr::eq(*def, crate::vm::builtins::NEXT) && matches!(ctrl, Value::Nil) =>
+            {
+                match &state {
+                    Value::Table(t) => {
+                        let t = t.clone();
+                        self.stack[base + b as usize] = state.clone();
+                        self.stack[base + b as usize + 1] = Value::Nil;
+                        self.table_for_step(&t, base + b as usize + 1, retc)
                     }
+                    _ => self.call_function(iter_fn, &[state, ctrl])?,
                 }
             }
             _ => self.call_function(iter_fn, &[state, ctrl])?,
@@ -1941,10 +1905,69 @@ impl VM {
         Ok(())
     }
 
+    /// One step of `for k, v in t`. The state register holds the progress:
+    /// nil before the first step, an integer while walking the array part,
+    /// then a snapshot of the remaining keys (stored reversed, popped from
+    /// the end). Entries removed during the loop are skipped; keys added
+    /// after the snapshot are not visited.
+    fn table_for_step(
+        &mut self,
+        t: &Rc<RefCell<VmTable>>,
+        state_reg: usize,
+        retc: u8,
+    ) -> Vec<Value> {
+        let entry = |key: Value, value: Value| {
+            if retc > 1 {
+                vec![key, value]
+            } else {
+                vec![value]
+            }
+        };
+        let tbl = t.borrow();
+        let mut next_index = match &self.stack[state_reg] {
+            Value::Int(i) => *i as usize,
+            Value::Table(_) => usize::MAX,
+            _ => 0,
+        };
+        while next_index < tbl.array.len() {
+            let v = &tbl.array[next_index];
+            next_index += 1;
+            if !matches!(v, Value::Nil) {
+                let v = v.clone();
+                drop(tbl);
+                self.stack[state_reg] = Value::from_usize(next_index);
+                return entry(Value::from_usize(next_index), v);
+            }
+        }
+        let snapshot = match &self.stack[state_reg] {
+            Value::Table(snapshot) => snapshot.clone(),
+            _ => {
+                if tbl.fields.is_empty() && tbl.general.is_none() {
+                    return vec![Value::Nil];
+                }
+                let mut keys = crate::vm::table::sorted_keys(&tbl);
+                keys.reverse();
+                let mut snapshot = VmTable::new();
+                snapshot.array = keys;
+                let snapshot = Rc::new(RefCell::new(snapshot));
+                self.stack[state_reg] = Value::Table(snapshot.clone());
+                snapshot
+            }
+        };
+        let mut snapshot = snapshot.borrow_mut();
+        while let Some(key) = snapshot.array.pop() {
+            let value = tbl.raw_get(&key);
+            if !matches!(value, Value::Nil) {
+                return entry(key, value);
+            }
+        }
+        vec![Value::Nil]
+    }
+
     // ----- tables ---------------------------------------------------------
 
     /// Raw lookup of an existing, non-nil entry. `None` means the slow path
-    /// (metamethods, buffers, errors) has to decide.
+    /// (metamethods, buffers, strings, errors) has to decide.
     #[inline]
     fn table_get_fast(table: &Value, key: &Value) -> Option<Value> {
         let Value::Table(t) = table else {
@@ -1952,48 +1975,30 @@ impl VM {
         };
         let tbl = t.borrow();
         let found = match key {
-            Value::Int(i) if *i >= 1 => tbl.array.get(*i as usize - 1),
-            Value::String(k) => tbl.fields.get(&**k),
-            other => {
-                if let Ok(tk) = crate::vm::table::TableKey::from_value(other) {
-                    tbl.get_general(&tk)
-                } else {
-                    None
-                }
+            Value::Int(i) if *i >= 1 && (*i as u64) <= tbl.array.len() as u64 => {
+                tbl.array[*i as usize - 1].clone()
             }
+            Value::String(k) => tbl.fields.get(&**k).cloned().unwrap_or(Value::Nil),
+            Value::BigInt(_) => return None,
+            other => tbl.raw_get(other),
         };
-        match found {
-            Some(Value::Nil) | None => {
-                if tbl.metatable.is_none() {
-                    // Nothing can intercept a miss: the answer is nil, unless
-                    // the key is one a table can never hold.
-                    match key {
-                        Value::String(_) => Some(Value::Nil),
-                        Value::Int(i) if *i >= 1 => Some(Value::Nil),
-                        other
-                            if !matches!(other, Value::Nil)
-                                && !matches!(other, Value::Float(f) if f.is_nan()) =>
-                        {
-                            Some(Value::Nil)
-                        }
-                        _ => None,
-                    }
-                } else {
-                    None
-                }
-            }
-            Some(v) => Some(v.clone()),
+        if matches!(found, Value::Nil) && tbl.metatable.is_some() {
+            return None;
         }
+        Some(found)
     }
 
     /// Raw store into an existing array slot or field, or an append, on a
     /// table that nothing can intercept. Returns false to defer to the slow
-    /// path, which also reports errors.
+    /// path, which also handles nil (removal) and reports errors.
     #[inline]
     fn table_set_fast(table: &Value, key: &Value, val: &Value) -> bool {
         let Value::Table(t) = table else {
             return false;
         };
+        if matches!(val, Value::Nil) {
+            return false;
+        }
         let mut tbl = t.borrow_mut();
         if tbl.frozen {
             return false;
@@ -2009,7 +2014,8 @@ impl VM {
                         (v, slot) => *slot = v.clone(),
                     }
                     true
-                } else if idx == tbl.array.len() && tbl.metatable.is_none() {
+                } else if idx == tbl.array.len() && tbl.metatable.is_none() && tbl.general.is_none()
+                {
                     tbl.array.push(val.clone());
                     true
                 } else {
@@ -2027,17 +2033,7 @@ impl VM {
                     false
                 }
             }
-            other => {
-                if tbl.metatable.is_some() {
-                    return false;
-                }
-                if let Ok(tk) = crate::vm::table::TableKey::from_value(other) {
-                    tbl.set_general(tk, val.clone());
-                    true
-                } else {
-                    false
-                }
-            }
+            _ => false,
         }
     }
 
@@ -2056,25 +2052,13 @@ impl VM {
         }
         match table {
             Value::Table(t) => {
-                let direct_val = {
-                    let tbl = t.borrow();
-                    match key {
-                        Value::String(k) => tbl.fields.get(&**k).cloned(),
-                        Value::Int(idx) if *idx > 0 => tbl.array.get(*idx as usize - 1).cloned(),
-                        Value::BigInt(b) if num_traits::Signed::is_positive(&**b) => {
-                            return Err("table index too large".to_string());
-                        }
-                        other => {
-                            let tk = crate::vm::table::TableKey::from_value(other)
-                                .map_err(|e| e.to_string())?;
-                            tbl.get_general(&tk).cloned()
-                        }
-                    }
-                };
-
-                if let Some(val) = direct_val
-                    && !matches!(val, Value::Nil)
+                if let Value::BigInt(b) = key
+                    && num_traits::Signed::is_positive(&**b)
                 {
+                    return Err("table index too large".to_string());
+                }
+                let val = t.borrow().raw_get(key);
+                if !matches!(val, Value::Nil) {
                     return Ok(val);
                 }
 
@@ -2090,7 +2074,6 @@ impl VM {
                     }
                     _ => {}
                 }
-                crate::vm::table::TableKey::from_value(key).map_err(|e| e.to_string())?;
                 Ok(Value::Nil)
             }
             Value::Buffer(b) => {
@@ -2141,21 +2124,12 @@ impl VM {
                     return Err("attempted to mutate a frozen table".to_string());
                 }
 
-                let key_exists = match &key {
-                    Value::String(k) => t.borrow().fields.contains_key(&**k),
-                    Value::Int(idx) if *idx > 0 => (*idx as usize - 1) < t.borrow().array.len(),
-                    Value::BigInt(b) if num_traits::Signed::is_positive(&**b) => {
-                        return Err("table index too large".to_string());
-                    }
-                    other => {
-                        if let Ok(tk) = crate::vm::table::TableKey::from_value(other) {
-                            t.borrow().get_general(&tk).is_some()
-                        } else {
-                            false
-                        }
-                    }
-                };
-
+                if let Value::BigInt(b) = &key
+                    && num_traits::Signed::is_positive(&**b)
+                {
+                    return Err("table index too large".to_string());
+                }
+                let key_exists = !matches!(t.borrow().raw_get(&key), Value::Nil);
                 if !key_exists {
                     let newindex_handler = t.borrow().metamethod("__newindex");
                     match newindex_handler {
@@ -2169,30 +2143,7 @@ impl VM {
                         _ => {}
                     }
                 }
-
-                let mut tbl = t.borrow_mut();
-                match key {
-                    Value::String(k) => {
-                        tbl.fields.insert(k, val);
-                    }
-                    Value::Int(idx) if idx > 0 => {
-                        let i = idx as usize;
-                        if i - 1 < tbl.array.len() {
-                            tbl.array[i - 1] = val;
-                        } else if i - 1 == tbl.array.len() {
-                            tbl.array.push(val);
-                        } else {
-                            tbl.array.resize(i - 1, Value::Nil);
-                            tbl.array.push(val);
-                        }
-                    }
-                    other => {
-                        let tk = crate::vm::table::TableKey::from_value(&other)
-                            .map_err(|e| e.to_string())?;
-                        tbl.set_general(tk, val);
-                    }
-                }
-                Ok(())
+                t.borrow_mut().raw_set(key, val)
             }
             Value::Buffer(b) => {
                 let mut buf = b.borrow_mut();

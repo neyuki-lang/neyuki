@@ -7,14 +7,22 @@ use std::str::FromStr;
 use crate::vm::machine::VM;
 use crate::vm::value::Value;
 
-pub fn builtin_print(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let out = args
-        .iter()
-        .map(|a| a.to_string())
-        .collect::<Vec<_>>()
-        .join("\t");
-    println!("{}", out);
-    Ok(vec![Value::Nil])
+pub fn builtin_print(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    use std::io::Write;
+    let mut out = String::new();
+    for (i, arg) in args.iter().enumerate() {
+        if i > 0 {
+            out.push('\t');
+        }
+        match arg {
+            Value::String(s) => out.push_str(s),
+            other => out.push_str(&tostring(vm, other)?),
+        }
+    }
+    out.push('\n');
+    // A closed pipe (`neyuki run x | head`) is not the script's error.
+    let _ = std::io::stdout().lock().write_all(out.as_bytes());
+    Ok(Vec::new())
 }
 
 pub fn builtin_assert(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {

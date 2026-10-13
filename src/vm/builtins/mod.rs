@@ -1,17 +1,17 @@
 // Built-in modules and global functions registry for Neyuki VM.
 
-pub mod array;
 pub mod gc;
 pub mod global;
+pub mod iter;
 pub mod meta;
 
-pub use array::{builtin_array_create, builtin_table_clear};
 pub use gc::builtin_collectgarbage;
 pub use global::{
     builtin_assert, builtin_error, builtin_float, builtin_int, builtin_pcall, builtin_print,
     builtin_require, builtin_tonumber, builtin_tostring, builtin_try, builtin_type, builtin_typeof,
     builtin_xpcall,
 };
+pub use iter::NEXT;
 pub use meta::{
     builtin_getmetatable, builtin_rawequal, builtin_rawget, builtin_rawlen, builtin_rawset,
     builtin_setmetatable,
@@ -34,8 +34,16 @@ pub fn register_all(vm: &mut VM) {
     vm.register_native(crate::native_def!("xpcall", builtin_xpcall));
     vm.register_native(crate::native_def!("try", builtin_try));
     vm.register_native(crate::native_def!("require", builtin_require));
-    vm.register_native(crate::native_def!("array_create", builtin_array_create));
-    vm.register_native(crate::native_def!("table_clear", builtin_table_clear));
+    vm.register_native(NEXT);
+    vm.register_native(crate::native_def!("pairs", iter::builtin_pairs));
+    vm.register_native(crate::native_def!("ipairs", iter::builtin_ipairs));
+    vm.register_native(crate::native_def!("select", iter::builtin_select));
+    vm.register_native(crate::native_def!("warn", iter::builtin_warn));
+    vm.set_global("_G", iter::globals_table());
+    vm.set_global(
+        "_VERSION",
+        crate::vm::Value::str(concat!("Neyuki ", env!("CARGO_PKG_VERSION"))),
+    );
 
     // Garbage collector
     vm.register_native(crate::native_def!("collectgarbage", builtin_collectgarbage));

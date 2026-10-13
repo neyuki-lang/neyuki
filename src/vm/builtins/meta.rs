@@ -75,70 +75,29 @@ pub fn builtin_getmetatable(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, 
 }
 
 pub fn builtin_rawget(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let tbl_val = args
-        .first()
-        .ok_or_else(|| "rawget expects table as first argument".to_string())?;
-    let key = args
-        .get(1)
-        .ok_or_else(|| "rawget expects 2 arguments".to_string())?;
-    match tbl_val {
-        Value::Table(t) => {
-            let tbl = t.borrow();
-            match key {
-                Value::String(k) => Ok(vec![tbl.fields.get(&**k).cloned().unwrap_or(Value::Nil)]),
-                Value::Int(idx) if *idx > 0 => {
-                    let i = *idx as usize;
-                    Ok(vec![tbl.array.get(i - 1).cloned().unwrap_or(Value::Nil)])
-                }
-                Value::BigInt(_) => Err("table index too large".to_string()),
-                _ => Ok(vec![Value::Nil]),
-            }
-        }
-        _ => Err("rawget expects a table".to_string()),
-    }
+    let Some(Value::Table(t)) = args.first() else {
+        return Err("rawget expects a table".to_string());
+    };
+    let key = args.get(1).unwrap_or(&Value::Nil);
+    Ok(vec![t.borrow().raw_get(key)])
 }
 
 pub fn builtin_rawset(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let tbl_val = args
-        .first()
-        .ok_or_else(|| "rawset expects table as first argument".to_string())?;
+    let table = args.first().unwrap_or(&Value::Nil);
+    let Value::Table(t) = table else {
+        return Err("rawset expects a table".to_string());
+    };
+    let key = args.get(1).cloned().unwrap_or(Value::Nil);
     let val = args.get(2).cloned().unwrap_or(Value::Nil);
-    vm.gc.write_barrier(tbl_val, &val);
-    let tbl_val = args
-        .first()
-        .ok_or_else(|| "rawset expects table as first argument".to_string())?;
-    let key = args
-        .get(1)
-        .ok_or_else(|| "rawset expects 3 arguments".to_string())?;
-    let val = args.get(2).cloned().unwrap_or(Value::Nil);
-    match tbl_val {
-        Value::Table(t) => {
-            let mut tbl = t.borrow_mut();
-            if tbl.frozen {
-                return Err("attempted to mutate a frozen table".to_string());
-            }
-            match key {
-                Value::String(k) => {
-                    tbl.fields.insert(k.clone(), val);
-                }
-                Value::BigInt(_) => return Err("table index too large".to_string()),
-                Value::Int(idx) if *idx > 0 => {
-                    let i = *idx as usize;
-                    if i - 1 < tbl.array.len() {
-                        tbl.array[i - 1] = val;
-                    } else if i - 1 == tbl.array.len() {
-                        tbl.array.push(val);
-                    } else {
-                        tbl.array.resize(i - 1, Value::Nil);
-                        tbl.array.push(val);
-                    }
-                }
-                _ => return Err("invalid table key".to_string()),
-            }
-            Ok(vec![tbl_val.clone()])
-        }
-        _ => Err("rawset expects a table".to_string()),
+    if t.borrow().frozen {
+        return Err("attempted to mutate a frozen table".to_string());
     }
+    if let Value::BigInt(_) = key {
+        return Err("table index too large".to_string());
+    }
+    vm.gc.write_barrier(table, &val);
+    t.borrow_mut().raw_set(key, val)?;
+    Ok(vec![table.clone()])
 }
 
 pub fn builtin_rawequal(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
