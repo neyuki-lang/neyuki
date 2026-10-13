@@ -1,819 +1,702 @@
-// Debug Adapter Protocol server (v1 subset) over stdio.
-//
-// Speaks DAP with function breakpoints only: `initialize`, `launch`,
-// `setFunctionBreakpoints`, `configurationDone`, `threads`, `stackTrace`,
-// `scopes`, `variables`, `continue`, `disconnect`. Stepping commands,
-// `evaluate` and line breakpoints are rejected with clear errors (line
-// numbers are not plumbed through the compilers yet).
-//
-// Execution model: the session owns one VM. The program runs when
-// `configurationDone` arrives; a breakpoint hit (checked at every closure
-// entry) sends a `stopped` event and serves requests from a nested loop
-// until `continue`/`disconnect`. No threads are involved (the VM is
-// `!Send`), so pausing is purely re-entrant through the hook-style check.
-//
-// Two honest limitations, both documented to clients by behavior:
-// script `print()` output shares stdout with the DAP stream (keep debug
-// sessions print-free), and yielding inside a paused inspection is
-// unsupported.
+//! Debug Adapter Protocol server for `neyuki dap`, over stdio.
+//!
+//! The session owns one VM and runs the program on the same thread, so
+//! pausing is re-entrant: a breakpoint or finished step sends `stopped` and
+//! serves requests from a nested loop until the client resumes. Line
+//! breakpoints and stepping are checked from the VM's per-instruction trap,
+//! which is only armed while there is something to check.
 
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
+use std::rc::Rc;
 
 use super::dap_json::{self, Json};
 use crate::vm::machine::VM;
-use crate::vm::value::Value;
+use crate::vm::value::{Value, VmClosure};
 
-/// Debug session state, owned by the VM (`None` = no session, zero cost).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StepKind {
+    /// Stop at the next new line in this frame or a caller.
+    Over,
+    /// Stop at the next new line anywhere.
+    In,
+    /// Stop at the next new line in a caller.
+    Out,
+}
+
+#[derive(Clone, Copy)]
+struct Step {
+    kind: StepKind,
+    depth: usize,
+}
+
+/// What a variables reference points at.
+#[derive(Clone)]
+enum VarRef {
+    Locals(usize),
+    Globals,
+    Value(Value),
+}
+
+/// Debug session state, owned by the VM (`None` = no session).
 pub struct DapSession {
-    pub reader: Box<dyn BufRead>,
-    pub writer: Box<dyn Write>,
-    /// Function names that pause execution on entry.
-    pub func_breakpoints: Vec<String>,
-    /// Program given by `launch`, run at `configurationDone`.
-    pub launch_program: Option<String>,
-    /// variablesReference registry for compound values.
-    pub variables: HashMap<usize, Value>,
-    pub next_var_ref: usize,
-    pub next_seq: u64,
-    pub terminated: bool,
+    reader: Box<dyn BufRead>,
+    writer: Box<dyn Write>,
+    func_breakpoints: Vec<String>,
+    /// Breakpoint lines by canonical source path.
+    line_breakpoints: HashMap<String, Vec<u32>>,
+    /// Canonical paths of the sources seen so far.
+    canonical: HashMap<String, String>,
+    step: Option<Step>,
+    launch_program: Option<String>,
+    stop_on_entry: bool,
+    variables: HashMap<usize, VarRef>,
+    next_var_ref: usize,
+    next_seq: u64,
+    terminated: bool,
 }
 
 impl DapSession {
-    /// Whether the debugger needs to see every new line.
-    pub fn wants_lines(&self) -> bool {
-        false
+    pub fn new(reader: Box<dyn BufRead>, writer: Box<dyn Write>) -> Self {
+        Self {
+            reader,
+            writer,
+            func_breakpoints: Vec::new(),
+            line_breakpoints: HashMap::new(),
+            canonical: HashMap::new(),
+            step: None,
+            launch_program: None,
+            stop_on_entry: false,
+            variables: HashMap::new(),
+            next_var_ref: 1,
+            next_seq: 1,
+            terminated: false,
+        }
     }
 
     pub fn stdio() -> Self {
-        Self {
-            reader: Box::new(std::io::BufReader::new(std::io::stdin())),
-            writer: Box::new(io::stdout()),
-            func_breakpoints: Vec::new(),
-            launch_program: None,
-            variables: HashMap::new(),
-            next_var_ref: 1,
-            next_seq: 1,
-            terminated: false,
-        }
+        Self::new(
+            Box::new(io::BufReader::new(io::stdin())),
+            Box::new(io::stdout()),
+        )
     }
 
-    /// In-memory session for tests. Returns the session plus a handle to
-    /// everything written to it.
-    #[cfg(test)]
-    pub fn memory(input: Vec<u8>) -> (Self, std::sync::Arc<std::sync::Mutex<Vec<u8>>>) {
-        use std::io::Cursor;
-        let out = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        struct SharedOut(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-        impl Write for SharedOut {
-            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(buf);
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
+    /// Whether the VM has to report every new line.
+    pub fn wants_lines(&self) -> bool {
+        self.step.is_some() || self.line_breakpoints.values().any(|l| !l.is_empty())
+    }
+
+    fn canonical_path(&mut self, path: &str) -> String {
+        if let Some(found) = self.canonical.get(path) {
+            return found.clone();
         }
-        let session = Self {
-            reader: Box::new(Cursor::new(input)),
-            writer: Box::new(SharedOut(out.clone())),
-            func_breakpoints: Vec::new(),
-            launch_program: None,
-            variables: HashMap::new(),
-            next_var_ref: 1,
-            next_seq: 1,
-            terminated: false,
+        let canonical = std::fs::canonicalize(path)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| path.to_string());
+        let canonical = if cfg!(windows) {
+            canonical.to_lowercase()
+        } else {
+            canonical
         };
-        (session, out)
+        self.canonical.insert(path.to_string(), canonical.clone());
+        canonical
+    }
+
+    fn seq(&mut self) -> u64 {
+        let n = self.next_seq;
+        self.next_seq += 1;
+        n
+    }
+
+    fn send(&mut self, message: Json) {
+        let bytes = dap_json::render_json(&message).into_bytes();
+        let _ = dap_json::write_message(&mut self.writer, &bytes);
+    }
+
+    fn respond(&mut self, request: &Json, body: Json) {
+        let seq = self.seq();
+        let message = Json::Obj(vec![
+            ("seq".into(), Json::Num(seq as f64)),
+            ("type".into(), Json::Str("response".into())),
+            ("request_seq".into(), request_seq(request)),
+            ("success".into(), Json::Bool(true)),
+            ("command".into(), Json::Str(command_of(request).into())),
+            ("body".into(), body),
+        ]);
+        self.send(message);
+    }
+
+    fn fail(&mut self, request: &Json, message: impl Into<String>) {
+        let seq = self.seq();
+        let message = Json::Obj(vec![
+            ("seq".into(), Json::Num(seq as f64)),
+            ("type".into(), Json::Str("response".into())),
+            ("request_seq".into(), request_seq(request)),
+            ("success".into(), Json::Bool(false)),
+            ("command".into(), Json::Str(command_of(request).into())),
+            ("message".into(), Json::Str(message.into())),
+        ]);
+        self.send(message);
+    }
+
+    fn event(&mut self, event: &str, body: Json) {
+        let seq = self.seq();
+        let message = Json::Obj(vec![
+            ("seq".into(), Json::Num(seq as f64)),
+            ("type".into(), Json::Str("event".into())),
+            ("event".into(), Json::Str(event.into())),
+            ("body".into(), body),
+        ]);
+        self.send(message);
+    }
+
+    fn register(&mut self, var: VarRef) -> usize {
+        let id = self.next_var_ref;
+        self.next_var_ref += 1;
+        self.variables.insert(id, var);
+        id
     }
 }
 
-/// Pauses at a line breakpoint or step target.
-pub fn check_line(_vm: &mut VM, _line: u32) -> Result<(), String> {
-    Ok(())
+fn request_seq(request: &Json) -> Json {
+    Json::Num(request.get("seq").and_then(Json::as_f64).unwrap_or(0.0))
 }
 
-fn ok_response(req_seq: f64, command: &str, server_seq: u64, body: Json) -> Json {
-    Json::Obj(vec![
-        ("seq".to_string(), Json::Num(server_seq as f64)),
-        ("type".to_string(), Json::Str("response".to_string())),
-        ("request_seq".to_string(), Json::Num(req_seq)),
-        ("success".to_string(), Json::Bool(true)),
-        ("command".to_string(), Json::Str(command.to_string())),
-        ("body".to_string(), body),
-    ])
+fn command_of(request: &Json) -> &str {
+    request.get("command").and_then(Json::as_str).unwrap_or("")
 }
 
-fn err_response(req_seq: f64, command: &str, server_seq: u64, message: String) -> Json {
-    Json::Obj(vec![
-        ("seq".to_string(), Json::Num(server_seq as f64)),
-        ("type".to_string(), Json::Str("response".to_string())),
-        ("request_seq".to_string(), Json::Num(req_seq)),
-        ("success".to_string(), Json::Bool(false)),
-        ("command".to_string(), Json::Str(command.to_string())),
-        ("message".to_string(), Json::Str(message)),
-    ])
+fn obj(pairs: Vec<(&str, Json)>) -> Json {
+    Json::Obj(pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
 }
 
-fn event_envelope(server_seq: u64, event: &str, body: Json) -> Json {
-    Json::Obj(vec![
-        ("seq".to_string(), Json::Num(server_seq as f64)),
-        ("type".to_string(), Json::Str("event".to_string())),
-        ("event".to_string(), Json::Str(event.to_string())),
-        ("body".to_string(), body),
-    ])
+fn session(vm: &mut VM) -> &mut DapSession {
+    vm.dap.as_mut().expect("debug session")
 }
 
-fn value_preview(v: &Value) -> String {
+/// Sends program output to the client instead of stdout, which carries the
+/// protocol.
+pub fn output(vm: &mut VM, category: &str, text: &str) {
+    if let Some(s) = vm.dap.as_mut() {
+        s.event(
+            "output",
+            obj(vec![
+                ("category", Json::Str(category.into())),
+                ("output", Json::Str(text.into())),
+            ]),
+        );
+    }
+}
+
+fn preview(v: &Value) -> String {
     match v {
-        Value::Nil => "nil".to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Int(i) => i.to_string(),
-        Value::BigInt(b) => b.to_string(),
-        Value::Float(f) => f.to_string(),
-        Value::String(s) => s.to_string(),
-        Value::Table(t) => format!("table({})", t.borrow().array.len()),
-        Value::Closure(c) => format!(
-            "function({})",
-            c.proto.name.as_deref().unwrap_or("anonymous")
-        ),
-        Value::Native(def) => format!("native({})", def.name),
-        Value::Buffer(b) => format!("buffer({})", b.borrow().len()),
+        Value::String(s) => format!("{:?}", &**s),
+        Value::Table(t) => {
+            let t = t.borrow();
+            let named = t.fields.len() + t.general.as_ref().map_or(0, |g| g.len());
+            match (t.array.len(), named) {
+                (0, 0) => "{}".to_string(),
+                (n, 0) => format!("{{...}} ({} items)", n),
+                (0, m) => format!("{{...}} ({} keys)", m),
+                (n, m) => format!("{{...}} ({} items, {} keys)", n, m),
+            }
+        }
+        other => other.to_string(),
     }
 }
 
-fn value_type_name(v: &Value) -> &'static str {
-    match v {
-        Value::Nil => "nil",
-        Value::Bool(_) => "boolean",
-        Value::Int(_) | Value::BigInt(_) | Value::Float(_) => "number",
-        Value::String(_) => "string",
-        Value::Table(_) => "table",
-        Value::Closure(_) | Value::Native(_) => "function",
-        Value::Buffer(_) => "buffer",
-    }
-}
-
-/// Current source line of a frame, best effort (line tables may be stubs).
-fn frame_line(vm: &VM, frame_idx: usize) -> u32 {
+/// The source line a frame is executing.
+fn frame_line(vm: &VM, index: usize) -> u32 {
     vm.frames
-        .get(frame_idx)
-        .and_then(|f| f.closure.proto.lines.get(f.ip).copied())
-        .unwrap_or(1)
+        .get(index)
+        .and_then(|f| f.closure.proto.lines.get(f.ip.saturating_sub(1)).copied())
+        .unwrap_or(0)
 }
 
-/// Handle one parsed request. Pure dispatch over explicit borrows so the
-/// same function serves the outer loop, the pause loop, and tests.
-pub fn handle_request(vm: &mut VM, req: &Json) -> Control {
-    let req_seq = req.get("seq").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let command = req
-        .get("command")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let args = req.get("arguments").cloned().unwrap_or(Json::Null);
-
-    // `launch` needs the whole VM (it executes code): handle first.
-    if command == "launch" {
-        return do_launch(vm, req_seq, &args);
-    }
-    if command == "disconnect" {
-        let seq = next_server_seq(vm);
-        if let Some(session) = vm.dap.as_mut() {
-            session.terminated = true;
+/// The variables visible in a frame: its upvalues, then its locals in
+/// scope. A later name shadows an earlier one.
+fn frame_variables(vm: &VM, index: usize) -> Vec<(String, Value)> {
+    let Some(frame) = vm.frames.get(index) else {
+        return Vec::new();
+    };
+    let proto = &frame.closure.proto;
+    let pc = frame.ip.saturating_sub(1) as u32;
+    let mut out: Vec<(String, Value)> = Vec::new();
+    for (i, uv) in frame.closure.upvalues.iter().enumerate() {
+        if let Some(name) = proto.upvalue_names.get(i).filter(|n| !n.is_empty()) {
+            out.push((name.clone(), vm.upvalue_get(uv)));
         }
-        return Control::Respond(ok_response(req_seq, &command, seq, Json::Obj(vec![])));
     }
+    for info in &proto.local_names {
+        if info.from_pc <= pc && pc < info.to_pc {
+            let value = vm
+                .stack
+                .get(frame.base + info.reg as usize)
+                .cloned()
+                .unwrap_or(Value::Nil);
+            out.retain(|(name, _)| *name != info.name);
+            out.push((info.name.clone(), value));
+        }
+    }
+    out
+}
 
-    // Everything below only touches disjoint VM fields.
-    let has_session = vm.dap.is_some();
-    if !has_session {
-        return Control::Respond(err_response(
-            req_seq,
-            &command,
-            0,
-            "no debug session".to_string(),
-        ));
-    }
-    match command.as_str() {
+/// One request while the program is not running. Returns false once the
+/// session should end.
+fn handle(vm: &mut VM, request: &Json) -> bool {
+    let args = request.get("arguments").cloned().unwrap_or(Json::Null);
+    match command_of(request) {
         "initialize" => {
-            let seq = next_server_seq(vm);
-            Control::Respond(ok_response(
-                req_seq,
-                &command,
-                seq,
-                Json::Obj(vec![(
-                    "capabilities".to_string(),
-                    Json::Obj(vec![
-                        ("supportsFunctionBreakpoints".to_string(), Json::Bool(true)),
-                        (
-                            "supportsConfigurationDoneRequest".to_string(),
-                            Json::Bool(true),
-                        ),
-                    ]),
-                )]),
-            ))
+            let caps = obj(vec![
+                ("supportsConfigurationDoneRequest", Json::Bool(true)),
+                ("supportsFunctionBreakpoints", Json::Bool(true)),
+                ("supportsEvaluateForHovers", Json::Bool(true)),
+                ("supportsTerminateRequest", Json::Bool(true)),
+            ]);
+            let s = session(vm);
+            s.respond(request, caps);
+            s.event("initialized", obj(vec![]));
         }
+        "launch" => {
+            let program = args.get("program").and_then(Json::as_str).unwrap_or("");
+            if program.is_empty() {
+                session(vm).fail(request, "launch needs a program path");
+                return true;
+            }
+            let s = session(vm);
+            s.launch_program = Some(program.to_string());
+            s.stop_on_entry = matches!(args.get("stopOnEntry"), Some(Json::Bool(true)));
+            s.respond(request, obj(vec![]));
+        }
+        "setBreakpoints" => set_breakpoints(vm, request, &args),
         "setFunctionBreakpoints" => {
             let mut names = Vec::new();
-            if let Json::Arr(items) = args
-                .get("breakpoints")
-                .cloned()
-                .unwrap_or(Json::Arr(vec![]))
-            {
+            if let Some(Json::Arr(items)) = args.get("breakpoints") {
                 for item in items {
-                    if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
+                    if let Some(name) = item.get("name").and_then(Json::as_str) {
                         names.push(name.to_string());
                     }
                 }
             }
-            if let Some(session) = vm.dap.as_mut() {
-                session.func_breakpoints = names.clone();
-            }
-            let seq = next_server_seq(vm);
-            let list: Vec<Json> = names
+            let verified = names
                 .iter()
-                .map(|_| Json::Obj(vec![("verified".to_string(), Json::Bool(true))]))
+                .map(|_| obj(vec![("verified", Json::Bool(true))]))
                 .collect();
-            Control::Respond(ok_response(
-                req_seq,
-                &command,
-                seq,
-                Json::Obj(vec![("breakpoints".to_string(), Json::Arr(list))]),
-            ))
+            let s = session(vm);
+            s.func_breakpoints = names;
+            s.respond(request, obj(vec![("breakpoints", Json::Arr(verified))]));
+        }
+        "setExceptionBreakpoints" => {
+            session(vm).respond(request, obj(vec![("breakpoints", Json::Arr(vec![]))]));
         }
         "configurationDone" => {
-            // Start the program (already validated by launch).
-            let prog = vm.dap.as_ref().and_then(|s| s.launch_program.clone());
-            match prog {
-                Some(path) => {
-                    let seq = next_server_seq(vm);
-                    let out = ok_response(req_seq, &command, seq, Json::Obj(vec![]));
-                    // Run now; breakpoints pause from inside.
-                    if let Err(e) = run_program(vm, &path) {
-                        if e == "terminated by debugger" {
-                            return Control::Respond(out);
-                        }
-                        let eseq = next_server_seq(vm);
-                        return Control::Respond(err_response(req_seq, &command, eseq, e));
-                    }
-                    let tseq = next_server_seq(vm);
-                    emit_event(vm, "terminated", Json::Obj(vec![]), tseq);
-                    Control::Respond(out)
+            session(vm).respond(request, obj(vec![]));
+            let Some(program) = session(vm).launch_program.clone() else {
+                return true;
+            };
+            if session(vm).stop_on_entry {
+                session(vm).step = Some(Step {
+                    kind: StepKind::In,
+                    depth: 0,
+                });
+            }
+            vm.update_trap();
+            let code = match run_program(vm, &program) {
+                Ok(()) => 0,
+                Err(err) if err == TERMINATED => return false,
+                Err(err) => {
+                    let report = vm.describe_error(&err);
+                    output(vm, "stderr", &format!("error: {}\n", report));
+                    1
                 }
-                None => {
-                    let seq = next_server_seq(vm);
-                    Control::Respond(err_response(
-                        req_seq,
-                        &command,
-                        seq,
-                        "no program launched".to_string(),
-                    ))
-                }
-            }
+            };
+            let s = session(vm);
+            s.event("exited", obj(vec![("exitCode", Json::Num(code as f64))]));
+            s.event("terminated", obj(vec![]));
         }
-        "threads" => {
-            let seq = next_server_seq(vm);
-            Control::Respond(ok_response(
-                req_seq,
-                &command,
-                seq,
-                Json::Obj(vec![(
-                    "threads".to_string(),
-                    Json::Arr(vec![Json::Obj(vec![
-                        ("id".to_string(), Json::Num(1.0)),
-                        ("name".to_string(), Json::Str("main".to_string())),
-                    ])]),
-                )]),
-            ))
+        "threads" => threads(vm, request),
+        "disconnect" | "terminate" => {
+            session(vm).respond(request, obj(vec![]));
+            return false;
         }
-        "stackTrace" => {
-            let thread_ok = args.get("threadId").and_then(|v| v.as_usize()).unwrap_or(1) == 1;
-            if !thread_ok {
-                let seq = next_server_seq(vm);
-                return Control::Respond(err_response(
-                    req_seq,
-                    &command,
-                    seq,
-                    "unknown thread".to_string(),
-                ));
-            }
-            let start = args
-                .get("startFrame")
-                .and_then(|v| v.as_usize())
-                .unwrap_or(0);
-            let levels = args.get("levels").and_then(|v| v.as_usize());
-            // Top frame first, absolute ids.
-            let total = vm.frames.len();
-            let mut ids: Vec<usize> = (0..total).rev().collect();
-            if start < ids.len() {
-                ids = ids.split_off(start);
-            } else {
-                ids.clear();
-            }
-            if let Some(n) = levels {
-                ids.truncate(n);
-            }
-            let mut out_frames = Vec::new();
-            for id in ids {
-                let (name, line) = match vm.frames.get(id) {
-                    Some(f) => (
-                        f.closure
-                            .proto
-                            .name
-                            .clone()
-                            .unwrap_or_else(|| "<anonymous>".to_string()),
-                        frame_line(vm, id),
-                    ),
-                    None => ("<gone>".to_string(), 1),
-                };
-                out_frames.push(Json::Obj(vec![
-                    ("id".to_string(), Json::Num(id as f64)),
-                    ("name".to_string(), Json::Str(name)),
-                    ("line".to_string(), Json::Num(line as f64)),
-                    ("column".to_string(), Json::Num(1.0)),
-                ]));
-            }
-            let seq = next_server_seq(vm);
-            Control::Respond(ok_response(
-                req_seq,
-                &command,
-                seq,
-                Json::Obj(vec![
-                    ("stackFrames".to_string(), Json::Arr(out_frames)),
-                    ("totalFrames".to_string(), Json::Num(total as f64)),
-                ]),
-            ))
-        }
+        _ => inspect(vm, request, &args),
+    }
+    !session(vm).terminated
+}
+
+/// Requests that inspect the program, answered the same way whether it is
+/// paused or not.
+fn inspect(vm: &mut VM, request: &Json, args: &Json) {
+    match command_of(request) {
+        "stackTrace" => stack_trace(vm, request, args),
         "scopes" => {
-            let frame_id = args.get("frameId").and_then(|v| v.as_usize());
-            let frame = frame_id.and_then(|id| vm.frames.get(id));
-            match frame {
-                None => {
-                    let seq = next_server_seq(vm);
-                    Control::Respond(err_response(
-                        req_seq,
-                        &command,
-                        seq,
-                        "unknown frame".to_string(),
-                    ))
+            let frame = args.get("frameId").and_then(Json::as_usize);
+            match frame.filter(|f| *f < vm.frames.len()) {
+                Some(frame) => {
+                    let s = session(vm);
+                    let locals = s.register(VarRef::Locals(frame));
+                    let globals = s.register(VarRef::Globals);
+                    let scopes = vec![
+                        obj(vec![
+                            ("name", Json::Str("Locals".into())),
+                            ("presentationHint", Json::Str("locals".into())),
+                            ("variablesReference", Json::Num(locals as f64)),
+                            ("expensive", Json::Bool(false)),
+                        ]),
+                        obj(vec![
+                            ("name", Json::Str("Globals".into())),
+                            ("variablesReference", Json::Num(globals as f64)),
+                            ("expensive", Json::Bool(true)),
+                        ]),
+                    ];
+                    s.respond(request, obj(vec![("scopes", Json::Arr(scopes))]));
                 }
-                Some(_) => {
-                    let seq = next_server_seq(vm);
-                    // Locals ref is even, globals ref odd would collide;
-                    // allocate two fresh refs per scopes call instead.
-                    let locals_ref = alloc_scope_ref(vm, ScopeKind::Locals(frame_id.unwrap()));
-                    let globals_ref = alloc_scope_ref(vm, ScopeKind::Globals);
-                    Control::Respond(ok_response(
-                        req_seq,
-                        &command,
-                        seq,
-                        Json::Obj(vec![(
-                            "scopes".to_string(),
-                            Json::Arr(vec![
-                                Json::Obj(vec![
-                                    ("name".to_string(), Json::Str("Locals".to_string())),
-                                    (
-                                        "variablesReference".to_string(),
-                                        Json::Num(locals_ref as f64),
-                                    ),
-                                ]),
-                                Json::Obj(vec![
-                                    ("name".to_string(), Json::Str("Globals".to_string())),
-                                    (
-                                        "variablesReference".to_string(),
-                                        Json::Num(globals_ref as f64),
-                                    ),
-                                ]),
-                            ]),
-                        )]),
-                    ))
-                }
+                None => session(vm).fail(request, "unknown frame"),
             }
         }
         "variables" => {
-            let var_ref = args
+            let reference = args
                 .get("variablesReference")
-                .and_then(|v| v.as_usize())
+                .and_then(Json::as_usize)
                 .unwrap_or(0);
-            let start = args.get("start").and_then(|v| v.as_usize()).unwrap_or(0);
-            let count = args.get("count").and_then(|v| v.as_usize());
-            let body = expand_variables(vm, var_ref, start, count);
-            let seq = next_server_seq(vm);
-            Control::Respond(ok_response(req_seq, &command, seq, body))
-        }
-        "continue" => Control::Continue,
-        "pause" | "next" | "stepIn" | "stepOut" => {
-            let seq = next_server_seq(vm);
-            Control::Respond(err_response(
-                req_seq,
-                &command,
-                seq,
-                "stepping is not supported (needs line hooks)".to_string(),
-            ))
+            let body = variables(vm, reference);
+            session(vm).respond(request, body);
         }
         "evaluate" => {
-            // Global-scope evaluation (locals of a paused frame are NOT
-            // visible; breakpoints stay silent inside). Errors become
-            // error responses; the paused program is unaffected.
-            let expr = args
-                .get("expression")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            match do_evaluate(vm, expr) {
-                Ok(body) => {
-                    let seq = next_server_seq(vm);
-                    Control::Respond(ok_response(req_seq, &command, seq, body))
+            let expr = args.get("expression").and_then(Json::as_str).unwrap_or("");
+            let frame = args.get("frameId").and_then(Json::as_usize);
+            match evaluate(vm, expr, frame) {
+                Ok(value) => {
+                    let reference = child_ref(vm, &value);
+                    let body = obj(vec![
+                        ("result", Json::Str(preview(&value))),
+                        ("type", Json::Str(value.type_name().into())),
+                        ("variablesReference", Json::Num(reference as f64)),
+                    ]);
+                    session(vm).respond(request, body);
                 }
-                Err(message) => {
-                    let seq = next_server_seq(vm);
-                    Control::Respond(err_response(req_seq, &command, seq, message))
-                }
+                Err(err) => session(vm).fail(request, err),
             }
         }
+        "pause" => session(vm).fail(request, "pausing a running program is not supported"),
+        "continue" | "next" | "stepIn" | "stepOut" => {
+            session(vm).fail(request, "the program is not paused")
+        }
         other => {
-            let seq = next_server_seq(vm);
-            Control::Respond(err_response(
-                req_seq,
-                &command,
-                seq,
-                format!("unknown command '{}'", other),
-            ))
+            let message = format!("unsupported request '{}'", other);
+            session(vm).fail(request, message)
         }
     }
 }
 
-/// What the dispatcher decided: answer now, or resume execution.
-pub enum Control {
-    Respond(Json),
-    Continue,
+fn threads(vm: &mut VM, request: &Json) {
+    let thread = obj(vec![
+        ("id", Json::Num(1.0)),
+        ("name", Json::Str("main".into())),
+    ]);
+    session(vm).respond(request, obj(vec![("threads", Json::Arr(vec![thread]))]));
 }
 
-fn next_server_seq(vm: &mut VM) -> u64 {
-    match vm.dap.as_mut() {
-        Some(s) => {
-            let n = s.next_seq;
-            s.next_seq += 1;
-            n
-        }
-        None => 0,
-    }
-}
-
-fn emit_event(vm: &mut VM, event: &str, body: Json, server_seq: u64) {
-    let msg = event_envelope(server_seq, event, body);
-    let bytes = dap_json::render_json(&msg).into_bytes();
-    if let Some(session) = vm.dap.as_mut() {
-        let _ = dap_json::write_message(&mut session.writer, &bytes);
-    }
-}
-
-/// `launch` needs the whole VM: read, compile (same pipeline as `run`),
-/// but execute on the session VM so breakpoints and hooks apply.
-fn do_launch(vm: &mut VM, req_seq: f64, args: &Json) -> Control {
+fn set_breakpoints(vm: &mut VM, request: &Json, args: &Json) {
     let path = args
-        .get("program")
-        .and_then(|v| v.as_str())
+        .get("source")
+        .and_then(|s| s.get("path"))
+        .and_then(Json::as_str)
         .unwrap_or("")
         .to_string();
-    if path.is_empty() {
-        let seq = next_server_seq(vm);
-        return Control::Respond(err_response(
-            req_seq,
-            "launch",
-            seq,
-            "launch needs a program path".to_string(),
-        ));
+    let mut lines = Vec::new();
+    if let Some(Json::Arr(items)) = args.get("breakpoints") {
+        for item in items {
+            if let Some(line) = item.get("line").and_then(Json::as_usize) {
+                lines.push(line as u32);
+            }
+        }
     }
-    if let Some(session) = vm.dap.as_mut() {
-        session.launch_program = Some(path);
-    }
-    let seq = next_server_seq(vm);
-    Control::Respond(ok_response(req_seq, "launch", seq, Json::Obj(vec![])))
+    let verified = lines
+        .iter()
+        .map(|line| {
+            obj(vec![
+                ("verified", Json::Bool(true)),
+                ("line", Json::Num(*line as f64)),
+            ])
+        })
+        .collect();
+    let s = session(vm);
+    let key = s.canonical_path(&path);
+    s.line_breakpoints.insert(key, lines);
+    s.respond(request, obj(vec![("breakpoints", Json::Arr(verified))]));
+    vm.update_trap();
 }
 
-fn run_program(vm: &mut VM, path: &str) -> Result<(), String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("failed to read {}: {}", path, e))?;
-    if bytes.starts_with(crate::bytecode::MAGIC) {
-        return crate::vm::execute_bytecode(&bytes).map(|_| ());
+fn stack_trace(vm: &mut VM, request: &Json, args: &Json) {
+    let start = args.get("startFrame").and_then(Json::as_usize).unwrap_or(0);
+    let levels = args
+        .get("levels")
+        .and_then(Json::as_usize)
+        .filter(|n| *n > 0)
+        .unwrap_or(usize::MAX);
+    let total = vm.frames.len();
+    let mut frames = Vec::new();
+    for index in (0..total).rev().skip(start).take(levels) {
+        let proto = vm.frames[index].closure.proto.clone();
+        let name = match proto.name.as_deref() {
+            Some("main") | None => "main chunk".to_string(),
+            Some(n) => n.to_string(),
+        };
+        let mut fields = vec![
+            ("id", Json::Num(index as f64)),
+            ("name", Json::Str(name)),
+            ("line", Json::Num(frame_line(vm, index) as f64)),
+            ("column", Json::Num(1.0)),
+        ];
+        if let Some(path) = proto.source.as_deref() {
+            let file = path.rsplit(['/', '\\']).next().unwrap_or(path);
+            fields.push((
+                "source",
+                obj(vec![
+                    ("name", Json::Str(file.into())),
+                    ("path", Json::Str(path.into())),
+                ]),
+            ));
+        }
+        frames.push(obj(fields));
     }
-    let source = String::from_utf8(bytes)
-        .map_err(|_| format!("failed to read {}: file is not valid UTF-8", path))?;
-    // Inlining would remove the very call sites breakpoints trap on, so
-    // debug sessions compile without it.
-    let proto = crate::compiler::compile_program(&source, path, crate::compiler::Options::DEBUG)?;
-    // Fresh frames/stack like a new run, but keep globals, hook and
-    // session state on this VM.
-    vm.execute(proto).map(|_| ())
+    session(vm).respond(
+        request,
+        obj(vec![
+            ("stackFrames", Json::Arr(frames)),
+            ("totalFrames", Json::Num(total as f64)),
+        ]),
+    );
 }
 
-/// Evaluates one expression in global scope and describes the first
-/// result for a DAP `evaluate` response. Tables get a variablesReference
-/// so the client can expand them with `variables`.
-fn do_evaluate(vm: &mut VM, expr: &str) -> Result<Json, String> {
+fn child_ref(vm: &mut VM, value: &Value) -> usize {
+    match value {
+        Value::Table(_) => session(vm).register(VarRef::Value(value.clone())),
+        _ => 0,
+    }
+}
+
+fn variables(vm: &mut VM, reference: usize) -> Json {
+    let target = session(vm).variables.get(&reference).cloned();
+    let pairs: Vec<(String, Value)> = match target {
+        Some(VarRef::Locals(frame)) => frame_variables(vm, frame),
+        Some(VarRef::Globals) => {
+            let mut names: Vec<String> = vm.globals.keys().map(|k| k.to_string()).collect();
+            names.sort();
+            names
+                .into_iter()
+                .filter_map(|n| vm.globals.get(n.as_str()).cloned().map(|v| (n, v)))
+                .collect()
+        }
+        Some(VarRef::Value(Value::Table(t))) => crate::vm::libs::table::entries(&t.borrow())
+            .into_iter()
+            .map(|(k, v)| {
+                let name = match &k {
+                    Value::String(s) => s.to_string(),
+                    other => format!("[{}]", preview(other)),
+                };
+                (name, v)
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    let mut out = Vec::with_capacity(pairs.len());
+    for (name, value) in pairs {
+        let reference = child_ref(vm, &value);
+        out.push(obj(vec![
+            ("name", Json::Str(name)),
+            ("value", Json::Str(preview(&value))),
+            ("type", Json::Str(value.type_name().into())),
+            ("variablesReference", Json::Num(reference as f64)),
+        ]));
+    }
+    obj(vec![("variables", Json::Arr(out))])
+}
+
+/// Evaluates an expression, seeing the variables of `frame` when given.
+/// The expression becomes the body of a function taking those variables
+/// as parameters, so they are readable but assignments do not write back.
+fn evaluate(vm: &mut VM, expr: &str, frame: Option<usize>) -> Result<Value, String> {
     if expr.trim().is_empty() {
         return Err("empty expression".to_string());
     }
-    let stmts = crate::compiler::compile_source(&format!("return ({})", expr))
-        .map_err(|e| e.to_string())?;
-    // Unchecked pipeline, like the REPL: runtime names resolve
-    // dynamically instead of failing whole-program analysis.
-    let proto = crate::compiler::compile_bundled_to_proto(&stmts)?;
-    let func = Value::Closure(std::rc::Rc::new(crate::vm::value::VmClosure {
-        proto: std::rc::Rc::new(proto),
+    let visible = frame.map(|f| frame_variables(vm, f)).unwrap_or_default();
+    let names: Vec<&str> = visible.iter().map(|(n, _)| n.as_str()).collect();
+    let source = format!(
+        "return function({}) return ({}) end",
+        names.join(", "),
+        expr
+    );
+    let proto =
+        crate::compiler::compile_program(&source, "evaluate", crate::compiler::Options::UNCHECKED)?;
+    let chunk = Value::Closure(Rc::new(VmClosure {
+        proto: Rc::new(proto),
         upvalues: Vec::new(),
     }));
+    let args: Vec<Value> = visible.into_iter().map(|(_, v)| v).collect();
     vm.in_eval = true;
-    let res = vm.call_function(func, &[]);
+    let result = vm
+        .call_function(chunk, &[])
+        .and_then(|f| vm.call_function(f.into_iter().next().unwrap_or(Value::Nil), &args));
     vm.in_eval = false;
-    let values = res?;
-    let first = values.into_iter().next().unwrap_or(Value::Nil);
-    let (type_name, var_ref) = match &first {
-        Value::Table(t) => {
-            let id = match vm.dap.as_mut() {
-                Some(session) => {
-                    let id = session.next_var_ref;
-                    session.next_var_ref += 1;
-                    session.variables.insert(id, Value::Table(t.clone()));
-                    id
-                }
-                None => 0,
-            };
-            ("table", id)
-        }
-        _ => (value_type_name(&first), 0),
-    };
-    Ok(Json::Obj(vec![
-        ("result".to_string(), Json::Str(value_preview(&first))),
-        ("type".to_string(), Json::Str(type_name.to_string())),
-        ("variablesReference".to_string(), Json::Num(var_ref as f64)),
-    ]))
+    vm.error_trace = None;
+    Ok(result?.into_iter().next().unwrap_or(Value::Nil))
 }
 
-#[derive(Clone, Copy)]
-enum ScopeKind {
-    Locals(usize),
-    Globals,
+const TERMINATED: &str = "debugging terminated";
+
+fn run_program(vm: &mut VM, path: &str) -> Result<(), String> {
+    let source =
+        std::fs::read_to_string(path).map_err(|e| format!("failed to read {}: {}", path, e))?;
+    // Inlining would remove the very calls breakpoints and steps stop at.
+    let proto = crate::compiler::compile_program(&source, path, crate::compiler::Options::DEBUG)?;
+    vm.execute(proto).map(|_| ())
 }
 
-/// Scope contents are materialized as synthetic tables so the variables
-/// path stays uniform; the ref itself is registered as a scope marker.
-fn alloc_scope_ref(vm: &mut VM, kind: ScopeKind) -> usize {
-    let session = match vm.dap.as_mut() {
-        Some(s) => s,
-        None => return 0,
+/// Called by the VM on every new line while `wants_lines` holds.
+pub fn check_line(vm: &mut VM, line: u32) -> Result<(), String> {
+    let depth = vm.frames.len();
+    let source = vm
+        .frames
+        .last()
+        .and_then(|f| f.closure.proto.source.clone());
+    let s = session(vm);
+    let stepped = match s.step {
+        Some(Step {
+            kind: StepKind::In, ..
+        }) => true,
+        Some(Step {
+            kind: StepKind::Over,
+            depth: from,
+        }) => depth <= from,
+        Some(Step {
+            kind: StepKind::Out,
+            depth: from,
+        }) => depth < from,
+        None => false,
     };
-    let id = session.next_var_ref;
-    session.next_var_ref += 1;
-    let marker = match kind {
-        ScopeKind::Locals(frame_id) => Value::Int(-(frame_id as i64) - 1),
-        ScopeKind::Globals => Value::Int(-999_999),
+    let hit = match &source {
+        Some(path) if !s.line_breakpoints.is_empty() => {
+            let key = s.canonical_path(path);
+            s.line_breakpoints
+                .get(&key)
+                .is_some_and(|lines| lines.contains(&line))
+        }
+        _ => false,
     };
-    session.variables.insert(id, marker);
-    id
-}
-
-fn expand_variables(vm: &mut VM, var_ref: usize, start: usize, count: Option<usize>) -> Json {
-    // Resolve scope markers without holding borrows across registration.
-    enum Resolved {
-        Locals(usize),
-        Globals,
-        Table(std::rc::Rc<std::cell::RefCell<crate::vm::value::VmTable>>),
-        Missing,
-    }
-    let resolved = match vm
-        .dap
-        .as_ref()
-        .and_then(|s| s.variables.get(&var_ref).cloned())
-    {
-        Some(Value::Int(n)) if n < 0 => {
-            if n == -999_999 {
-                Resolved::Globals
-            } else {
-                Resolved::Locals((-n - 1) as usize)
-            }
-        }
-        Some(Value::Table(t)) => Resolved::Table(t),
-        _ => Resolved::Missing,
-    };
-    // Collect (name, value) pairs.
-    let mut pairs: Vec<(String, Value)> = Vec::new();
-    match resolved {
-        Resolved::Missing => {
-            return Json::Obj(vec![("variables".to_string(), Json::Arr(vec![]))]);
-        }
-        Resolved::Globals => {
-            let mut names: Vec<String> = vm.globals.keys().map(|k| k.to_string()).collect();
-            names.sort();
-            for name in names {
-                if let Some(v) = vm.globals.get(name.as_str()).cloned() {
-                    pairs.push((name, v));
-                }
-            }
-        }
-        Resolved::Locals(frame_id) => {
-            if let Some(frame) = vm.frames.get(frame_id) {
-                let current_ip = frame.ip as u32;
-                for info in &frame.closure.proto.local_names {
-                    if current_ip >= info.from_pc && current_ip <= info.to_pc {
-                        let slot = frame.base + info.reg as usize;
-                        let val = vm.stack.get(slot).cloned().unwrap_or(Value::Nil);
-                        pairs.push((info.name.clone(), val));
-                    }
-                }
-            }
-        }
-        Resolved::Table(t) => {
-            let tbl = t.borrow();
-            for (i, v) in tbl.array.iter().enumerate() {
-                pairs.push(((i + 1).to_string(), v.clone()));
-            }
-            let mut keys: Vec<String> = tbl.fields.keys().map(|k| k.to_string()).collect();
-            keys.sort();
-            for k in keys {
-                if let Some(v) = tbl.fields.get(k.as_str()).cloned() {
-                    pairs.push((k, v));
-                }
-            }
-        }
-    }
-    // Page.
-    let total = pairs.len();
-    let end = match count {
-        Some(n) => (start + n).min(total),
-        None => total,
-    };
-    let start = start.min(total);
-    // Register compound children, then render.
-    let mut out = Vec::new();
-    // Borrow session once for the whole batch.
-    let var_refs: Vec<(String, Value, usize)> = {
-        let has_session = vm.dap.is_some();
-        pairs
-            .into_iter()
-            .skip(start)
-            .take(end - start)
-            .map(|(name, v)| {
-                let child_ref = match &v {
-                    Value::Table(_) if has_session => {
-                        let s = vm.dap.as_mut().expect("session");
-                        let id = s.next_var_ref;
-                        s.next_var_ref += 1;
-                        s.variables.insert(id, v.clone());
-                        id
-                    }
-                    _ => 0,
-                };
-                (name, v, child_ref)
-            })
-            .collect()
-    };
-    for (name, v, child_ref) in var_refs {
-        out.push(Json::Obj(vec![
-            ("name".to_string(), Json::Str(name)),
-            ("value".to_string(), Json::Str(value_preview(&v))),
-            (
-                "type".to_string(),
-                Json::Str(value_type_name(&v).to_string()),
-            ),
-            (
-                "variablesReference".to_string(),
-                Json::Num(child_ref as f64),
-            ),
-        ]));
-    }
-    Json::Obj(vec![("variables".to_string(), Json::Arr(out))])
-}
-
-/// Entry point for `neyuki dap`: raw DAP conversation on stdio.
-pub fn run_dap_session() -> Result<(), String> {
-    let mut vm = VM::new();
-    vm.dap = Some(DapSession::stdio());
-    loop {
-        let raw = read_next()?;
-        let Some(bytes) = raw else { break };
-        let req = match dap_json::parse_json(&bytes) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        match handle_request(&mut vm, &req) {
-            Control::Respond(resp) => {
-                write_out(&mut vm, &resp)?;
-            }
-            Control::Continue => {
-                // `continue` outside a pause: nothing is running.
-                let seq = next_server_seq(&mut vm);
-                let resp = err_response(0.0, "continue", seq, "nothing is paused".to_string());
-                write_out(&mut vm, &resp)?;
-            }
-        }
-        let done = vm.dap.as_ref().map(|s| s.terminated).unwrap_or(true);
-        if done {
-            break;
-        }
+    if stepped || hit {
+        let reason = if hit { "breakpoint" } else { "step" };
+        return pause(vm, reason);
     }
     Ok(())
 }
 
-fn read_next() -> Result<Option<Vec<u8>>, String> {
-    let stdin = io::stdin();
-    let mut lock = stdin.lock();
-    dap_json::read_message(&mut lock).map_err(|e| e.to_string())
-}
-
-fn write_out(vm: &mut VM, resp: &Json) -> Result<(), String> {
-    let bytes = dap_json::render_json(resp).into_bytes();
-    match vm.dap.as_mut() {
-        Some(session) => {
-            dap_json::write_message(&mut session.writer, &bytes).map_err(|e| e.to_string())
-        }
-        None => Ok(()),
-    }
-}
-
-/// Called from closure-call sites when breakpoints are armed. Sends
-/// `stopped(reason: function breakpoint)` and serves requests from a
-/// nested loop until `continue` (resume) or `disconnect` (abort with an
-/// error that unwinds execution).
+/// Called by the VM when a function is entered.
 pub(crate) fn check_break(vm: &mut VM, func_name: &str) -> Result<(), String> {
     if vm.in_eval {
         return Ok(());
     }
-    let armed = match &vm.dap {
-        Some(s) if !s.func_breakpoints.is_empty() => {
-            s.func_breakpoints.iter().any(|b| b == func_name)
-        }
-        _ => false,
-    };
-    if !armed {
+    let armed = vm
+        .dap
+        .as_ref()
+        .is_some_and(|s| s.func_breakpoints.iter().any(|b| b == func_name));
+    if armed {
+        pause(vm, "function breakpoint")?;
+    }
+    Ok(())
+}
+
+/// Reports a stop and serves requests until the client resumes the
+/// program, which returns Ok, or ends the session, which unwinds it.
+fn pause(vm: &mut VM, reason: &str) -> Result<(), String> {
+    {
+        let s = session(vm);
+        s.step = None;
+        s.variables.clear();
+        s.event(
+            "stopped",
+            obj(vec![
+                ("reason", Json::Str(reason.into())),
+                ("threadId", Json::Num(1.0)),
+                ("allThreadsStopped", Json::Bool(true)),
+            ]),
+        );
+    }
+    vm.update_trap();
+    loop {
+        let raw = {
+            let s = session(vm);
+            match dap_json::read_message(&mut s.reader) {
+                Ok(Some(bytes)) => bytes,
+                Ok(None) | Err(_) => {
+                    s.terminated = true;
+                    return Err(TERMINATED.to_string());
+                }
+            }
+        };
+        let Ok(request) = dap_json::parse_json(&raw) else {
+            continue;
+        };
+        let args = request.get("arguments").cloned().unwrap_or(Json::Null);
+        let step = match command_of(&request) {
+            "continue" => None,
+            "next" => Some(StepKind::Over),
+            "stepIn" => Some(StepKind::In),
+            "stepOut" => Some(StepKind::Out),
+            "disconnect" | "terminate" => {
+                let s = session(vm);
+                s.respond(&request, obj(vec![]));
+                s.terminated = true;
+                return Err(TERMINATED.to_string());
+            }
+            "setBreakpoints" => {
+                set_breakpoints(vm, &request, &args);
+                continue;
+            }
+            "threads" => {
+                threads(vm, &request);
+                continue;
+            }
+            _ => {
+                inspect(vm, &request, &args);
+                continue;
+            }
+        };
+        let depth = vm.frames.len();
+        let s = session(vm);
+        s.step = step.map(|kind| Step { kind, depth });
+        let body = if step.is_none() {
+            obj(vec![("allThreadsContinued", Json::Bool(true))])
+        } else {
+            obj(vec![])
+        };
+        s.respond(&request, body);
+        s.variables.clear();
+        vm.update_trap();
         return Ok(());
     }
-    let seq = next_server_seq(vm);
-    emit_event(
-        vm,
-        "stopped",
-        Json::Obj(vec![
-            (
-                "reason".to_string(),
-                Json::Str("function breakpoint".to_string()),
-            ),
-            ("threadId".to_string(), Json::Num(1.0)),
-        ]),
-        seq,
-    );
+}
+
+/// `neyuki dap`: serve one debug session on stdin and stdout.
+pub fn run_dap_session() -> Result<(), String> {
+    let mut vm = VM::new();
+    vm.dap = Some(DapSession::stdio());
+    serve(&mut vm);
+    Ok(())
+}
+
+fn serve(vm: &mut VM) {
     loop {
-        // Read the next request from the SESSION stream (never global
-        // stdin: tests and embeddings supply their own).
-        let raw = {
-            let session = match vm.dap.as_mut() {
-                Some(s) => s,
-                None => return Err("debugging terminated".to_string()),
-            };
-            match dap_json::read_message(&mut session.reader) {
-                Ok(v) => v,
-                Err(e) => return Err(e.to_string()),
-            }
+        let raw = match dap_json::read_message(&mut session(vm).reader) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) | Err(_) => return,
         };
-        let Some(bytes) = raw else {
-            if let Some(s) = vm.dap.as_mut() {
-                s.terminated = true;
-            }
-            return Err("debugging terminated".to_string());
+        let Ok(request) = dap_json::parse_json(&raw) else {
+            continue;
         };
-        let req = match dap_json::parse_json(&bytes) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        // `continue` resumes; `disconnect` aborts the run.
-        let is_continue = req.get("command").and_then(|v| v.as_str()) == Some("continue");
-        let is_disconnect = req.get("command").and_then(|v| v.as_str()) == Some("disconnect");
-        match handle_request(vm, &req) {
-            Control::Respond(resp) => {
-                write_out(vm, &resp)?;
-            }
-            Control::Continue => {
-                // The dispatcher stays silent for `continue` by design, but
-                // DAP requires every request to be answered: respond here.
-                let rseq = req.get("seq").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                let sseq = next_server_seq(vm);
-                write_out(vm, &ok_response(rseq, "continue", sseq, Json::Obj(vec![])))?;
-            }
-        }
-        if is_disconnect {
-            if let Some(s) = vm.dap.as_mut() {
-                s.terminated = true;
-            }
-            return Err("debugging terminated".to_string());
-        }
-        if is_continue {
-            let cseq = next_server_seq(vm);
-            emit_event(
-                vm,
-                "continued",
-                Json::Obj(vec![("threadId".to_string(), Json::Num(1.0))]),
-                cseq,
-            );
-            return Ok(());
+        if !handle(vm, &request) {
+            return;
         }
     }
 }
@@ -821,227 +704,170 @@ pub(crate) fn check_break(vm: &mut VM, func_name: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
-    fn write_temp_script(name: &str, src: &str) -> std::path::PathBuf {
-        let mut p = std::env::temp_dir();
-        p.push(format!("neyuki_dap_{}_{}.nyk", name, std::process::id()));
-        std::fs::write(&p, src).expect("temp script");
-        p
-    }
+    struct Shared(Arc<Mutex<Vec<u8>>>);
 
-    #[test]
-    fn dap_initialize_reports_capabilities() {
-        let mut vm = VM::new();
-        vm.dap = Some(DapSession {
-            reader: Box::new(io::Cursor::new(Vec::new())),
-            writer: Box::new(io::Cursor::new(Vec::new())),
-            func_breakpoints: Vec::new(),
-            variables: HashMap::new(),
-            next_var_ref: 1,
-            next_seq: 1,
-            terminated: false,
-            launch_program: None,
-        });
-        let req = dap_json::parse_json(
-            br#"{"seq":1,"type":"request","command":"initialize","arguments":{"adapterID":"neyuki"}}"#,
-        )
-        .expect("req");
-        let resp = match handle_request(&mut vm, &req) {
-            Control::Respond(r) => r,
-            Control::Continue => panic!("unexpected continue"),
-        };
-        assert_eq!(resp.get("success"), Some(&Json::Bool(true)));
-        let caps = resp
-            .get("body")
-            .and_then(|b| b.get("capabilities"))
-            .expect("capabilities");
-        assert_eq!(
-            caps.get("supportsFunctionBreakpoints"),
-            Some(&Json::Bool(true))
-        );
-    }
-
-    fn eval_body(vm: &mut VM, setup: &str, expr: &str) -> Vec<(String, Json)> {
-        if !setup.is_empty() {
-            let stmts = crate::compiler::compile_source(setup).expect("setup parse");
-            let proto = crate::compiler::compile_bundled_to_proto(&stmts).expect("setup compile");
-            vm.execute(proto).expect("setup exec");
+    impl Write for Shared {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
         }
-        match do_evaluate(vm, expr) {
-            Ok(Json::Obj(pairs)) => pairs,
-            other => panic!("evaluate failed: {:?}", other),
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
         }
     }
 
-    fn pair_value(pairs: &[(String, Json)], key: &str) -> String {
-        pairs
-            .iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| dap_json::render_json(v))
-            .unwrap_or_else(|| panic!("missing key {}", key))
+    fn frame(json: &str) -> Vec<u8> {
+        format!("Content-Length: {}\r\n\r\n{}", json.len(), json).into_bytes()
     }
 
-    #[test]
-    fn dap_evaluate_arithmetic() {
-        let mut vm = VM::new();
-        let pairs = eval_body(&mut vm, "", "40 + 2");
-        assert_eq!(pair_value(&pairs, "result"), "\"42\"");
-        assert_eq!(pair_value(&pairs, "type"), "\"number\"");
+    fn script(name: &str, source: &str) -> String {
+        let mut path = std::env::temp_dir();
+        path.push(format!("neyuki_dap_{}_{}.nyk", name, std::process::id()));
+        std::fs::write(&path, source).unwrap();
+        path.to_string_lossy().replace('\\', "\\\\")
     }
 
-    #[test]
-    fn dap_evaluate_global() {
-        let mut vm = VM::new();
-        let pairs = eval_body(&mut vm, "eval_xyz = 41", "eval_xyz + 1");
-        assert_eq!(pair_value(&pairs, "result"), "\"42\"");
-    }
-
-    #[test]
-    fn dap_evaluate_error_keeps_session() {
-        let mut vm = VM::new();
-        assert!(do_evaluate(&mut vm, "1 +").is_err());
-        // Session still functional afterwards.
-        let pairs = eval_body(&mut vm, "", "2 * 3");
-        assert_eq!(pair_value(&pairs, "result"), "\"6\"");
-    }
-
-    #[test]
-    fn dap_evaluate_skips_breakpoints() {
-        // A breakpoint on `f` must NOT pause evaluation itself: without
-        // the in_eval guard this would read an empty stream and abort.
-        let mut vm = VM::new();
-        let (session, _out) = DapSession::memory(Vec::new());
-        vm.dap = Some(session);
-        if let Some(s) = vm.dap.as_mut() {
-            s.func_breakpoints.push("f".to_string());
+    /// Runs a whole session over the given requests and returns every
+    /// message the server sent.
+    fn converse(requests: &[String]) -> Vec<Json> {
+        let mut input = Vec::new();
+        for request in requests {
+            input.extend(frame(request));
         }
-        let pairs = eval_body(&mut vm, "f = function(a) return a * 2 end", "f(21)");
-        assert_eq!(pair_value(&pairs, "result"), "\"42\"");
-    }
-
-    #[test]
-    fn dap_breakpoint_pause_flow() {
-        let path = write_temp_script(
-            "pause",
-            "local function add(x, y)\n  return x + y\nend\nlocal s = add(20, 22)\nreturn s\n",
-        );
-        let launch = format!(
-            "{{\"seq\":2,\"type\":\"request\",\"command\":\"launch\",\"arguments\":{{\"program\":{}}}}}",
-            dap_json::render_json(&Json::Str(path.to_string_lossy().to_string()))
-        );
-        let convo = vec![
-            r#"{"seq":1,"type":"request","command":"initialize","arguments":{}}"#,
-            launch.as_str(),
-            r#"{"seq":3,"type":"request","command":"setFunctionBreakpoints","arguments":{"breakpoints":[{"name":"add"}]}}"#,
-            r#"{"seq":4,"type":"request","command":"configurationDone"}"#,
-            r#"{"seq":5,"type":"request","command":"threads"}"#,
-            r#"{"seq":6,"type":"request","command":"stackTrace","arguments":{"threadId":1}}"#,
-            r#"{"seq":7,"type":"request","command":"scopes","arguments":{"frameId":1}}"#,
-            // Locals is the first allocated ref (id 1): nothing else
-            // allocates variable references before the scopes call.
-            r#"{"seq":8,"type":"request","command":"variables","arguments":{"variablesReference":1}}"#,
-            r#"{"seq":9,"type":"request","command":"continue","arguments":{"threadId":1}}"#,
-        ];
-        let mut framed_in = Vec::new();
-        for m in &convo {
-            framed_in.extend_from_slice(format!("Content-Length: {}\r\n\r\n", m.len()).as_bytes());
-            framed_in.extend_from_slice(m.as_bytes());
-        }
+        let out = Arc::new(Mutex::new(Vec::new()));
         let mut vm = VM::new();
-        let (session, out_buf) = DapSession::memory(framed_in);
-        vm.dap = Some(session);
-        // Drive the whole conversation, including the nested pause loop
-        // that configurationDone triggers via the breakpoint.
-        loop {
-            let raw = {
-                let s = vm.dap.as_mut().expect("session");
-                match dap_json::read_message(&mut s.reader) {
-                    Ok(v) => v,
-                    Err(e) => panic!("read: {}", e),
-                }
-            };
-            let Some(bytes) = raw else { break };
-            let req = dap_json::parse_json(&bytes).expect("parse");
-            match handle_request(&mut vm, &req) {
-                Control::Respond(resp) => {
-                    let out = dap_json::render_json(&resp).into_bytes();
-                    let s = vm.dap.as_mut().expect("session");
-                    dap_json::write_message(&mut s.writer, &out).expect("write");
-                }
-                Control::Continue => {}
-            }
-            if vm.dap.as_ref().map(|s| s.terminated).unwrap_or(true) {
-                break;
-            }
-        }
-        // Split the output stream back into messages.
-        let raw_out = out_buf.lock().unwrap().clone();
-        let mut cursor = io::Cursor::new(raw_out);
+        vm.dap = Some(DapSession::new(
+            Box::new(io::Cursor::new(input)),
+            Box::new(Shared(out.clone())),
+        ));
+        serve(&mut vm);
+        let bytes = out.lock().unwrap().clone();
+        let mut reader = io::BufReader::new(io::Cursor::new(bytes));
         let mut messages = Vec::new();
-        while let Some(body) = dap_json::read_message(&mut cursor).expect("read out") {
-            messages.push(dap_json::parse_json(&body).expect("parse out"));
+        while let Ok(Some(body)) = dap_json::read_message(&mut reader) {
+            messages.push(dap_json::parse_json(&body).unwrap());
         }
-        let find_response = |seq: f64| {
-            messages
-                .iter()
-                .find(|m| {
-                    m.get("type").and_then(|v| v.as_str()) == Some("response")
-                        && m.get("request_seq").and_then(|v| v.as_f64()) == Some(seq)
-                })
-                .unwrap_or_else(|| panic!("missing response {}", seq))
-                .clone()
-        };
-        // Paused at `add`: a stopped event fired.
-        assert!(
-            messages.iter().any(|m| {
-                m.get("type").and_then(|v| v.as_str()) == Some("event")
-                    && m.get("event").and_then(|v| v.as_str()) == Some("stopped")
-            }),
-            "expected a stopped event"
+        messages
+    }
+
+    fn find<'a>(messages: &'a [Json], kind: &str, name: &str) -> Vec<&'a Json> {
+        messages
+            .iter()
+            .filter(|m| m.get("type").and_then(Json::as_str) == Some(kind))
+            .filter(|m| {
+                let key = if kind == "event" { "event" } else { "command" };
+                m.get(key).and_then(Json::as_str) == Some(name)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn initialize_reports_capabilities_then_initialized() {
+        let messages = converse(&[
+            r#"{"seq":1,"type":"request","command":"initialize","arguments":{}}"#.to_string(),
+        ]);
+        let response = find(&messages, "response", "initialize")[0];
+        assert_eq!(response.get("success"), Some(&Json::Bool(true)));
+        assert!(!find(&messages, "event", "initialized").is_empty());
+    }
+
+    #[test]
+    fn line_breakpoint_step_and_locals() {
+        let path = script(
+            "lines",
+            "local a = 1\nlocal b = a + 1\nlocal c = b * 10\nprint(c)\n",
         );
-        // Innermost frame is `add`.
-        let st = find_response(6.0);
-        let frames = st
-            .get("body")
-            .and_then(|b| b.get("stackFrames"))
-            .expect("stackFrames");
-        let first_name = match frames {
-            Json::Arr(items) => items
-                .first()
-                .and_then(|f| f.get("name"))
-                .and_then(|v| v.as_str())
-                .unwrap_or(""),
-            _ => panic!("stackFrames not an array"),
-        };
-        assert_eq!(first_name, "add");
-        // Locals scope exposes x = 20 (and the ref it reported is 1).
-        let scopes = find_response(7.0);
-        let locals_ref = match scopes.get("body").and_then(|b| b.get("scopes")) {
-            Some(Json::Arr(items)) => items
-                .first()
-                .and_then(|s| s.get("variablesReference"))
-                .and_then(|v| v.as_usize())
-                .expect("locals ref"),
-            _ => panic!("scopes not an array"),
-        };
-        assert_eq!(locals_ref, 1);
-        let vars = find_response(8.0);
-        let rendered = dap_json::render_json(&vars);
-        assert!(
-            rendered.contains("\"x\"") && rendered.contains("20"),
-            "locals must show x = 20: {}",
-            rendered
+        let messages = converse(&[
+            r#"{"seq":1,"type":"request","command":"initialize","arguments":{}}"#.to_string(),
+            format!(
+                r#"{{"seq":2,"type":"request","command":"launch","arguments":{{"program":"{}"}}}}"#,
+                path
+            ),
+            format!(
+                r#"{{"seq":3,"type":"request","command":"setBreakpoints","arguments":{{"source":{{"path":"{}"}},"breakpoints":[{{"line":2}}]}}}}"#,
+                path
+            ),
+            r#"{"seq":4,"type":"request","command":"configurationDone"}"#.to_string(),
+            r#"{"seq":5,"type":"request","command":"next","arguments":{"threadId":1}}"#
+                .to_string(),
+            r#"{"seq":6,"type":"request","command":"stackTrace","arguments":{"threadId":1}}"#
+                .to_string(),
+            r#"{"seq":7,"type":"request","command":"scopes","arguments":{"frameId":0}}"#
+                .to_string(),
+            r#"{"seq":8,"type":"request","command":"variables","arguments":{"variablesReference":1}}"#
+                .to_string(),
+            r#"{"seq":9,"type":"request","command":"evaluate","arguments":{"expression":"b * 100","frameId":0}}"#
+                .to_string(),
+            r#"{"seq":10,"type":"request","command":"continue","arguments":{"threadId":1}}"#
+                .to_string(),
+        ]);
+        let stops = find(&messages, "event", "stopped");
+        assert_eq!(stops.len(), 2, "a breakpoint stop and a step stop");
+        let reasons: Vec<_> = stops
+            .iter()
+            .map(|m| {
+                m.get("body")
+                    .unwrap()
+                    .get("reason")
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(reasons, ["breakpoint", "step"]);
+        let trace = find(&messages, "response", "stackTrace")[0];
+        let rendered = dap_json::render_json(trace);
+        assert!(rendered.contains("\"line\":3"), "{}", rendered);
+        let vars = dap_json::render_json(find(&messages, "response", "variables")[0]);
+        assert!(vars.contains("\"a\"") && vars.contains("\"b\""), "{}", vars);
+        let eval = dap_json::render_json(find(&messages, "response", "evaluate")[0]);
+        assert!(eval.contains("\"200\""), "{}", eval);
+        let output = dap_json::render_json(find(&messages, "event", "output")[0]);
+        assert!(output.contains("20\\n"), "{}", output);
+        assert!(!find(&messages, "event", "terminated").is_empty());
+    }
+
+    #[test]
+    fn function_breakpoint_pauses_on_entry() {
+        let path = script(
+            "func",
+            "local function add(x, y)\n  return x + y\nend\nlocal r = add(20, 22)\n",
         );
-        // Ran to completion afterwards.
-        assert!(
-            messages.iter().any(|m| {
-                m.get("type").and_then(|v| v.as_str()) == Some("event")
-                    && m.get("event").and_then(|v| v.as_str()) == Some("terminated")
-            }),
-            "expected a terminated event"
-        );
-        // Every request gets a response, including `continue`.
-        let cont = find_response(9.0);
-        assert_eq!(cont.get("success"), Some(&Json::Bool(true)));
+        let messages = converse(&[
+            r#"{"seq":1,"type":"request","command":"initialize","arguments":{}}"#.to_string(),
+            format!(
+                r#"{{"seq":2,"type":"request","command":"launch","arguments":{{"program":"{}"}}}}"#,
+                path
+            ),
+            r#"{"seq":3,"type":"request","command":"setFunctionBreakpoints","arguments":{"breakpoints":[{"name":"add"}]}}"#
+                .to_string(),
+            r#"{"seq":4,"type":"request","command":"configurationDone"}"#.to_string(),
+            r#"{"seq":5,"type":"request","command":"stackTrace","arguments":{"threadId":1}}"#
+                .to_string(),
+            r#"{"seq":6,"type":"request","command":"continue","arguments":{"threadId":1}}"#
+                .to_string(),
+        ]);
+        assert_eq!(find(&messages, "event", "stopped").len(), 1);
+        let trace = dap_json::render_json(find(&messages, "response", "stackTrace")[0]);
+        assert!(trace.contains("\"name\":\"add\""), "{}", trace);
+    }
+
+    #[test]
+    fn errors_are_reported_as_output() {
+        let path = script("err", "local t = nil\nprint(t.x)\n");
+        let messages = converse(&[
+            r#"{"seq":1,"type":"request","command":"initialize","arguments":{}}"#.to_string(),
+            format!(
+                r#"{{"seq":2,"type":"request","command":"launch","arguments":{{"program":"{}"}}}}"#,
+                path
+            ),
+            r#"{"seq":3,"type":"request","command":"configurationDone"}"#.to_string(),
+        ]);
+        let output = dap_json::render_json(find(&messages, "event", "output")[0]);
+        assert!(output.contains("index a nil value"), "{}", output);
+        let exited = dap_json::render_json(find(&messages, "event", "exited")[0]);
+        assert!(exited.contains("\"exitCode\":1"), "{}", exited);
     }
 }

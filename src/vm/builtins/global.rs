@@ -20,8 +20,12 @@ pub fn builtin_print(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> 
         }
     }
     out.push('\n');
-    // A closed pipe (`neyuki run x | head`) is not the script's error.
-    let _ = std::io::stdout().lock().write_all(out.as_bytes());
+    if vm.dap.is_some() {
+        crate::dap::output(vm, "stdout", &out);
+    } else {
+        // A closed pipe (`neyuki run x | head`) is not the script's error.
+        let _ = std::io::stdout().lock().write_all(out.as_bytes());
+    }
     Ok(Vec::new())
 }
 

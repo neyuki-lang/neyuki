@@ -204,9 +204,14 @@ fn builtin_read_number(_vm: &mut VM, _args: &[Value]) -> Result<Vec<Value>, Stri
     }])
 }
 
-fn builtin_write(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+fn builtin_write(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let stream = str_arg(args, 0, "stream")?;
     let text = str_arg(args, 1, "text")?;
+    if vm.dap.is_some() {
+        writer(stream)?;
+        crate::dap::output(vm, stream, text);
+        return Ok(vec![Value::Nil]);
+    }
     writer(stream)?
         .write_all(text.as_bytes())
         .map_err(|err| io_error("write to", stream, err))?;
