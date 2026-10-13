@@ -24,6 +24,9 @@ impl SearcherEngine {
                 "./modules/?/init.nyk".to_string(),
                 "./packages/?.nyk".to_string(),
                 "./packages/?/init.nyk".to_string(),
+                // Where `neyuki pkg` keeps installed packages.
+                "./neyuki_packages/?/init.nyk".to_string(),
+                "./neyuki_packages/?/main.nyk".to_string(),
             ],
         }
     }
