@@ -42,12 +42,8 @@ pub fn fold_builtin_call_scoped(
         ("math", "min") => fold_math_min(args),
         ("math", "max") => fold_math_max(args),
         ("math", "pow") => fold_math_pow(args),
-        ("bit", "band") => fold_bit_band(args),
-        ("bit", "bor") => fold_bit_bor(args),
-        ("bit", "bxor") => fold_bit_bxor(args),
-        ("bit", "bnot") => fold_bit_bnot(args),
-        ("bit", "lshift") => fold_bit_lshift(args),
-        ("bit", "rshift") => fold_bit_rshift(args),
+        // `bit.*` is folded by `constant_fold` with the natives' 32-bit
+        // semantics (`vm::libs::bit::fold_call`), never here.
         ("string", "len") => fold_string_len(args),
         ("string", "lower") => fold_string_lower(args),
         ("string", "upper") => fold_string_upper(args),
@@ -172,52 +168,6 @@ fn fold_math_pow(args: &[Expr]) -> Option<Expr> {
     }
 }
 
-fn fold_bit_band(args: &[Expr]) -> Option<Expr> {
-    let a = get_int(args.first()?)?;
-    let b = get_int(args.get(1)?)?;
-    Some(Expr::int(a & b))
-}
-
-fn fold_bit_bor(args: &[Expr]) -> Option<Expr> {
-    let a = get_int(args.first()?)?;
-    let b = get_int(args.get(1)?)?;
-    Some(Expr::int(a | b))
-}
-
-fn fold_bit_bxor(args: &[Expr]) -> Option<Expr> {
-    let a = get_int(args.first()?)?;
-    let b = get_int(args.get(1)?)?;
-    Some(Expr::int(a ^ b))
-}
-
-fn fold_bit_bnot(args: &[Expr]) -> Option<Expr> {
-    let a = get_int(args.first()?)?;
-    let u = a.to_u32().unwrap_or(0);
-    Some(Expr::int(BigInt::from(!u as i64)))
-}
-
-fn fold_bit_lshift(args: &[Expr]) -> Option<Expr> {
-    let a = get_int(args.first()?)?;
-    let b = get_int(args.get(1)?)?;
-    let shift = b.to_usize()?;
-    if shift <= 64 {
-        Some(Expr::int(a << shift))
-    } else {
-        Some(Expr::int(0))
-    }
-}
-
-fn fold_bit_rshift(args: &[Expr]) -> Option<Expr> {
-    let a = get_int(args.first()?)?;
-    let b = get_int(args.get(1)?)?;
-    let shift = b.to_usize()?;
-    if shift <= 64 {
-        Some(Expr::int(a >> shift))
-    } else {
-        Some(Expr::int(0))
-    }
-}
-
 fn fold_string_len(args: &[Expr]) -> Option<Expr> {
     let s = get_str(args.first()?)?;
     Some(Expr::int(s.len()))
@@ -278,18 +228,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bit_and_string_folding() {
-        let band_call = Expr::Member {
-            object: Box::new(Expr::Variable {
-                name: "bit".to_string(),
-                id: NodeId::next(),
-            }),
-            field: "band".to_string(),
-            id: NodeId::next(),
-        };
-        let res = fold_builtin_call(&band_call, &[Expr::int(15), Expr::int(7)]);
-        assert_eq!(res, Some(Expr::int(7)));
-
+    fn test_string_folding() {
         let len_call = Expr::Member {
             object: Box::new(Expr::Variable {
                 name: "string".to_string(),

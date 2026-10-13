@@ -432,40 +432,18 @@ fn fold_builtin_call(
                         }
                         Some(FoldVal::Float(max_val))
                     }
-                    ("bit" | "bit32", "band") => {
-                        let mut res = args.first()?.to_bigint()?;
-                        for a in &args[1..] {
-                            res &= a.to_bigint()?;
-                        }
-                        Some(FoldVal::Int(res))
-                    }
-                    ("bit" | "bit32", "bor") => {
-                        let mut res = args.first()?.to_bigint()?;
-                        for a in &args[1..] {
-                            res |= a.to_bigint()?;
-                        }
-                        Some(FoldVal::Int(res))
-                    }
-                    ("bit" | "bit32", "bxor") => {
-                        let mut res = args.first()?.to_bigint()?;
-                        for a in &args[1..] {
-                            res ^= a.to_bigint()?;
-                        }
-                        Some(FoldVal::Int(res))
-                    }
-                    ("bit" | "bit32", "bnot") => {
-                        let val = args.first()?.to_bigint()?;
-                        Some(FoldVal::Int(!val))
-                    }
-                    ("bit" | "bit32", "lshift") => {
-                        let val = args.first()?.to_bigint()?;
-                        let shift = args.get(1)?.to_bigint()?.to_usize()?;
-                        Some(FoldVal::Int(val << shift))
-                    }
-                    ("bit" | "bit32", "rshift") => {
-                        let val = args.first()?.to_bigint()?;
-                        let shift = args.get(1)?.to_bigint()?.to_usize()?;
-                        Some(FoldVal::Int(val >> shift))
+                    ("bit" | "bit32", name) => {
+                        // Folded with the natives' own 32-bit semantics. Float
+                        // arguments convert differently there, so only integer
+                        // constants are folded.
+                        let ints = args
+                            .iter()
+                            .map(|a| match a {
+                                FoldVal::Int(i) => Some(i.clone()),
+                                _ => None,
+                            })
+                            .collect::<Option<Vec<_>>>()?;
+                        crate::vm::libs::bit::fold_call(name, &ints).map(FoldVal::Int)
                     }
                     ("string", "len") => {
                         if let Some(FoldVal::Str(s)) = args.first() {

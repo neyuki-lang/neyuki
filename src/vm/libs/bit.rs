@@ -16,6 +16,29 @@ fn to_u32(val: &Value) -> Result<u32, String> {
     }
 }
 
+/// Evaluates `bit.<name>(args...)` on integer constants exactly as the
+/// natives below would, for the constant folder. `None` when the native would
+/// raise an error, or for functions the folder leaves to runtime.
+pub(crate) fn fold_call(name: &str, args: &[BigInt]) -> Option<BigInt> {
+    // `to_u32` on an integer `Value`: anything past i64 is a `BigInt`, which
+    // the natives reject, and an i64 outside u32 becomes 0.
+    let words = args
+        .iter()
+        .map(|a| Some(a.to_i64()?.to_u32().unwrap_or(0)))
+        .collect::<Option<Vec<u32>>>()?;
+    let arg = |i: usize| words.get(i).copied();
+    let res = match name {
+        "band" => words.iter().fold(u32::MAX, |acc, w| acc & w),
+        "bor" => words.iter().fold(0, |acc, w| acc | w),
+        "bxor" => words.iter().fold(0, |acc, w| acc ^ w),
+        "bnot" => !arg(0)?,
+        "lshift" => arg(0)? << (arg(1)? % 32),
+        "rshift" => arg(0)? >> (arg(1)? % 32),
+        _ => return None,
+    };
+    Some(BigInt::from(res))
+}
+
 fn to_i32(val: &Value) -> Result<i32, String> {
     match val {
         Value::Int(i) => Ok(i.to_i32().unwrap_or(0)),
