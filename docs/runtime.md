@@ -208,7 +208,7 @@ os.sleep(0.1)
 print(hid.clipboard.get())
 ```
 
-`@neyuki/os` provides `clock()` (seconds as a float, for timing), `time()` (whole seconds since the Unix epoch), `difftime(t2, t1)`, `getenv(name)` (common non-secret variables such as `PATH`, `HOME` and `LANG`; others read as `nil`), `args()` (the command-line arguments after the script path, as a list of strings), `sleep(seconds)` and `exit(code?)`, which flushes output and ends the process with 0 (nothing or `true`), 1 (`false`) or the given integer.
+`@neyuki/os` provides `clock()` (seconds as a float, for timing), `time()` (whole seconds since the Unix epoch), `difftime(t2, t1)`, `getenv(name)` (the variable's value, or `nil` when it is unset), `args()` (the command-line arguments after the script path, as a list of strings), `sleep(seconds)` and `exit(code?)`, which flushes output and ends the process with 0 (nothing or `true`), 1 (`false`) or the given integer.
 
 ## Current boundaries
 

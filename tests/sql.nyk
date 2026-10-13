@@ -33,8 +33,7 @@ assert(not ok, "connecting to a closed port should fail")
 
 -- LIVE ROUND TRIPS (opt in with server URLs in tests/sql.local) ------------
 --
--- `os.getenv` only exposes an allowlist of variables, so the URLs come from
--- a git-ignored file with lines such as
+-- The URLs come from a git-ignored file with lines such as
 --   postgres=postgres://user:pass@127.0.0.1:5432/postgres
 --   mysql=mysql://root:pass@127.0.0.1:3306/test
 -- Without the file this part is skipped.

@@ -5,7 +5,6 @@
 
 use crate::compiler::{compile_source, compile_to_proto};
 use crate::vm::libs::json::decode_from_str;
-use crate::vm::libs::os::is_env_var_allowed;
 use crate::vm::machine::VM;
 use crate::vm::value::Value;
 
@@ -219,45 +218,6 @@ AAAA
     assert!(execute_source(crypto_script).is_ok());
 }
 
-pub fn fuzz_os_getenv_sandbox_leakage() {
-    let allowed_vars = [
-        "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR",
-        "TMP", "TEMP", "PWD",
-    ];
-    for var in &allowed_vars {
-        assert!(
-            is_env_var_allowed(var),
-            "allowlisted var '{}' must be allowed",
-            var
-        );
-    }
-
-    let forbidden_vars = [
-        "AWS_SECRET_ACCESS_KEY",
-        "AWS_ACCESS_KEY_ID",
-        "GITHUB_TOKEN",
-        "GITLAB_TOKEN",
-        "DATABASE_URL",
-        "POSTGRES_PASSWORD",
-        "REDIS_AUTH",
-        "SSH_AUTH_SOCK",
-        "SSH_PRIVATE_KEY",
-        "MY_CUSTOM_SECRET",
-        "API_KEY",
-        "BEARER_TOKEN",
-        "RANDOM_VAR_123",
-        "NON_EXISTENT_VAR",
-    ];
-
-    for var in &forbidden_vars {
-        assert!(
-            !is_env_var_allowed(var),
-            "forbidden var '{}' must be denied by sandbox",
-            var
-        );
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,6 +228,5 @@ mod tests {
         fuzz_string_and_utf8_edge_cases();
         fuzz_number_parsing_and_radix();
         fuzz_crypto_boundaries();
-        fuzz_os_getenv_sandbox_leakage();
     }
 }
