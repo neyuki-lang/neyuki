@@ -309,6 +309,22 @@ fn table_sort(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let t = writable(args, "t")?.clone();
     let mut items = std::mem::take(&mut t.borrow_mut().array);
     let result = match args.get(1) {
+        // Equal integers or strings cannot be told apart, so lists of only
+        // one of them need no stability and take the standard library's sort.
+        None | Some(Value::Nil) if items.iter().all(|v| matches!(v, Value::Int(_))) => {
+            items.sort_unstable_by_key(|v| match v {
+                Value::Int(i) => *i,
+                _ => 0,
+            });
+            Ok(())
+        }
+        None | Some(Value::Nil) if items.iter().all(|v| matches!(v, Value::String(_))) => {
+            items.sort_unstable_by(|a, b| match (a, b) {
+                (Value::String(x), Value::String(y)) => x.cmp(y),
+                _ => std::cmp::Ordering::Equal,
+            });
+            Ok(())
+        }
         None | Some(Value::Nil) => merge_sort(&mut items, |a, b| match (a, b) {
             (Value::Int(x), Value::Int(y)) => Ok(x < y),
             (Value::String(x), Value::String(y)) => Ok(x < y),
