@@ -1,52 +1,50 @@
 //! Native terminal primitives backing `@neyuki/io`.
 //!
-//! The natives are deliberately thin: they only move bytes between the
-//! process's standard streams and the runtime. `lib/io.nyk` builds the
-//! `io.read` formats, the stream objects and the iterators on top of these.
+//! These only move bytes between the standard streams and the runtime;
+//! `lib/io.nyk` builds the read formats, stream objects and iterators.
 
 use std::io::{self, BufRead, IsTerminal, Read, Write};
 
 use num_bigint::BigInt;
 
-use crate::runtime::{Int, Value};
+use crate::vm::libs::args::{bool_arg, number, str_arg};
+use crate::vm::machine::VM;
+use crate::vm::value::{NativeDef, Value};
 
-pub(crate) const NATIVES: &[(&str, crate::runtime::Native)] = &[
-    ("__io_read_line", builtin_read_line),
-    ("__io_read_all", builtin_read_all),
-    ("__io_read_chars", builtin_read_chars),
-    ("__io_read_number", builtin_read_number),
-    ("__io_write", builtin_write),
-    ("__io_flush", builtin_flush),
-    ("__io_isatty", builtin_isatty),
+pub(crate) const NATIVES: &[NativeDef] = &[
+    NativeDef {
+        name: "__io_read_line",
+        func: builtin_read_line,
+    },
+    NativeDef {
+        name: "__io_read_all",
+        func: builtin_read_all,
+    },
+    NativeDef {
+        name: "__io_read_chars",
+        func: builtin_read_chars,
+    },
+    NativeDef {
+        name: "__io_read_number",
+        func: builtin_read_number,
+    },
+    NativeDef {
+        name: "__io_write",
+        func: builtin_write,
+    },
+    NativeDef {
+        name: "__io_flush",
+        func: builtin_flush,
+    },
+    NativeDef {
+        name: "__io_isatty",
+        func: builtin_isatty,
+    },
 ];
 
-fn string_arg(args: &[Value], index: usize, name: &str) -> Result<String, String> {
-    match args.get(index) {
-        Some(Value::String(value)) => Ok(value.clone()),
-        Some(value) => Err(format!(
-            "{} must be a string, got {}",
-            name,
-            value.type_name()
-        )),
-        None => Err(format!("{} must be provided", name)),
-    }
-}
-
-fn bool_arg(args: &[Value], index: usize, name: &str) -> Result<bool, String> {
-    match args.get(index) {
-        Some(Value::Bool(value)) => Ok(*value),
-        None | Some(Value::Nil) => Ok(false),
-        Some(value) => Err(format!(
-            "{} must be a boolean, got {}",
-            name,
-            value.type_name()
-        )),
-    }
-}
-
 fn count_arg(args: &[Value], index: usize, name: &str) -> Result<usize, String> {
-    let value = args.get(index).cloned().unwrap_or(Value::Nil);
-    let count = crate::runtime::number(value).map_err(|_| format!("{} must be a number", name))?;
+    let count = number(args.get(index).unwrap_or(&Value::Nil))
+        .map_err(|_| format!("{} must be a number", name))?;
     if count < 0.0 || count.fract() != 0.0 {
         return Err(format!("{} must be a non-negative integer", name));
     }
@@ -73,8 +71,8 @@ fn writer(stream: &str) -> Result<Box<dyn Write>, String> {
 /// Reads one line from stdin. Returns nil at end of input; otherwise the
 /// line, with its trailing newline (and carriage return) stripped unless
 /// `keep_newline` is set.
-fn builtin_read_line(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let keep_newline = bool_arg(&args, 0, "keepNewline")?;
+fn builtin_read_line(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let keep_newline = bool_arg(args, 0, "keepNewline")?;
     let mut line = String::new();
     let read = io::stdin()
         .lock()
@@ -89,24 +87,24 @@ fn builtin_read_line(args: Vec<Value>) -> Result<Vec<Value>, String> {
             line.pop();
         }
     }
-    Ok(vec![Value::String(line)])
+    Ok(vec![Value::string(line)])
 }
 
 /// Reads everything remaining on stdin. Returns an empty string (never nil)
 /// at end of input, matching Lua's `io.read("a")`.
-fn builtin_read_all(_args: Vec<Value>) -> Result<Vec<Value>, String> {
+fn builtin_read_all(_vm: &mut VM, _args: &[Value]) -> Result<Vec<Value>, String> {
     let mut text = String::new();
     io::stdin()
         .lock()
         .read_to_string(&mut text)
         .map_err(|err| io_error("read", "stdin", err))?;
-    Ok(vec![Value::String(text)])
+    Ok(vec![Value::string(text)])
 }
 
 /// Reads up to `count` characters from stdin. Returns nil when nothing is
 /// left; a count of zero returns an empty string unless input is exhausted.
-fn builtin_read_chars(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let count = count_arg(&args, 0, "count")?;
+fn builtin_read_chars(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let count = count_arg(args, 0, "count")?;
     let stdin = io::stdin();
     let mut stdin = stdin.lock();
     if count == 0 {
@@ -116,7 +114,7 @@ fn builtin_read_chars(args: Vec<Value>) -> Result<Vec<Value>, String> {
         return Ok(vec![if buffer.is_empty() {
             Value::Nil
         } else {
-            Value::String(String::new())
+            Value::str("")
         }]);
     }
     let mut text = String::new();
@@ -145,13 +143,13 @@ fn builtin_read_chars(args: Vec<Value>) -> Result<Vec<Value>, String> {
     if text.is_empty() {
         return Ok(vec![Value::Nil]);
     }
-    Ok(vec![Value::String(text)])
+    Ok(vec![Value::string(text)])
 }
 
 /// Reads one whitespace-delimited token from stdin and converts it to a
 /// number. Returns nil at end of input or when the token is not numeric;
 /// the token is consumed either way.
-fn builtin_read_number(_args: Vec<Value>) -> Result<Vec<Value>, String> {
+fn builtin_read_number(_vm: &mut VM, _args: &[Value]) -> Result<Vec<Value>, String> {
     let stdin = io::stdin();
     let mut stdin = stdin.lock();
     let mut token: Vec<u8> = Vec::new();
@@ -198,34 +196,34 @@ fn builtin_read_number(_args: Vec<Value>) -> Result<Vec<Value>, String> {
         BigInt::parse_bytes(token.as_bytes(), 10)
     };
     Ok(vec![if let Some(value) = integer {
-        Value::Integer(Int::from_bigint(value))
+        Value::from_bigint(value)
     } else if let Ok(value) = token.parse::<f64>() {
-        Value::Number(value)
+        Value::Float(value)
     } else {
         Value::Nil
     }])
 }
 
-fn builtin_write(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let stream = string_arg(&args, 0, "stream")?;
-    let text = string_arg(&args, 1, "text")?;
-    writer(&stream)?
+fn builtin_write(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let stream = str_arg(args, 0, "stream")?;
+    let text = str_arg(args, 1, "text")?;
+    writer(stream)?
         .write_all(text.as_bytes())
-        .map_err(|err| io_error("write to", &stream, err))?;
+        .map_err(|err| io_error("write to", stream, err))?;
     Ok(vec![Value::Nil])
 }
 
-fn builtin_flush(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let stream = string_arg(&args, 0, "stream")?;
-    writer(&stream)?
+fn builtin_flush(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let stream = str_arg(args, 0, "stream")?;
+    writer(stream)?
         .flush()
-        .map_err(|err| io_error("flush", &stream, err))?;
+        .map_err(|err| io_error("flush", stream, err))?;
     Ok(vec![Value::Nil])
 }
 
-fn builtin_isatty(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let stream = string_arg(&args, 0, "stream")?;
-    let is_terminal = match stream.as_str() {
+fn builtin_isatty(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let stream = str_arg(args, 0, "stream")?;
+    let is_terminal = match stream {
         "stdin" => io::stdin().is_terminal(),
         "stdout" => io::stdout().is_terminal(),
         "stderr" => io::stderr().is_terminal(),

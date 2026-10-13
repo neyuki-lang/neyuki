@@ -198,4 +198,5 @@ assert(not okG, "malformed pattern errors")
 local okH, _ = try(string.char, 300)
 assert(not okH, "char rejects out of range")
 
+assert(string.reverse("añb") == "bña", "reverse keeps characters whole")
 print("[pass] string functions")

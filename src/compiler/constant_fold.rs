@@ -2,7 +2,7 @@
 
 use num_bigint::{BigInt, Sign};
 use num_integer::Integer as _;
-use num_traits::{FromPrimitive, Signed, ToPrimitive, Zero};
+use num_traits::{FromPrimitive, ToPrimitive, Zero};
 use std::collections::HashSet;
 
 use crate::ast::literal::Literal;
@@ -35,6 +35,30 @@ impl PartialEq for FoldVal {
 }
 
 impl FoldVal {
+    fn to_value(&self) -> crate::vm::Value {
+        use crate::vm::Value;
+        match self {
+            FoldVal::Nil => Value::Nil,
+            FoldVal::Bool(b) => Value::Bool(*b),
+            FoldVal::Int(i) => Value::from_bigint(i.clone()),
+            FoldVal::Float(f) => Value::Float(*f),
+            FoldVal::Str(s) => Value::str(s),
+        }
+    }
+
+    fn from_value(value: &crate::vm::Value) -> Option<FoldVal> {
+        use crate::vm::Value;
+        Some(match value {
+            Value::Nil => FoldVal::Nil,
+            Value::Bool(b) => FoldVal::Bool(*b),
+            Value::Int(i) => FoldVal::Int(BigInt::from(*i)),
+            Value::BigInt(i) => FoldVal::Int((**i).clone()),
+            Value::Float(f) => FoldVal::Float(*f),
+            Value::String(s) => FoldVal::Str(s.to_string()),
+            _ => return None,
+        })
+    }
+
     fn is_truthy(&self) -> bool {
         match self {
             FoldVal::Nil => false,
@@ -383,55 +407,6 @@ fn fold_builtin_call(
                     return None;
                 }
                 match (mod_name.as_str(), field.as_str()) {
-                    ("math", "abs") => {
-                        let arg = args.first()?;
-                        match arg {
-                            FoldVal::Int(i) => Some(FoldVal::Int(i.abs())),
-                            FoldVal::Float(f) => Some(FoldVal::Float(f.abs())),
-                            _ => None,
-                        }
-                    }
-                    ("math", "floor") => {
-                        let f = args.first()?.to_f64()?;
-                        Some(FoldVal::Float(f.floor()))
-                    }
-                    ("math", "ceil") => {
-                        let f = args.first()?.to_f64()?;
-                        Some(FoldVal::Float(f.ceil()))
-                    }
-                    ("math", "sqrt") => {
-                        let f = args.first()?.to_f64()?;
-                        if f < 0.0 {
-                            return None;
-                        }
-                        Some(FoldVal::Float(f.sqrt()))
-                    }
-                    ("math", "min") => {
-                        if args.is_empty() {
-                            return None;
-                        }
-                        let mut min_val = args[0].to_f64()?;
-                        for a in &args[1..] {
-                            let v = a.to_f64()?;
-                            if v < min_val {
-                                min_val = v;
-                            }
-                        }
-                        Some(FoldVal::Float(min_val))
-                    }
-                    ("math", "max") => {
-                        if args.is_empty() {
-                            return None;
-                        }
-                        let mut max_val = args[0].to_f64()?;
-                        for a in &args[1..] {
-                            let v = a.to_f64()?;
-                            if v > max_val {
-                                max_val = v;
-                            }
-                        }
-                        Some(FoldVal::Float(max_val))
-                    }
                     ("bit" | "bit32", name) => {
                         // Folded with the natives' own 32-bit semantics. Float
                         // arguments convert differently there, so only integer
@@ -445,35 +420,11 @@ fn fold_builtin_call(
                             .collect::<Option<Vec<_>>>()?;
                         crate::vm::libs::bit::fold_call(name, &ints).map(FoldVal::Int)
                     }
-                    ("string", "len") => {
-                        if let Some(FoldVal::Str(s)) = args.first() {
-                            Some(FoldVal::Int(BigInt::from(s.len())))
-                        } else {
-                            None
-                        }
+                    (module, name) => {
+                        let values = args.iter().map(FoldVal::to_value).collect::<Vec<_>>();
+                        crate::vm::libs::fold_call(module, name, &values)
+                            .and_then(|v| FoldVal::from_value(&v))
                     }
-                    ("string", "lower") => {
-                        if let Some(FoldVal::Str(s)) = args.first() {
-                            Some(FoldVal::Str(s.to_lowercase()))
-                        } else {
-                            None
-                        }
-                    }
-                    ("string", "upper") => {
-                        if let Some(FoldVal::Str(s)) = args.first() {
-                            Some(FoldVal::Str(s.to_uppercase()))
-                        } else {
-                            None
-                        }
-                    }
-                    ("string", "reverse") => {
-                        if let Some(FoldVal::Str(s)) = args.first() {
-                            Some(FoldVal::Str(s.chars().rev().collect()))
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None,
                 }
             } else {
                 None

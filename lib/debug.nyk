@@ -1,3 +1,0 @@
--- Neyuki bundled library: @neyuki/debug
-local debug = require("@neyuki/debug")
-return debug

@@ -89,6 +89,29 @@ impl TableKey {
     }
 }
 
+/// The non-array keys of a table in iteration order: string keys sorted.
+pub fn sorted_keys(table: &VmTable) -> Vec<Value> {
+    let mut keys: Vec<&StrRef> = table.fields.keys().collect();
+    keys.sort();
+    keys.into_iter().map(|k| Value::String(k.clone())).collect()
+}
+
+/// A raw lookup that ignores metatables.
+pub fn raw_get(table: &VmTable, key: &Value) -> Value {
+    match key {
+        Value::String(k) => table.fields.get(&**k).cloned().unwrap_or(Value::Nil),
+        Value::Int(i) if *i >= 1 => table
+            .array
+            .get(*i as usize - 1)
+            .cloned()
+            .unwrap_or(Value::Nil),
+        other => TableKey::from_value(other)
+            .ok()
+            .and_then(|k| table.get_general(&k).cloned())
+            .unwrap_or(Value::Nil),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

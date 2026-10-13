@@ -1,0 +1,74 @@
+-- The core libraries are one table each, whether reached as a global or
+-- through require, and strings index the string library.
+
+assert(require("@neyuki/math") == math, "math is shared")
+assert(require("@neyuki/string") == string, "string is shared")
+assert(require("table") == table, "bare names resolve too")
+assert(table.isfrozen(math) and table.isfrozen(string), "libraries are frozen")
+
+-- math keeps integers exact
+assert(math.floor(2.5) == 2 and typeof(math.floor(2.5)) == "bigint", "floor returns an integer")
+assert(math.ceil(-0.5) == 0, "ceil")
+assert(math.round(2.5) == 3, "round")
+assert(math.trunc(-2.7) == -2, "trunc")
+assert(math.max(3, 9, 4) == 9 and typeof(math.max(3, 9, 4)) == "bigint", "max keeps integers")
+assert(math.max({ 1, 7, 2 }) == 7, "max accepts an array")
+assert(math.min(2, 0.5) == 0.5, "min mixes integers and floats")
+assert(math.abs(-2 ^ 70) == 2 ^ 70, "abs on a bigint")
+assert(math.sign(-3) == -1 and math.sign(0) == 0, "sign")
+assert(math.clamp(15, 0, 10) == 10, "clamp")
+assert(math.log(8, 2) == 3, "log with a base")
+assert(math.isnan(0 / 0) and not math.isnan(1), "isnan")
+math.randomseed(42)
+local first = math.random(1, 1000000)
+math.randomseed(42)
+assert(math.random(1, 1000000) == first, "randomseed makes random repeatable")
+math.randomseed()
+
+-- string methods and patterns
+local s = "Hello, World"
+assert(s:upper() == "HELLO, WORLD", "method call on a string")
+assert(s:len() == 12 and #s == 12, "len")
+assert(("ab"):rep(3, "-") == "ab-ab-ab", "rep with separator")
+local replaced, count = s:gsub("o", "0")
+assert(replaced == "Hell0, W0rld" and count == 2, "gsub with a string")
+assert(("hello world"):gsub("(%w+)", "<%1>") == "<hello> <world>", "gsub captures")
+assert(("a b c"):gsub("%w", { a = "1", c = "3" }) == "1 b 3", "gsub with a table")
+assert(("abc"):gsub("%w", function(c) return c:upper() end) == "ABC", "gsub with a function")
+assert(("abc"):gsub("", "-") == "-a-b-c-", "gsub with an empty match")
+assert(("aaa"):gsub("a", "b", 2) == "bba", "gsub with a limit")
+local words = {}
+for word in ("one two  three"):gmatch("%a+") do
+    words[#words + 1] = word
+end
+assert(#words == 3 and words[3] == "three", "gmatch in a for loop")
+local pairs = {}
+for k, v in ("a=1, b=2"):gmatch("(%w+)=(%w+)") do
+    pairs[k] = v
+end
+assert(pairs.a == "1" and pairs.b == "2", "gmatch with captures")
+local next_word = ("x y"):gmatch("%a")
+assert(next_word() == "x" and next_word() == "y" and next_word() == nil, "gmatch called directly")
+assert(("  padded \n"):trim() == "padded", "trim")
+assert(("xxhixx"):trim("x") == "hi", "trim with characters")
+assert(("  a "):ltrim() == "a " and ("  a "):rtrim() == "  a", "ltrim and rtrim")
+assert(("neyuki"):startswith("ney") and ("neyuki"):endswith("uki"), "startswith and endswith")
+
+-- table
+local t = { 1, 2, 3 }
+table.insert(t, 2, 9)
+assert(table.concat(t, ",") == "1,9,2,3", "insert at a position")
+assert(table.remove(t, 1) == 1 and table.concat(t, ",") == "9,2,3", "remove at a position")
+local mixed = { 10, 2.5, 3, -1 }
+table.sort(mixed)
+assert(table.concat(mixed, ",") == "-1,2.5,3,10", "default sort compares numbers")
+local ok, err = try(table.sort, { 1, "a" })
+assert(not ok and string.find(err, "compare") != nil, "sorting mixed types is an error")
+assert(table.length({ 1, 2, x = 3 }) == 3, "length counts named keys")
+assert(table.find({ "a", "b" }, "b") == 2, "find")
+assert(#table.create(3, 0) == 3, "create")
+local frozen = table.freeze({})
+local okf = try(function() frozen.x = 1 end)
+assert(not okf, "frozen tables reject writes")
+
+print("[pass] standard libraries")

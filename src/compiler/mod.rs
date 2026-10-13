@@ -59,9 +59,8 @@ pub fn try_compile_to_proto(statements: &[Stmt]) -> Result<Proto, String> {
     codegen_proto(statements)
 }
 
-// Compile the statements of a bundled `lib/*.nyk` module. The standard library
-// is vetted at build time, and the tree-walking engine runs it unanalyzed too,
-// so it skips the type-checking pass that user code goes through.
+// Compile the statements of a bundled `lib/*.nyk` module. These are vetted by
+// the test suite, so they skip the type-checking pass user code goes through.
 pub fn compile_bundled_to_proto(statements: &[Stmt]) -> Result<Proto, String> {
     compile_to_proto_via_ir_unchecked(statements)
 }
@@ -304,8 +303,8 @@ mod tests {
     /// The parser's nesting limit has to keep every later pass inside an
     /// ordinary thread's stack: library users and `cargo test` do not get the
     /// CLI's large one. The deepest programs it accepts, in each shape that
-    /// recurses, must compile through both pipelines and run on both engines
-    /// on a 2 MiB thread in a debug build.
+    /// recurses, must compile through both pipelines and run on a 2 MiB
+    /// thread in a debug build.
     #[test]
     fn test_deepest_accepted_programs_fit_a_default_stack() {
         type Shape = fn(usize) -> String;
@@ -345,7 +344,6 @@ mod tests {
                     try_compile_to_proto(&stmts).expect(name);
                     let proto = try_compile_to_proto_via_ir(&stmts).expect(name);
                     crate::vm::machine::VM::new().execute(proto).expect(name);
-                    crate::runtime::run_source(&source).expect(name);
                 }
             })
             .unwrap();

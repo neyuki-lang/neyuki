@@ -2,7 +2,7 @@ local table = require("@neyuki/table")
 
 local sql = {}
 
--- The drivers are native (src/sql_lib.rs, on the `postgres` and `mysql`
+-- The drivers are native (src/vm/libs/sql.rs, on the `postgres` and `mysql`
 -- crates); this module validates arguments and builds the `Connection`
 -- object. Statements take positional parameters in the server's own
 -- syntax, `$1, $2` on PostgreSQL and `?` on MySQL, and a params array

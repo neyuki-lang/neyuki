@@ -1,59 +1,69 @@
-//! Native primitives backing `@neyuki/string`.
+//! Native primitives behind the `string` library.
 //!
 //! Strings are byte-oriented like Lua's: indices count bytes, and the pattern
 //! matcher is a port of the one in `lstrlib.c`. Slices that cut through a
 //! multi-byte character are decoded lossily.
 //!
 //! `pack` produces arbitrary bytes, which cannot always live inside a UTF-8
-//! `String`, so packed data is carried as one Latin-1 character per byte
+//! string, so packed data is carried as one Latin-1 character per byte
 //! (`unpack` reverses that mapping).
+
+use std::borrow::Cow;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 use num_bigint::{BigInt, Sign};
 use num_traits::{FromPrimitive, One, ToPrimitive, Zero};
 
-use crate::runtime::{Int, Value, number, require_string};
-
-pub(crate) const NATIVES: &[(&str, crate::runtime::Native)] = &[
-    ("__string_byte", builtin_byte),
-    ("__string_char", builtin_char),
-    ("__string_count", builtin_count),
-    ("__string_find", builtin_find),
-    ("__string_format", builtin_format),
-    ("__string_lower", builtin_lower),
-    ("__string_match", builtin_match),
-    ("__string_pack", builtin_pack),
-    ("__string_packsize", builtin_packsize),
-    ("__string_rep", builtin_rep),
-    ("__string_reverse", builtin_reverse),
-    ("__string_split", builtin_split),
-    ("__string_sub", builtin_sub),
-    ("__string_unpack", builtin_unpack),
-    ("__string_upper", builtin_upper),
-];
-
-// ---------------------------------------------------------------------------
-// argument helpers
-// ---------------------------------------------------------------------------
+use crate::vm::machine::VM;
+use crate::vm::value::{Value, VmTable};
 
 fn arg(args: &[Value], index: usize) -> Value {
     args.get(index).cloned().unwrap_or(Value::Nil)
 }
 
-fn string_arg(args: &[Value], index: usize, name: &str) -> Result<String, String> {
-    require_string(arg(args, index)).map_err(|_| format!("{} must be a string", name))
+fn number(value: Value) -> Result<f64, String> {
+    crate::vm::libs::args::number(&value)
 }
 
-fn int_arg(args: &[Value], index: usize, name: &str) -> Result<i64, String> {
-    match arg(args, index) {
-        Value::Integer(value) => value
-            .to_i64()
-            .ok_or_else(|| format!("{} is out of range", name)),
-        Value::Number(value) if value.is_finite() && value.fract() == 0.0 => Ok(value as i64),
-        _ => Err(format!("{} must be an integer", name)),
+/// Strings, and numbers in their printed form, as Lua coerces them.
+fn require_string(value: &Value) -> Result<Cow<'_, str>, String> {
+    match value {
+        Value::String(s) => Ok(Cow::Borrowed(s)),
+        Value::Int(_) | Value::BigInt(_) | Value::Float(_) => Ok(Cow::Owned(value.to_string())),
+        _ => Err("expected a string or number".to_string()),
     }
 }
 
-fn opt_int_arg(args: &[Value], index: usize, name: &str, default: i64) -> Result<i64, String> {
+pub(crate) fn string_arg<'a>(
+    args: &'a [Value],
+    index: usize,
+    name: &str,
+) -> Result<Cow<'a, str>, String> {
+    match args.get(index) {
+        Some(Value::String(s)) => Ok(Cow::Borrowed(s)),
+        None | Some(Value::Nil) => Err(format!("{} must be provided", name)),
+        Some(_) => Err(format!("{} must be a string", name)),
+    }
+}
+
+pub(crate) fn int_arg(args: &[Value], index: usize, name: &str) -> Result<i64, String> {
+    match arg(args, index) {
+        Value::Int(value) => Ok(value),
+        Value::BigInt(_) => Err(format!("{} is out of range", name)),
+        Value::Float(value) if value.is_finite() && value.fract() == 0.0 => Ok(value as i64),
+        Value::Float(_) => Err(format!("{} must be an integer", name)),
+        Value::Nil => Err(format!("{} must be provided", name)),
+        _ => Err(format!("{} must be a number", name)),
+    }
+}
+
+pub(crate) fn opt_int_arg(
+    args: &[Value],
+    index: usize,
+    name: &str,
+    default: i64,
+) -> Result<i64, String> {
     match arg(args, index) {
         Value::Nil => Ok(default),
         _ => int_arg(args, index, name),
@@ -61,15 +71,15 @@ fn opt_int_arg(args: &[Value], index: usize, name: &str, default: i64) -> Result
 }
 
 fn bytes_to_string(bytes: &[u8]) -> Value {
-    Value::String(String::from_utf8_lossy(bytes).into_owned())
+    Value::string(String::from_utf8_lossy(bytes).into_owned())
 }
 
 fn integer(value: i64) -> Value {
-    Value::Integer(Int::from(value))
+    Value::Int(value)
 }
 
 /// Translate a relative (possibly negative) 1-based start index, Lua style.
-fn pos_relat_start(pos: i64, len: usize) -> usize {
+pub(crate) fn pos_relat_start(pos: i64, len: usize) -> usize {
     if pos > 0 {
         pos as usize
     } else if pos == 0 || pos < -(len as i64) {
@@ -80,7 +90,7 @@ fn pos_relat_start(pos: i64, len: usize) -> usize {
 }
 
 /// Translate a relative (possibly negative) 1-based end index, clipped to `len`.
-fn pos_relat_end(pos: i64, len: usize) -> usize {
+pub(crate) fn pos_relat_end(pos: i64, len: usize) -> usize {
     if pos > len as i64 {
         len
     } else if pos >= 0 {
@@ -96,80 +106,76 @@ fn pos_relat_end(pos: i64, len: usize) -> usize {
 // simple primitives
 // ---------------------------------------------------------------------------
 
-fn builtin_byte(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let s = string_arg(&args, 0, "s")?;
+pub(crate) fn builtin_byte(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let s = string_arg(args, 0, "s")?;
     let bytes = s.as_bytes();
-    let i = pos_relat_start(opt_int_arg(&args, 1, "i", 1)?, bytes.len());
-    let j = pos_relat_end(opt_int_arg(&args, 2, "j", i as i64)?, bytes.len());
+    let i = pos_relat_start(opt_int_arg(args, 1, "i", 1)?, bytes.len());
+    let j = pos_relat_end(opt_int_arg(args, 2, "j", i as i64)?, bytes.len());
     if i > j {
-        return Ok(vec![Value::Varargs(Vec::new())]);
+        return Ok(Vec::new());
     }
-    Ok(vec![Value::Varargs(
-        bytes[i - 1..j]
-            .iter()
-            .map(|byte| integer(*byte as i64))
-            .collect(),
-    )])
+    Ok(bytes[i - 1..j]
+        .iter()
+        .map(|byte| integer(*byte as i64))
+        .collect())
 }
 
-fn builtin_char(args: Vec<Value>) -> Result<Vec<Value>, String> {
+pub(crate) fn builtin_char(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let mut bytes = Vec::with_capacity(args.len());
     for index in 0..args.len() {
-        let value = int_arg(&args, index, "byte")?;
+        let value = int_arg(args, index, "byte")?;
         if !(0..=255).contains(&value) {
             return Err(format!("byte {} is out of range (0-255)", index + 1));
         }
         bytes.push(value as u8);
     }
     String::from_utf8(bytes)
-        .map(|s| vec![Value::String(s)])
+        .map(|s| vec![Value::string(s)])
         .map_err(|_| "string.char bytes do not form valid UTF-8".to_string())
 }
 
-fn builtin_count(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let s = string_arg(&args, 0, "s")?;
+pub(crate) fn builtin_count(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let s = string_arg(args, 0, "s")?;
     Ok(vec![integer(s.chars().count() as i64)])
 }
 
-fn builtin_sub(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let s = string_arg(&args, 0, "s")?;
+pub(crate) fn builtin_sub(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let s = string_arg(args, 0, "s")?;
     let bytes = s.as_bytes();
-    let i = pos_relat_start(opt_int_arg(&args, 1, "i", 1)?, bytes.len());
-    let j = pos_relat_end(opt_int_arg(&args, 2, "j", -1)?, bytes.len());
+    let i = pos_relat_start(opt_int_arg(args, 1, "i", 1)?, bytes.len());
+    let j = pos_relat_end(opt_int_arg(args, 2, "j", -1)?, bytes.len());
     if i > j {
-        return Ok(vec![Value::String(String::new())]);
+        return Ok(vec![Value::str("")]);
     }
     Ok(vec![bytes_to_string(&bytes[i - 1..j])])
 }
 
-fn builtin_lower(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    Ok(vec![Value::String(
-        string_arg(&args, 0, "s")?.to_lowercase(),
+pub(crate) fn builtin_lower(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    Ok(vec![Value::string(
+        string_arg(args, 0, "s")?.to_lowercase(),
     )])
 }
 
-fn builtin_upper(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    Ok(vec![Value::String(
-        string_arg(&args, 0, "s")?.to_uppercase(),
+pub(crate) fn builtin_upper(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    Ok(vec![Value::string(
+        string_arg(args, 0, "s")?.to_uppercase(),
     )])
 }
 
-fn builtin_reverse(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let s = string_arg(&args, 0, "s")?;
-    let mut bytes = s.into_bytes();
-    bytes.reverse();
-    Ok(vec![bytes_to_string(&bytes)])
+pub(crate) fn builtin_reverse(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let s = string_arg(args, 0, "s")?;
+    Ok(vec![Value::string(s.chars().rev().collect())])
 }
 
-fn builtin_rep(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let s = string_arg(&args, 0, "s")?;
-    let n = int_arg(&args, 1, "n")?;
-    let sep = match arg(&args, 2) {
-        Value::Nil => String::new(),
-        _ => string_arg(&args, 2, "sep")?,
+pub(crate) fn builtin_rep(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let s = string_arg(args, 0, "s")?;
+    let n = int_arg(args, 1, "n")?;
+    let sep = match arg(args, 2) {
+        Value::Nil => Cow::Borrowed(""),
+        _ => string_arg(args, 2, "sep")?,
     };
     if n <= 0 {
-        return Ok(vec![Value::String(String::new())]);
+        return Ok(vec![Value::str("")]);
     }
     const MAX_REP_COUNT: i64 = 10_000_000;
     if n > MAX_REP_COUNT {
@@ -179,7 +185,7 @@ fn builtin_rep(args: Vec<Value>) -> Result<Vec<Value>, String> {
         ));
     }
     if s.is_empty() && sep.is_empty() {
-        return Ok(vec![Value::String(String::new())]);
+        return Ok(vec![Value::str("")]);
     }
     let total = (s.len() + sep.len()).saturating_mul(n as usize);
     if total > i32::MAX as usize || total > 100 * 1024 * 1024 {
@@ -192,23 +198,21 @@ fn builtin_rep(args: Vec<Value>) -> Result<Vec<Value>, String> {
         }
         out.push_str(&s);
     }
-    Ok(vec![Value::String(out)])
+    Ok(vec![Value::string(out)])
 }
 
-fn builtin_split(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let s = string_arg(&args, 0, "s")?;
-    let sep = match arg(&args, 1) {
-        Value::Nil => ",".to_string(),
-        _ => string_arg(&args, 1, "separator")?,
+pub(crate) fn builtin_split(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let s = string_arg(args, 0, "s")?;
+    let sep = match arg(args, 1) {
+        Value::Nil => Cow::Borrowed(","),
+        _ => string_arg(args, 1, "separator")?,
     };
     let parts: Vec<Value> = if sep.is_empty() {
-        s.chars().map(|c| Value::String(c.to_string())).collect()
+        s.chars().map(|c| Value::string(c.to_string())).collect()
     } else {
-        s.split(sep.as_str())
-            .map(|part| Value::String(part.to_string()))
-            .collect()
+        s.split(&*sep).map(Value::str).collect()
     };
-    Ok(vec![crate::runtime::new_table(parts)])
+    Ok(vec![crate::vm::libs::args::array(parts)])
 }
 
 // ---------------------------------------------------------------------------
@@ -633,12 +637,249 @@ fn find_aux(args: &[Value], find: bool) -> Result<Vec<Value>, String> {
     }
 }
 
-fn builtin_find(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    find_aux(&args, true)
+pub(crate) fn builtin_find(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    find_aux(args, true)
 }
 
-fn builtin_match(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    find_aux(&args, false)
+pub(crate) fn builtin_match(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    find_aux(args, false)
+}
+
+// ---------------------------------------------------------------------------
+// gsub and gmatch
+// ---------------------------------------------------------------------------
+
+fn bytes_value(bytes: Vec<u8>) -> Value {
+    match String::from_utf8(bytes) {
+        Ok(s) => Value::string(s),
+        Err(err) => Value::string(String::from_utf8_lossy(err.as_bytes()).into_owned()),
+    }
+}
+
+fn append_replacement(
+    vm: &mut VM,
+    ms: &MatchState,
+    out: &mut Vec<u8>,
+    s: usize,
+    e: usize,
+    replacement: &Value,
+) -> Result<(), String> {
+    let whole = &ms.src[s..e];
+    let value = match replacement {
+        Value::String(template) => {
+            let t = template.as_bytes();
+            let mut i = 0;
+            while i < t.len() {
+                if t[i] != b'%' {
+                    out.push(t[i]);
+                    i += 1;
+                    continue;
+                }
+                i += 1;
+                match t.get(i) {
+                    Some(b'%') => out.push(b'%'),
+                    Some(b'0') => out.extend_from_slice(whole),
+                    Some(d @ b'1'..=b'9') => {
+                        let capture = ms.get_capture((d - b'1') as usize, s, e)?;
+                        out.extend_from_slice(capture.to_string().as_bytes());
+                    }
+                    _ => return Err("invalid use of '%' in replacement string".to_string()),
+                }
+                i += 1;
+            }
+            return Ok(());
+        }
+        Value::Table(_) => {
+            let key = ms.get_capture(0, s, e)?;
+            vm.table_get(replacement, &key)?
+        }
+        _ => {
+            let captures = ms.push_captures(s, e, true)?;
+            vm.call_function(replacement.clone(), &captures)?
+                .into_iter()
+                .next()
+                .unwrap_or(Value::Nil)
+        }
+    };
+    match value {
+        Value::Nil | Value::Bool(false) => out.extend_from_slice(whole),
+        Value::String(text) => out.extend_from_slice(text.as_bytes()),
+        v @ (Value::Int(_) | Value::BigInt(_) | Value::Float(_)) => {
+            out.extend_from_slice(v.to_string().as_bytes())
+        }
+        other => {
+            return Err(format!(
+                "invalid replacement value (a {})",
+                other.type_name()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `gsub(s, pattern, replacement, n?)`: every match (or the first `n`)
+/// replaced by a template string, a table lookup or a function call.
+pub(crate) fn builtin_gsub(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let s = string_arg(args, 0, "s")?;
+    let pattern = string_arg(args, 1, "pattern")?;
+    let replacement = match args.get(2) {
+        Some(v @ (Value::String(_) | Value::Table(_) | Value::Closure(_) | Value::Native(_))) => {
+            v.clone()
+        }
+        None | Some(Value::Nil) => return Err("replacement must be provided".to_string()),
+        Some(_) => return Err("replacement must be a string, table or function".to_string()),
+    };
+    let max = match args.get(3) {
+        None | Some(Value::Nil) => i64::MAX,
+        _ => int_arg(args, 3, "n")?,
+    };
+    let src = s.as_bytes();
+    let pat = pattern.as_bytes();
+    let anchor = pat.first() == Some(&b'^');
+    let p = usize::from(anchor);
+    let mut ms = MatchState::new(src, pat);
+    let mut out = Vec::with_capacity(src.len());
+    let mut pos = 0usize;
+    let mut last_match: Option<usize> = None;
+    let mut count = 0i64;
+    while count < max {
+        ms.reset();
+        match ms.do_match(pos, p)? {
+            Some(e) if Some(e) != last_match => {
+                count += 1;
+                append_replacement(vm, &ms, &mut out, pos, e, &replacement)?;
+                pos = e;
+                last_match = Some(e);
+            }
+            _ if pos < src.len() => {
+                out.push(src[pos]);
+                pos += 1;
+            }
+            _ => break,
+        }
+        if anchor {
+            break;
+        }
+    }
+    out.extend_from_slice(&src[pos.min(src.len())..]);
+    Ok(vec![bytes_value(out), Value::Int(count)])
+}
+
+/// One step of a `gmatch` iterator. The iterator is a table whose fields hold
+/// the subject, the pattern and how far matching has got.
+fn gmatch_step(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let Some(Value::Table(state)) = args.first() else {
+        return Err("gmatch iterator called without its state".to_string());
+    };
+    let (subject, pattern, pos, last) = {
+        let st = state.borrow();
+        let (Value::String(subject), Value::String(pattern), Value::Int(pos)) =
+            (st.get_str("s"), st.get_str("p"), st.get_str("pos"))
+        else {
+            return Err("gmatch iterator state is corrupt".to_string());
+        };
+        let last = match st.get_str("last") {
+            Value::Int(i) => Some(i as usize),
+            _ => None,
+        };
+        (subject, pattern, pos as usize, last)
+    };
+    let src = subject.as_bytes();
+    let pat = pattern.as_bytes();
+    let anchor = pat.first() == Some(&b'^');
+    let p = usize::from(anchor);
+    let mut ms = MatchState::new(src, pat);
+    let mut start = pos;
+    while start <= src.len() {
+        ms.reset();
+        if let Some(e) = ms.do_match(start, p)?
+            && Some(e) != last
+        {
+            let next = if anchor { src.len() + 1 } else { e };
+            let mut st = state.borrow_mut();
+            st.set_str("pos", Value::from_usize(next));
+            st.set_str("last", Value::from_usize(e));
+            drop(st);
+            return ms.push_captures(start, e, true);
+        }
+        if anchor {
+            break;
+        }
+        start += 1;
+    }
+    state
+        .borrow_mut()
+        .set_str("pos", Value::from_usize(src.len() + 1));
+    Ok(vec![Value::Nil])
+}
+
+/// `gmatch(s, pattern)`: an iterator over every match, yielding its captures
+/// (or the whole match). Works in a generic `for` and when called directly.
+pub(crate) fn builtin_gmatch(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let s = string_arg(args, 0, "s")?;
+    let pattern = string_arg(args, 1, "pattern")?;
+    let mut meta = VmTable::new();
+    meta.set_str("__call", crate::native!("gmatch iterator", gmatch_step));
+    let mut state = VmTable::new();
+    state.set_str("s", Value::string(s.into_owned()));
+    state.set_str("p", Value::string(pattern.into_owned()));
+    state.set_str("pos", Value::Int(0));
+    state.metatable = Some(Rc::new(RefCell::new(meta)));
+    Ok(vec![Value::Table(Rc::new(RefCell::new(state)))])
+}
+
+// ---------------------------------------------------------------------------
+// small conveniences
+// ---------------------------------------------------------------------------
+
+/// `trim(s, chars?)`: `s` without leading and trailing whitespace, or without
+/// any of the characters in `chars`.
+pub(crate) fn builtin_trim(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    trim_with(args, true, true)
+}
+
+pub(crate) fn builtin_ltrim(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    trim_with(args, true, false)
+}
+
+pub(crate) fn builtin_rtrim(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    trim_with(args, false, true)
+}
+
+fn trim_with(args: &[Value], left: bool, right: bool) -> Result<Vec<Value>, String> {
+    let s = string_arg(args, 0, "s")?;
+    let chars = match arg(args, 1) {
+        Value::Nil => None,
+        _ => Some(string_arg(args, 1, "chars")?),
+    };
+    let matches = |c: char| match &chars {
+        Some(set) => set.contains(c),
+        None => c.is_whitespace(),
+    };
+    let mut out: &str = &s;
+    if left {
+        out = out.trim_start_matches(matches);
+    }
+    if right {
+        out = out.trim_end_matches(matches);
+    }
+    Ok(vec![Value::str(out)])
+}
+
+pub(crate) fn builtin_startswith(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let s = string_arg(args, 0, "s")?;
+    let prefix = string_arg(args, 1, "prefix")?;
+    Ok(vec![Value::Bool(s.starts_with(&*prefix))])
+}
+
+pub(crate) fn builtin_endswith(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let s = string_arg(args, 0, "s")?;
+    let suffix = string_arg(args, 1, "suffix")?;
+    Ok(vec![Value::Bool(s.ends_with(&*suffix))])
+}
+
+pub(crate) fn builtin_len(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    Ok(vec![Value::from_usize(string_arg(args, 0, "s")?.len())])
 }
 
 // ---------------------------------------------------------------------------
@@ -689,12 +930,11 @@ impl FormatSpec {
 
 fn format_integer_arg(value: Value) -> Result<BigInt, String> {
     match value {
-        Value::Integer(value) => Ok(value.to_bigint()),
-        Value::Number(value) if value.is_finite() && value.fract() == 0.0 => {
-            BigInt::from_f64(value)
-                .ok_or_else(|| "number has no integer representation".to_string())
-        }
-        Value::Number(_) => Err("number has no integer representation".to_string()),
+        Value::Int(value) => Ok(BigInt::from(value)),
+        Value::BigInt(value) => Ok((*value).clone()),
+        Value::Float(value) if value.is_finite() && value.fract() == 0.0 => BigInt::from_f64(value)
+            .ok_or_else(|| "number has no integer representation".to_string()),
+        Value::Float(_) => Err("number has no integer representation".to_string()),
         other => Err(format!("expected a number, got {}", other.type_name())),
     }
 }
@@ -922,8 +1162,9 @@ fn quote_string(s: &str) -> String {
 fn format_quoted(value: Value) -> Result<String, String> {
     Ok(match value {
         Value::String(s) => quote_string(&s),
-        Value::Integer(value) => value.to_string(),
-        Value::Number(value) => {
+        Value::Int(value) => value.to_string(),
+        Value::BigInt(value) => value.to_string(),
+        Value::Float(value) => {
             if value.is_infinite() {
                 if value > 0.0 {
                     "1e9999".to_string()
@@ -945,8 +1186,8 @@ fn format_quoted(value: Value) -> Result<String, String> {
     })
 }
 
-fn builtin_format(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let formatstring = string_arg(&args, 0, "formatstring")?;
+pub(crate) fn builtin_format(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let formatstring = string_arg(args, 0, "formatstring")?;
     let fmt = formatstring.as_bytes();
     let mut out = String::with_capacity(fmt.len());
     let mut arg_index = 1usize;
@@ -1059,7 +1300,8 @@ fn builtin_format(args: Vec<Value>) -> Result<Vec<Value>, String> {
                 format_float(&spec, number(next_arg(&mut arg_index)?)?, conv)
             }
             b's' => {
-                let text = next_arg(&mut arg_index)?.to_string();
+                let value = next_arg(&mut arg_index)?;
+                let text = crate::vm::builtins::global::tostring(vm, &value)?;
                 let text = match spec.precision {
                     Some(precision) => text.chars().take(precision).collect(),
                     None => text,
@@ -1083,7 +1325,7 @@ fn builtin_format(args: Vec<Value>) -> Result<Vec<Value>, String> {
         out.push_str(&piece);
     }
     out.push_str(&String::from_utf8_lossy(&fmt[literal_start..]));
-    Ok(vec![Value::String(out)])
+    Ok(vec![Value::string(out)])
 }
 
 // ---------------------------------------------------------------------------
@@ -1289,7 +1531,7 @@ fn unpack_int(bytes: &[u8], little: bool, signed: bool) -> BigInt {
 }
 
 fn bytes_to_latin1(bytes: &[u8]) -> Value {
-    Value::String(bytes.iter().map(|b| *b as char).collect())
+    Value::string(bytes.iter().map(|b| *b as char).collect())
 }
 
 fn latin1_to_bytes(s: &str) -> Result<Vec<u8>, String> {
@@ -1301,8 +1543,8 @@ fn latin1_to_bytes(s: &str) -> Result<Vec<u8>, String> {
         .collect()
 }
 
-fn builtin_pack(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let format = string_arg(&args, 0, "format")?;
+pub(crate) fn builtin_pack(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let format = string_arg(args, 0, "format")?;
     let fmt = format.as_bytes();
     let mut state = PackState::new();
     let mut out = Vec::new();
@@ -1343,7 +1585,8 @@ fn builtin_pack(args: Vec<Value>) -> Result<Vec<Value>, String> {
                 out.extend(bytes);
             }
             PackKind::Char => {
-                let value = require_string(next(&mut arg_index)?)?;
+                let value = next(&mut arg_index)?;
+                let value = require_string(&value)?;
                 if value.len() > size {
                     return Err("string longer than given size".to_string());
                 }
@@ -1351,7 +1594,8 @@ fn builtin_pack(args: Vec<Value>) -> Result<Vec<Value>, String> {
                 out.extend(std::iter::repeat_n(0u8, size - value.len()));
             }
             PackKind::String => {
-                let value = require_string(next(&mut arg_index)?)?;
+                let value = next(&mut arg_index)?;
+                let value = require_string(&value)?;
                 if size < 8 && value.len() >= 1usize << (size * 8) {
                     return Err("string length does not fit in given size".to_string());
                 }
@@ -1365,7 +1609,8 @@ fn builtin_pack(args: Vec<Value>) -> Result<Vec<Value>, String> {
                 out.extend(value.as_bytes());
             }
             PackKind::Zstr => {
-                let value = require_string(next(&mut arg_index)?)?;
+                let value = next(&mut arg_index)?;
+                let value = require_string(&value)?;
                 if value.as_bytes().contains(&0) {
                     return Err("string contains zeros".to_string());
                 }
@@ -1379,8 +1624,8 @@ fn builtin_pack(args: Vec<Value>) -> Result<Vec<Value>, String> {
     Ok(vec![bytes_to_latin1(&out)])
 }
 
-fn builtin_packsize(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let format = string_arg(&args, 0, "format")?;
+pub(crate) fn builtin_packsize(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let format = string_arg(args, 0, "format")?;
     let fmt = format.as_bytes();
     let mut state = PackState::new();
     let mut total = 0usize;
@@ -1395,11 +1640,11 @@ fn builtin_packsize(args: Vec<Value>) -> Result<Vec<Value>, String> {
     Ok(vec![integer(total as i64)])
 }
 
-fn builtin_unpack(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let format = string_arg(&args, 0, "format")?;
-    let data = latin1_to_bytes(&string_arg(&args, 1, "data")?)?;
+pub(crate) fn builtin_unpack(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let format = string_arg(args, 0, "format")?;
+    let data = latin1_to_bytes(&string_arg(args, 1, "data")?)?;
     let fmt = format.as_bytes();
-    let mut pos = pos_relat_start(opt_int_arg(&args, 2, "readStart", 1)?, data.len()) - 1;
+    let mut pos = pos_relat_start(opt_int_arg(args, 2, "readStart", 1)?, data.len()) - 1;
     if pos > data.len() {
         return Err("initial position out of string".to_string());
     }
@@ -1414,11 +1659,11 @@ fn builtin_unpack(args: Vec<Value>) -> Result<Vec<Value>, String> {
         pos += padding;
         match kind {
             PackKind::Int | PackKind::Uint => {
-                values.push(Value::Integer(Int::from_bigint(unpack_int(
+                values.push(Value::from_bigint(unpack_int(
                     &data[pos..pos + size],
                     state.little,
                     kind == PackKind::Int,
-                ))));
+                )));
             }
             PackKind::Float => {
                 let bytes: [u8; 4] = data[pos..pos + 4].try_into().unwrap();
@@ -1427,7 +1672,7 @@ fn builtin_unpack(args: Vec<Value>) -> Result<Vec<Value>, String> {
                 } else {
                     f32::from_be_bytes(bytes)
                 };
-                values.push(Value::Number(value as f64));
+                values.push(Value::Float(value as f64));
             }
             PackKind::Double => {
                 let bytes: [u8; 8] = data[pos..pos + 8].try_into().unwrap();
@@ -1436,7 +1681,7 @@ fn builtin_unpack(args: Vec<Value>) -> Result<Vec<Value>, String> {
                 } else {
                     f64::from_be_bytes(bytes)
                 };
-                values.push(Value::Number(value));
+                values.push(Value::Float(value));
             }
             PackKind::Char => values.push(bytes_to_string(&data[pos..pos + size])),
             PackKind::String => {
@@ -1462,5 +1707,5 @@ fn builtin_unpack(args: Vec<Value>) -> Result<Vec<Value>, String> {
         pos += size;
     }
     values.push(integer(pos as i64 + 1));
-    Ok(vec![Value::Varargs(values)])
+    Ok(values)
 }

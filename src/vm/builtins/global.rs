@@ -39,22 +39,24 @@ pub fn builtin_typeof(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String
     Ok(vec![Value::String((val.typeof_name().to_string()).into())])
 }
 
-pub fn builtin_tostring(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let val = args.first().unwrap_or(&Value::Nil);
+/// A value as `tostring` prints it, honoring `__tostring`.
+pub fn tostring(vm: &mut VM, val: &Value) -> Result<String, String> {
     if let Value::Table(t) = val {
-        let handler = t
-            .borrow()
-            .metatable
-            .as_ref()
-            .and_then(|mt| mt.borrow().fields.get("__tostring").cloned());
-        if let Some(h) = handler
-            && !matches!(h, Value::Nil)
-        {
+        let handler = t.borrow().metamethod("__tostring");
+        if let Some(h) = handler {
             let res = vm.call_function(h, std::slice::from_ref(val))?;
-            return Ok(vec![res.into_iter().next().unwrap_or(Value::Nil)]);
+            return Ok(res.into_iter().next().unwrap_or(Value::Nil).to_string());
         }
     }
-    Ok(vec![Value::string(val.to_string())])
+    Ok(val.to_string())
+}
+
+pub fn builtin_tostring(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let val = args.first().unwrap_or(&Value::Nil);
+    if let Value::String(_) = val {
+        return Ok(vec![val.clone()]);
+    }
+    Ok(vec![Value::string(tostring(vm, val)?)])
 }
 
 pub fn builtin_tonumber(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
@@ -250,20 +252,20 @@ pub fn builtin_xpcall(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String>
     }
 }
 
-/// Loads a `@neyuki/...` module from the sources bundled at build time, or
-/// returns `None` when `name` is not one of them. Each module runs once and its
-/// value is kept, so repeated `require`s share the same table.
+/// Resolves a standard or bundled `@neyuki/...` module (the prefix is
+/// optional), or returns `None` when `name` is neither. Bundled sources run
+/// once; every later `require` gets the same table.
 fn load_bundled_module(vm: &mut VM, name: &str) -> Result<Option<Value>, String> {
     let bare = name.strip_prefix("@neyuki/").unwrap_or(name);
-    let Some((_, source)) = crate::runtime::BUNDLED_LIBRARIES
+    if let Some(cached) = vm.modules.get(bare).cloned() {
+        return Ok(Some(cached));
+    }
+    let Some((_, source)) = crate::vm::libs::BUNDLED_LIBRARIES
         .iter()
         .find(|(bundled, _)| bundled.strip_prefix("@neyuki/") == Some(bare))
     else {
         return Ok(None);
     };
-    if let Some(cached) = vm.modules.get(bare).cloned() {
-        return Ok(Some(cached));
-    }
     let stmts = crate::compiler::compile_source(source)
         .map_err(|err| format!("error in module '{}': {}", name, err))?;
     let proto = crate::compiler::compile_bundled_to_proto(&stmts)
@@ -281,62 +283,37 @@ pub fn builtin_require(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String
         Value::String(s) => &**s,
         _ => return Err("require expects string argument".to_string()),
     };
-
-    // `math` and `string` are deliberately absent: the VM's own versions cover
-    // only part of the API, so they come from the bundled sources below, the
-    // same ones the tree-walking engine uses.
-    let mod_name = match pkg {
-        "@neyuki/table" | "table" => "table",
-        "@neyuki/bit" | "bit" | "@neyuki/bit32" | "bit32" => "bit",
-        "@neyuki/buffer" | "buffer" => "buffer",
-        "@neyuki/os" | "os" => "os",
-        "@neyuki/coroutine" | "coroutine" => "coroutine",
-        "@neyuki/debug" | "debug" => "debug",
-        "@neyuki/json" | "json" => "json",
-        "@neyuki/utf8" | "utf8" => "utf8",
-        other => {
-            // Modules with no Rust counterpart in the VM (http, fs, io, crypto, sql)
-            // are the bundled `lib/*.nyk` sources, run on top of the bridged
-            // natives.
-            if let Some(val) = load_bundled_module(vm, other)? {
-                return Ok(vec![val]);
-            }
-            let path_obj = std::path::Path::new(other);
-            if other.contains('\0')
-                || other.contains("..")
-                || other.starts_with('/')
-                || other.starts_with('\\')
-                || path_obj.is_absolute()
-                || path_obj.components().any(|c| {
-                    matches!(
-                        c,
-                        std::path::Component::ParentDir
-                            | std::path::Component::RootDir
-                            | std::path::Component::Prefix(_)
-                    )
-                })
-            {
-                return Err(format!(
-                    "security error: path traversal forbidden in require: '{}'",
-                    pkg
-                ));
-            }
-
-            let mut loader = crate::module_loader::ModuleLoader::new();
-            if let Ok((resolved_path, bytes)) = loader.read_module(other) {
-                let proto = loader.compile_bytes(&resolved_path, &bytes, pkg)?;
-                // Run on top of the current frames: `execute` would reset the
-                // stack out from under whatever called `require`.
-                let val = vm.execute_module((*proto).clone())?;
-                return Ok(vec![val]);
-            }
-            return Err(format!("cannot find module '{}'", pkg));
-        }
-    };
-
-    if let Some(val) = vm.globals.get(mod_name).cloned() {
-        Ok(vec![val])
-    } else {
-        Err(format!("module '{}' not found", mod_name))
+    if let Some(val) = load_bundled_module(vm, pkg)? {
+        return Ok(vec![val]);
     }
+    let path_obj = std::path::Path::new(pkg);
+    if pkg.contains('\0')
+        || pkg.contains("..")
+        || pkg.starts_with('/')
+        || pkg.starts_with('\\')
+        || path_obj.is_absolute()
+        || path_obj.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err(format!(
+            "security error: path traversal forbidden in require: '{}'",
+            pkg
+        ));
+    }
+
+    let mut loader = crate::module_loader::ModuleLoader::new();
+    if let Ok((resolved_path, bytes)) = loader.read_module(pkg) {
+        let proto = loader.compile_bytes(&resolved_path, &bytes, pkg)?;
+        // Run on top of the current frames: `execute` would reset the
+        // stack out from under whatever called `require`.
+        let val = vm.execute_module((*proto).clone())?;
+        return Ok(vec![val]);
+    }
+    Err(format!("cannot find module '{}'", pkg))
 }

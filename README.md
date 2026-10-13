@@ -37,9 +37,8 @@ neyuki/
 │   ├── lint/            # lint rules
 │   ├── compiler/        # constant folding, SSA IR and its passes, codegen
 │   ├── bytecode/        # instruction format, (de)serializer, verifier, disassembler
-│   ├── vm/              # register VM, garbage collector, built-in libraries
-│   ├── runtime.rs       # tree-walking interpreter (`run --tree-walker`)
-│   ├── *_lib.rs         # natives behind @neyuki/http, sql, crypto, fs, io, string, ui
+│   ├── vm/              # register VM, garbage collector
+│   │   └── libs/        # standard libraries and the natives behind lib/*.nyk
 │   ├── repl.rs, dap.rs  # interactive REPL and debug adapter
 │   └── diagnostics/
 ├── lib/                 # bundled @neyuki/* modules written in Neyuki

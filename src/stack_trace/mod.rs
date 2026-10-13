@@ -1,4 +1,4 @@
-// Modular stack trace engine for Neyuki runtime & VM.
+// Stack traces for the VM.
 
 pub mod formatter;
 pub mod frame;
@@ -22,12 +22,6 @@ pub fn build_vm_traceback(vm: &VM, message: Option<String>, level_offset: usize)
 pub fn build_vm_traceback_pretty(vm: &VM, message: Option<String>, level_offset: usize) -> String {
     let trace = StackUnwinder::unwind_vm(&vm.frames, &vm.stack, message, level_offset);
     StackTraceFormatter::format_pretty(&trace)
-}
-
-/// Creates a traceback string from AST interpreter runtime call frames.
-pub fn build_runtime_traceback(raw_frames: &[String], message: Option<String>) -> String {
-    let trace = StackUnwinder::unwind_runtime_strings(raw_frames, message);
-    StackTraceFormatter::format_standard(&trace)
 }
 
 #[cfg(test)]

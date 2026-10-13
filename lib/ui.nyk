@@ -1,10 +1,12 @@
 local table = require("@neyuki/table")
 local string = require("@neyuki/string")
+local math = require("@neyuki/math")
+local os = require("@neyuki/os")
 
 local ui = {}
 
 -- Windows, drawing and input on top of the `__ui_*` natives in
--- src/ui_lib.rs (winit, tiny-skia, fontdue and softbuffer: pure Rust, CPU
+-- src/vm/libs/ui.rs (winit, tiny-skia, fontdue and softbuffer: pure Rust, CPU
 -- rendered, one code path for X11, Wayland, macOS and Windows).
 --
 -- Natives cannot call back into Neyuki, so there are no callbacks: the
@@ -52,7 +54,7 @@ end
 function checkChannel(value: any, name: string): number
     if (type(value) != "number") then error(name .. " must be a number from 0 to 255") end
     if (value < 0 or value > 255) then error(name .. " must be a number from 0 to 255") end
-    return __floor(value + 0.5)
+    return math.floor(value + 0.5)
 end
 
 -- Turns a color into the 0xRRGGBBAA integer the natives take.
@@ -413,7 +415,7 @@ function ui.run(handler: ({Event}, number) -> any, options: RunOptions?): ()
     local fps = options.fps ?? 60
     if (fps <= 0) then error("fps must be positive") end
     local frame = 1 / fps
-    local last = __os_clock()
+    local last = os.clock()
     while (openCount > 0) do
         local events = ui.poll(frame)
         if (autoClose) then
@@ -421,7 +423,7 @@ function ui.run(handler: ({Event}, number) -> any, options: RunOptions?): ()
                 if (event.kind == "close") then event.window:close() end
             end
         end
-        local now = __os_clock()
+        local now = os.clock()
         local ok, err = try(handler, events, now - last)
         last = now
         if (not ok) then

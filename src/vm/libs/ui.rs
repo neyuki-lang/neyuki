@@ -28,7 +28,6 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use fontdue::layout::{CoordinateSystem, GlyphRasterConfig, Layout, LayoutSettings, TextStyle};
-use num_bigint::BigInt;
 use tiny_skia::{
     Color, ColorU8, FillRule, FilterQuality, Paint, Path, PathBuilder, Pixmap, PixmapPaint,
     PremultipliedColorU8, Rect, Stroke, Transform,
@@ -41,35 +40,100 @@ use winit::keyboard::{Key, ModifiersState, PhysicalKey};
 use winit::platform::pump_events::EventLoopExtPumpEvents;
 use winit::window::{Window, WindowId};
 
-use crate::runtime::{Int, Value, new_table};
+use crate::vm::libs::args::array as new_table;
+use crate::vm::machine::VM;
+use crate::vm::value::{NativeDef, StrRef, Value, VmTable};
 
-pub(crate) const NATIVES: &[(&str, crate::runtime::Native)] = &[
-    ("__ui_available", builtin_available),
-    ("__ui_open", builtin_open),
-    ("__ui_close", builtin_close),
-    ("__ui_set_title", builtin_set_title),
-    ("__ui_set_size", builtin_set_size),
-    ("__ui_size", builtin_size),
-    ("__ui_poll", builtin_poll),
-    ("__ui_clear", builtin_clear),
-    ("__ui_fill_rect", builtin_fill_rect),
-    ("__ui_stroke_rect", builtin_stroke_rect),
-    ("__ui_line", builtin_line),
-    ("__ui_circle", builtin_circle),
-    ("__ui_polygon", builtin_polygon),
-    ("__ui_text", builtin_text),
-    ("__ui_measure_text", builtin_measure_text),
-    ("__ui_load_image", builtin_load_image),
-    ("__ui_free_image", builtin_free_image),
-    ("__ui_draw_image", builtin_draw_image),
-    ("__ui_load_font", builtin_load_font),
-    ("__ui_free_font", builtin_free_font),
-    ("__ui_present", builtin_present),
+pub(crate) const NATIVES: &[NativeDef] = &[
+    NativeDef {
+        name: "__ui_available",
+        func: builtin_available,
+    },
+    NativeDef {
+        name: "__ui_open",
+        func: builtin_open,
+    },
+    NativeDef {
+        name: "__ui_close",
+        func: builtin_close,
+    },
+    NativeDef {
+        name: "__ui_set_title",
+        func: builtin_set_title,
+    },
+    NativeDef {
+        name: "__ui_set_size",
+        func: builtin_set_size,
+    },
+    NativeDef {
+        name: "__ui_size",
+        func: builtin_size,
+    },
+    NativeDef {
+        name: "__ui_poll",
+        func: builtin_poll,
+    },
+    NativeDef {
+        name: "__ui_clear",
+        func: builtin_clear,
+    },
+    NativeDef {
+        name: "__ui_fill_rect",
+        func: builtin_fill_rect,
+    },
+    NativeDef {
+        name: "__ui_stroke_rect",
+        func: builtin_stroke_rect,
+    },
+    NativeDef {
+        name: "__ui_line",
+        func: builtin_line,
+    },
+    NativeDef {
+        name: "__ui_circle",
+        func: builtin_circle,
+    },
+    NativeDef {
+        name: "__ui_polygon",
+        func: builtin_polygon,
+    },
+    NativeDef {
+        name: "__ui_text",
+        func: builtin_text,
+    },
+    NativeDef {
+        name: "__ui_measure_text",
+        func: builtin_measure_text,
+    },
+    NativeDef {
+        name: "__ui_load_image",
+        func: builtin_load_image,
+    },
+    NativeDef {
+        name: "__ui_free_image",
+        func: builtin_free_image,
+    },
+    NativeDef {
+        name: "__ui_draw_image",
+        func: builtin_draw_image,
+    },
+    NativeDef {
+        name: "__ui_load_font",
+        func: builtin_load_font,
+    },
+    NativeDef {
+        name: "__ui_free_font",
+        func: builtin_free_font,
+    },
+    NativeDef {
+        name: "__ui_present",
+        func: builtin_present,
+    },
 ];
 
 /// The font used when a script does not load its own: Noto Sans, under the
 /// SIL Open Font License (see `lib/fonts/NotoSans-OFL.txt`).
-const DEFAULT_FONT: &[u8] = include_bytes!("../lib/fonts/NotoSans-Regular.ttf");
+const DEFAULT_FONT: &[u8] = include_bytes!("../../../lib/fonts/NotoSans-Regular.ttf");
 const DEFAULT_FONT_ID: u64 = 0;
 
 /// Glyph bitmaps are cached per font; past this many the cache starts over
@@ -134,7 +198,7 @@ fn next_id() -> u64 {
 
 fn string_arg(args: &[Value], index: usize, name: &str) -> Result<String, String> {
     match args.get(index) {
-        Some(Value::String(value)) => Ok(value.clone()),
+        Some(Value::String(value)) => Ok(value.to_string()),
         Some(value) => Err(format!(
             "{} must be a string, got {}",
             name,
@@ -157,11 +221,12 @@ fn bool_arg(args: &[Value], index: usize, name: &str, default: bool) -> Result<b
 }
 
 fn float_arg(args: &[Value], index: usize, name: &str) -> Result<f64, String> {
-    let value = args.get(index).cloned().unwrap_or(Value::Nil);
+    let value = args.get(index).unwrap_or(&Value::Nil);
     if matches!(value, Value::Nil) {
         return Err(format!("{} must be provided", name));
     }
-    let number = crate::runtime::number(value).map_err(|_| format!("{} must be a number", name))?;
+    let number =
+        crate::vm::libs::args::number(value).map_err(|_| format!("{} must be a number", name))?;
     if !number.is_finite() {
         return Err(format!("{} must be a finite number", name));
     }
@@ -222,9 +287,8 @@ fn points_arg(args: &[Value], index: usize, name: &str) -> Result<Vec<(f32, f32)
             .borrow()
             .array
             .iter()
-            .cloned()
             .map(|value| {
-                crate::runtime::number(value)
+                crate::vm::libs::args::number(value)
                     .ok()
                     .filter(|number| number.is_finite())
                     .ok_or_else(|| format!("{} must hold finite numbers", name))
@@ -249,22 +313,19 @@ fn points_arg(args: &[Value], index: usize, name: &str) -> Result<Vec<(f32, f32)
 }
 
 fn record(fields: Vec<(&str, Value)>) -> Value {
-    let table = new_table(Vec::new());
-    if let Value::Table(inner) = &table {
-        let mut inner = inner.borrow_mut();
-        for (name, value) in fields {
-            inner.fields.insert(name.to_string(), value);
-        }
+    let mut table = VmTable::new();
+    for (name, value) in fields {
+        table.fields.insert(StrRef::from(name), value);
     }
-    table
+    Value::Table(Rc::new(RefCell::new(table)))
 }
 
 fn integer(value: u64) -> Value {
-    Value::Integer(Int::from_bigint(BigInt::from(value)))
+    Value::from_u64(value)
 }
 
 fn text(value: &str) -> Value {
-    Value::String(value.to_string())
+    Value::str(value)
 }
 
 // EVENT LOOP ---------------------------------------------------------------
@@ -432,8 +493,8 @@ fn translate_event(id: u64, win: &mut Win, event: WindowEvent) -> Option<Value> 
             kind(
                 "resize",
                 vec![
-                    ("width", Value::Number(width)),
-                    ("height", Value::Number(height)),
+                    ("width", Value::Float(width)),
+                    ("height", Value::Float(height)),
                 ],
             )
         }
@@ -473,10 +534,10 @@ fn translate_event(id: u64, win: &mut Win, event: WindowEvent) -> Option<Value> 
                     ElementState::Released => "keyup",
                 },
                 vec![
-                    ("key", Value::String(name)),
-                    ("code", Value::String(code)),
+                    ("key", Value::string(name)),
+                    ("code", Value::string(code)),
                     ("repeat", Value::Bool(event.repeat)),
-                    ("text", typed.map(Value::String).unwrap_or(Value::Nil)),
+                    ("text", typed.map(Value::string).unwrap_or(Value::Nil)),
                     (
                         "mods",
                         record(vec![
@@ -495,8 +556,8 @@ fn translate_event(id: u64, win: &mut Win, event: WindowEvent) -> Option<Value> 
             kind(
                 "mousemove",
                 vec![
-                    ("x", Value::Number(position.x)),
-                    ("y", Value::Number(position.y)),
+                    ("x", Value::Float(position.x)),
+                    ("y", Value::Float(position.y)),
                 ],
             )
         }
@@ -517,9 +578,9 @@ fn translate_event(id: u64, win: &mut Win, event: WindowEvent) -> Option<Value> 
                     ElementState::Released => "mouseup",
                 },
                 vec![
-                    ("button", Value::String(button)),
-                    ("x", Value::Number(win.cursor.0)),
-                    ("y", Value::Number(win.cursor.1)),
+                    ("button", Value::string(button)),
+                    ("x", Value::Float(win.cursor.0)),
+                    ("y", Value::Float(win.cursor.1)),
                 ],
             )
         }
@@ -534,11 +595,11 @@ fn translate_event(id: u64, win: &mut Win, event: WindowEvent) -> Option<Value> 
             kind(
                 "scroll",
                 vec![
-                    ("dx", Value::Number(dx)),
-                    ("dy", Value::Number(dy)),
+                    ("dx", Value::Float(dx)),
+                    ("dy", Value::Float(dy)),
                     ("unit", text(unit)),
-                    ("x", Value::Number(win.cursor.0)),
-                    ("y", Value::Number(win.cursor.1)),
+                    ("x", Value::Float(win.cursor.0)),
+                    ("y", Value::Float(win.cursor.1)),
                 ],
             )
         }
@@ -838,19 +899,19 @@ fn rgba_to_pixmap(rgba: &[u8], width: u32, height: u32) -> Option<Pixmap> {
 // NATIVES ------------------------------------------------------------------
 
 /// `__ui_available()` reports whether a display can be reached.
-fn builtin_available(_args: Vec<Value>) -> Result<Vec<Value>, String> {
+fn builtin_available(_vm: &mut VM, _args: &[Value]) -> Result<Vec<Value>, String> {
     Ok(vec![Value::Bool(with_event_loop(|_| ()).is_ok())])
 }
 
 /// `__ui_open(title, width, height, resizable, visible)` creates a window and
 /// returns its id and DPI scale factor.
-fn builtin_open(args: Vec<Value>) -> Result<Vec<Value>, String> {
+fn builtin_open(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let request = OpenRequest {
-        title: string_arg(&args, 0, "title")?,
-        width: float_arg(&args, 1, "width")?,
-        height: float_arg(&args, 2, "height")?,
-        resizable: bool_arg(&args, 3, "resizable", true)?,
-        visible: bool_arg(&args, 4, "visible", true)?,
+        title: string_arg(args, 0, "title")?,
+        width: float_arg(args, 1, "width")?,
+        height: float_arg(args, 2, "height")?,
+        resizable: bool_arg(args, 3, "resizable", true)?,
+        visible: bool_arg(args, 4, "visible", true)?,
     };
     if request.width <= 0.0 || request.height <= 0.0 {
         return Err("width and height must be positive".to_string());
@@ -864,7 +925,7 @@ fn builtin_open(args: Vec<Value>) -> Result<Vec<Value>, String> {
         }
         if let Some(result) = OPENED.with(|opened| opened.borrow_mut().take()) {
             let (id, scale) = result?;
-            return Ok(vec![integer(id), Value::Number(scale)]);
+            return Ok(vec![integer(id), Value::Float(scale)]);
         }
     }
     PENDING_OPEN.with(|pending| *pending.borrow_mut() = None);
@@ -872,8 +933,8 @@ fn builtin_open(args: Vec<Value>) -> Result<Vec<Value>, String> {
 }
 
 /// `__ui_close(window)` destroys the window; later calls on the id fail.
-fn builtin_close(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let id = integer_arg(&args, 0, "window")?;
+fn builtin_close(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = integer_arg(args, 0, "window")?;
     let removed = WINDOWS.with(|windows| windows.borrow_mut().remove(&id));
     if let Some(win) = removed {
         WINDOW_IDS.with(|ids| ids.borrow_mut().remove(&win.window.id()));
@@ -886,9 +947,9 @@ fn builtin_close(args: Vec<Value>) -> Result<Vec<Value>, String> {
 }
 
 /// `__ui_set_title(window, title)`.
-fn builtin_set_title(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let id = integer_arg(&args, 0, "window")?;
-    let title = string_arg(&args, 1, "title")?;
+fn builtin_set_title(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = integer_arg(args, 0, "window")?;
+    let title = string_arg(args, 1, "title")?;
     with_window(id, |win| {
         win.window.set_title(&title);
         Ok(())
@@ -898,10 +959,10 @@ fn builtin_set_title(args: Vec<Value>) -> Result<Vec<Value>, String> {
 
 /// `__ui_set_size(window, width, height)` asks for a new logical size; the
 /// `resize` event confirms what the window system granted.
-fn builtin_set_size(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let id = integer_arg(&args, 0, "window")?;
-    let width = float_arg(&args, 1, "width")?;
-    let height = float_arg(&args, 2, "height")?;
+fn builtin_set_size(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = integer_arg(args, 0, "window")?;
+    let width = float_arg(args, 1, "width")?;
+    let height = float_arg(args, 2, "height")?;
     if width <= 0.0 || height <= 0.0 {
         return Err("width and height must be positive".to_string());
     }
@@ -915,31 +976,31 @@ fn builtin_set_size(args: Vec<Value>) -> Result<Vec<Value>, String> {
 }
 
 /// `__ui_size(window)` returns the logical width, height and scale factor.
-fn builtin_size(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let id = integer_arg(&args, 0, "window")?;
+fn builtin_size(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = integer_arg(args, 0, "window")?;
     with_window(id, |win| {
         let size = win.window.inner_size().to_logical::<f64>(win.scale);
         Ok(vec![
-            Value::Number(size.width),
-            Value::Number(size.height),
-            Value::Number(win.scale),
+            Value::Float(size.width),
+            Value::Float(size.height),
+            Value::Float(win.scale),
         ])
     })
 }
 
 /// `__ui_poll(timeout?)` pumps the event loop, waiting up to `timeout`
 /// seconds for something to happen, and returns the events as an array.
-fn builtin_poll(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let timeout = timeout_arg(&args, 0, "timeout")?;
+fn builtin_poll(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let timeout = timeout_arg(args, 0, "timeout")?;
     pump(timeout)?;
     let events = EVENTS.with(|events| std::mem::take(&mut *events.borrow_mut()));
     Ok(vec![new_table(events)])
 }
 
 /// `__ui_clear(window, color)` fills the whole back buffer.
-fn builtin_clear(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let id = integer_arg(&args, 0, "window")?;
-    let (r, g, b, a) = color_arg(&args, 1, "color")?;
+fn builtin_clear(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = integer_arg(args, 0, "window")?;
+    let (r, g, b, a) = color_arg(args, 1, "color")?;
     with_window(id, |win| {
         win.pixmap.fill(Color::from_rgba8(r, g, b, a));
         Ok(())
@@ -948,10 +1009,10 @@ fn builtin_clear(args: Vec<Value>) -> Result<Vec<Value>, String> {
 }
 
 /// `__ui_fill_rect(window, x, y, width, height, color, radius?)`.
-fn builtin_fill_rect(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let (id, x, y, w, h) = rect_args(&args)?;
-    let color = color_arg(&args, 5, "color")?;
-    let radius = optional_float_arg(&args, 6, "radius", 0.0)? as f32;
+fn builtin_fill_rect(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let (id, x, y, w, h) = rect_args(args)?;
+    let color = color_arg(args, 5, "color")?;
+    let radius = optional_float_arg(args, 6, "radius", 0.0)? as f32;
     with_window(id, |win| {
         if let Some(path) = rounded_rect(x, y, w, h, radius) {
             let transform = Transform::from_scale(win.scale as f32, win.scale as f32);
@@ -964,11 +1025,11 @@ fn builtin_fill_rect(args: Vec<Value>) -> Result<Vec<Value>, String> {
 }
 
 /// `__ui_stroke_rect(window, x, y, width, height, color, radius?, lineWidth?)`.
-fn builtin_stroke_rect(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let (id, x, y, w, h) = rect_args(&args)?;
-    let color = color_arg(&args, 5, "color")?;
-    let radius = optional_float_arg(&args, 6, "radius", 0.0)? as f32;
-    let width = optional_float_arg(&args, 7, "lineWidth", 1.0)?;
+fn builtin_stroke_rect(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let (id, x, y, w, h) = rect_args(args)?;
+    let color = color_arg(args, 5, "color")?;
+    let radius = optional_float_arg(args, 6, "radius", 0.0)? as f32;
+    let width = optional_float_arg(args, 7, "lineWidth", 1.0)?;
     with_window(id, |win| {
         if let Some(path) = rounded_rect(x, y, w, h, radius) {
             let transform = Transform::from_scale(win.scale as f32, win.scale as f32);
@@ -981,14 +1042,14 @@ fn builtin_stroke_rect(args: Vec<Value>) -> Result<Vec<Value>, String> {
 }
 
 /// `__ui_line(window, x1, y1, x2, y2, color, lineWidth?)`.
-fn builtin_line(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let id = integer_arg(&args, 0, "window")?;
-    let x1 = float_arg(&args, 1, "x1")? as f32;
-    let y1 = float_arg(&args, 2, "y1")? as f32;
-    let x2 = float_arg(&args, 3, "x2")? as f32;
-    let y2 = float_arg(&args, 4, "y2")? as f32;
-    let color = color_arg(&args, 5, "color")?;
-    let width = optional_float_arg(&args, 6, "lineWidth", 1.0)?;
+fn builtin_line(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = integer_arg(args, 0, "window")?;
+    let x1 = float_arg(args, 1, "x1")? as f32;
+    let y1 = float_arg(args, 2, "y1")? as f32;
+    let x2 = float_arg(args, 3, "x2")? as f32;
+    let y2 = float_arg(args, 4, "y2")? as f32;
+    let color = color_arg(args, 5, "color")?;
+    let width = optional_float_arg(args, 6, "lineWidth", 1.0)?;
     with_window(id, |win| {
         let mut pb = PathBuilder::new();
         pb.move_to(x1, y1);
@@ -1004,14 +1065,14 @@ fn builtin_line(args: Vec<Value>) -> Result<Vec<Value>, String> {
 }
 
 /// `__ui_circle(window, cx, cy, radius, color, fill, lineWidth?)`.
-fn builtin_circle(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let id = integer_arg(&args, 0, "window")?;
-    let cx = float_arg(&args, 1, "x")? as f32;
-    let cy = float_arg(&args, 2, "y")? as f32;
-    let radius = float_arg(&args, 3, "radius")? as f32;
-    let color = color_arg(&args, 4, "color")?;
-    let fill = bool_arg(&args, 5, "fill", true)?;
-    let width = optional_float_arg(&args, 6, "lineWidth", 1.0)?;
+fn builtin_circle(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = integer_arg(args, 0, "window")?;
+    let cx = float_arg(args, 1, "x")? as f32;
+    let cy = float_arg(args, 2, "y")? as f32;
+    let radius = float_arg(args, 3, "radius")? as f32;
+    let color = color_arg(args, 4, "color")?;
+    let fill = bool_arg(args, 5, "fill", true)?;
+    let width = optional_float_arg(args, 6, "lineWidth", 1.0)?;
     if radius < 0.0 {
         return Err("radius must be non-negative".to_string());
     }
@@ -1033,12 +1094,12 @@ fn builtin_circle(args: Vec<Value>) -> Result<Vec<Value>, String> {
 
 /// `__ui_polygon(window, points, color, fill, lineWidth?)` where `points`
 /// is a flat `{x1, y1, x2, y2, ...}` array.
-fn builtin_polygon(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let id = integer_arg(&args, 0, "window")?;
-    let points = points_arg(&args, 1, "points")?;
-    let color = color_arg(&args, 2, "color")?;
-    let fill = bool_arg(&args, 3, "fill", true)?;
-    let width = optional_float_arg(&args, 4, "lineWidth", 1.0)?;
+fn builtin_polygon(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = integer_arg(args, 0, "window")?;
+    let points = points_arg(args, 1, "points")?;
+    let color = color_arg(args, 2, "color")?;
+    let fill = bool_arg(args, 3, "fill", true)?;
+    let width = optional_float_arg(args, 4, "lineWidth", 1.0)?;
     if points.len() < 2 {
         return Err("points must hold at least two points".to_string());
     }
@@ -1060,16 +1121,16 @@ fn builtin_polygon(args: Vec<Value>) -> Result<Vec<Value>, String> {
 
 /// `__ui_text(window, x, y, text, size, color, font?)` draws `text` with
 /// the top-left of its line box at `(x, y)` and returns the width drawn.
-fn builtin_text(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let id = integer_arg(&args, 0, "window")?;
-    let x = float_arg(&args, 1, "x")?;
-    let y = float_arg(&args, 2, "y")?;
-    let text = string_arg(&args, 3, "text")?;
-    let size = float_arg(&args, 4, "size")?;
-    let color = color_arg(&args, 5, "color")?;
+fn builtin_text(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = integer_arg(args, 0, "window")?;
+    let x = float_arg(args, 1, "x")?;
+    let y = float_arg(args, 2, "y")?;
+    let text = string_arg(args, 3, "text")?;
+    let size = float_arg(args, 4, "size")?;
+    let color = color_arg(args, 5, "color")?;
     let font = match args.get(6) {
         None | Some(Value::Nil) => DEFAULT_FONT_ID,
-        _ => integer_arg(&args, 6, "font")?,
+        _ => integer_arg(args, 6, "font")?,
     };
     if size <= 0.0 {
         return Err("size must be positive".to_string());
@@ -1089,17 +1150,17 @@ fn builtin_text(args: Vec<Value>) -> Result<Vec<Value>, String> {
                 / scale)
         })
     })?;
-    Ok(vec![Value::Number(width)])
+    Ok(vec![Value::Float(width)])
 }
 
 /// `__ui_measure_text(text, size, font?)` returns the logical width and
 /// height `__ui_text` would cover.
-fn builtin_measure_text(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let text = string_arg(&args, 0, "text")?;
-    let size = float_arg(&args, 1, "size")?;
+fn builtin_measure_text(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let text = string_arg(args, 0, "text")?;
+    let size = float_arg(args, 1, "size")?;
     let font = match args.get(2) {
         None | Some(Value::Nil) => DEFAULT_FONT_ID,
-        _ => integer_arg(&args, 2, "font")?,
+        _ => integer_arg(args, 2, "font")?,
     };
     if size <= 0.0 {
         return Err("size must be positive".to_string());
@@ -1109,15 +1170,15 @@ fn builtin_measure_text(args: Vec<Value>) -> Result<Vec<Value>, String> {
         Ok((width, height))
     })?;
     Ok(vec![
-        Value::Number(width as f64),
-        Value::Number(height as f64),
+        Value::Float(width as f64),
+        Value::Float(height as f64),
     ])
 }
 
 /// `__ui_load_image(path)` decodes a PNG and returns its id, width and
 /// height.
-fn builtin_load_image(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let path = string_arg(&args, 0, "path")?;
+fn builtin_load_image(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let path = string_arg(args, 0, "path")?;
     let pixmap = decode_png(&path)?;
     let (width, height) = (pixmap.width(), pixmap.height());
     let id = next_id();
@@ -1130,21 +1191,21 @@ fn builtin_load_image(args: Vec<Value>) -> Result<Vec<Value>, String> {
 }
 
 /// `__ui_free_image(image)`.
-fn builtin_free_image(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let id = integer_arg(&args, 0, "image")?;
+fn builtin_free_image(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = integer_arg(args, 0, "image")?;
     IMAGES.with(|images| images.borrow_mut().remove(&id));
     Ok(vec![])
 }
 
 /// `__ui_draw_image(window, image, x, y, width?, height?)` draws an image
 /// at its own size or scaled to `width` × `height`.
-fn builtin_draw_image(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let id = integer_arg(&args, 0, "window")?;
-    let image = integer_arg(&args, 1, "image")?;
-    let x = float_arg(&args, 2, "x")? as f32;
-    let y = float_arg(&args, 3, "y")? as f32;
-    let width = optional_float_arg(&args, 4, "width", 0.0)? as f32;
-    let height = optional_float_arg(&args, 5, "height", 0.0)? as f32;
+fn builtin_draw_image(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = integer_arg(args, 0, "window")?;
+    let image = integer_arg(args, 1, "image")?;
+    let x = float_arg(args, 2, "x")? as f32;
+    let y = float_arg(args, 3, "y")? as f32;
+    let width = optional_float_arg(args, 4, "width", 0.0)? as f32;
+    let height = optional_float_arg(args, 5, "height", 0.0)? as f32;
     if width < 0.0 || height < 0.0 {
         return Err("width and height must be non-negative".to_string());
     }
@@ -1181,8 +1242,8 @@ fn builtin_draw_image(args: Vec<Value>) -> Result<Vec<Value>, String> {
 
 /// `__ui_load_font(path)` reads a TrueType or OpenType font and returns its
 /// id.
-fn builtin_load_font(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let path = string_arg(&args, 0, "path")?;
+fn builtin_load_font(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let path = string_arg(args, 0, "path")?;
     let bytes = std::fs::read(&path).map_err(|err| format!("cannot open {}: {}", path, err))?;
     let entry = load_font(bytes)?;
     let id = next_id();
@@ -1191,8 +1252,8 @@ fn builtin_load_font(args: Vec<Value>) -> Result<Vec<Value>, String> {
 }
 
 /// `__ui_free_font(font)`.
-fn builtin_free_font(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let id = integer_arg(&args, 0, "font")?;
+fn builtin_free_font(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = integer_arg(args, 0, "font")?;
     if id == DEFAULT_FONT_ID {
         return Err("the default font cannot be freed".to_string());
     }
@@ -1201,8 +1262,8 @@ fn builtin_free_font(args: Vec<Value>) -> Result<Vec<Value>, String> {
 }
 
 /// `__ui_present(window)` shows what has been drawn since the last call.
-fn builtin_present(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let id = integer_arg(&args, 0, "window")?;
+fn builtin_present(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = integer_arg(args, 0, "window")?;
     with_window(id, blit)?;
     Ok(vec![])
 }
@@ -1219,9 +1280,9 @@ mod tests {
 
     #[test]
     fn color_arg_rejects_out_of_range_values() {
-        let err = color_arg(&[Value::Number(1e12)], 0, "color").unwrap_err();
+        let err = color_arg(&[Value::Float(1e12)], 0, "color").unwrap_err();
         assert!(err.contains("out of range"), "{}", err);
-        let err = color_arg(&[Value::Number(-1.0)], 0, "color").unwrap_err();
+        let err = color_arg(&[Value::Float(-1.0)], 0, "color").unwrap_err();
         assert!(err.contains("non-negative"), "{}", err);
     }
 
@@ -1306,9 +1367,9 @@ mod tests {
     #[test]
     fn points_need_pairs() {
         let table = new_table(vec![
-            Value::Number(1.0),
-            Value::Number(2.0),
-            Value::Number(3.0),
+            Value::Float(1.0),
+            Value::Float(2.0),
+            Value::Float(3.0),
         ]);
         let err = points_arg(&[table], 0, "points").unwrap_err();
         assert!(err.contains("pairs"), "{}", err);

@@ -34,7 +34,7 @@ cargo test
 
 ### Language and runtime
 
-- **The VM is the default engine.** New features go into the bytecode compiler and VM (`src/compiler`, `src/bytecode`, `src/vm`). The tree-walking interpreter in `src/runtime.rs` is legacy; only touch it for bug fixes.
+- **Everything runs on the register VM.** Language features go into the bytecode compiler and VM (`src/compiler`, `src/bytecode`, `src/vm`); standard libraries live in `src/vm/libs`.
 - **Standard library changes must cover both implementations.** Native VM libraries live in `src/vm/libs` and `src/vm/builtins`; the bundled `.nyk` sources live in `lib/`. If you add or change a function in one, update the other (or document why it is VM-only).
 - **Don't break existing scripts.** Changes to syntax, builtins or library behaviour must keep every file in `tests/` and `examples/` running. If a breaking change is genuinely needed, call it out in the PR description.
 - **Optimizer changes must be sound.** Any change under the IR/optimizer must preserve observable behaviour, including error messages and evaluation order. Add a test that would fail without your change.

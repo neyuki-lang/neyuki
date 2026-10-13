@@ -7,7 +7,7 @@ local table = require("@neyuki/table")
 local math = require("@neyuki/math")
 local fs = require("@neyuki/fs")
 
--- 1. Test os module on tree-walker
+-- 1. Test os module
 local c = os.clock()
 assert(type(c) == "number", "os.clock should return a number")
 

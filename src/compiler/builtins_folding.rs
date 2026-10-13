@@ -1,6 +1,7 @@
 use num_bigint::BigInt;
-use num_traits::{Signed, ToPrimitive};
 use std::str::FromStr;
+
+use crate::vm::Value;
 
 use crate::ast::Literal;
 use crate::parser::Expr;
@@ -35,21 +36,40 @@ pub fn fold_builtin_call_scoped(
     };
 
     match (mod_name, func_name) {
-        ("math", "abs") => fold_math_abs(args),
-        ("math", "floor") => fold_math_floor(args),
-        ("math", "ceil") => fold_math_ceil(args),
-        ("math", "sqrt") => fold_math_sqrt(args),
-        ("math", "min") => fold_math_min(args),
-        ("math", "max") => fold_math_max(args),
-        ("math", "pow") => fold_math_pow(args),
+        ("", "int") => fold_builtin_int(args),
+        ("", _) => None,
         // `bit.*` is folded by `constant_fold` with the natives' 32-bit
         // semantics (`vm::libs::bit::fold_call`), never here.
-        ("string", "len") => fold_string_len(args),
-        ("string", "lower") => fold_string_lower(args),
-        ("string", "upper") => fold_string_upper(args),
-        ("", "int") => fold_builtin_int(args),
+        (module, name) => {
+            let values = args.iter().map(literal_value).collect::<Option<Vec<_>>>()?;
+            value_expr(&crate::vm::libs::fold_call(module, name, &values)?)
+        }
+    }
+}
+
+fn literal_value(expr: &Expr) -> Option<Value> {
+    match expr {
+        Expr::Literal { value, .. } => Some(match value {
+            Literal::Nil => Value::Nil,
+            Literal::Bool(b) => Value::Bool(*b),
+            Literal::Int(i) => Value::from_bigint(i.clone()),
+            Literal::Float(f) => Value::Float(*f),
+            Literal::String(s) => Value::str(s),
+        }),
         _ => None,
     }
+}
+
+fn value_expr(value: &Value) -> Option<Expr> {
+    Some(match value {
+        Value::Nil => Expr::nil(),
+        Value::Bool(b) => Expr::bool(*b),
+        Value::Int(i) => Expr::int(*i),
+        Value::BigInt(i) => Expr::int((**i).clone()),
+        Value::Float(f) => Expr::float(*f),
+        Value::String(s) => Expr::string(s.to_string()),
+        _ => return None,
+    })
 }
 
 fn get_int(expr: &Expr) -> Option<BigInt> {
@@ -68,10 +88,6 @@ fn get_float(expr: &Expr) -> Option<f64> {
             value: Literal::Float(f),
             ..
         } => Some(*f),
-        Expr::Literal {
-            value: Literal::Int(i),
-            ..
-        } => i.to_f64(),
         _ => None,
     }
 }
@@ -84,103 +100,6 @@ fn get_str(expr: &Expr) -> Option<&str> {
         } => Some(s.as_str()),
         _ => None,
     }
-}
-
-fn fold_math_abs(args: &[Expr]) -> Option<Expr> {
-    let arg = args.first()?;
-    if let Some(i) = get_int(arg) {
-        return Some(Expr::int(i.abs()));
-    }
-    if let Some(f) = get_float(arg) {
-        return Some(Expr::float(f.abs()));
-    }
-    None
-}
-
-fn fold_math_floor(args: &[Expr]) -> Option<Expr> {
-    let arg = args.first()?;
-    if let Some(i) = get_int(arg) {
-        return Some(Expr::int(i));
-    }
-    if let Some(f) = get_float(arg) {
-        return Some(Expr::float(f.floor()));
-    }
-    None
-}
-
-fn fold_math_ceil(args: &[Expr]) -> Option<Expr> {
-    let arg = args.first()?;
-    if let Some(i) = get_int(arg) {
-        return Some(Expr::int(i));
-    }
-    if let Some(f) = get_float(arg) {
-        return Some(Expr::float(f.ceil()));
-    }
-    None
-}
-
-fn fold_math_sqrt(args: &[Expr]) -> Option<Expr> {
-    let arg = args.first()?;
-    let f = get_float(arg)?;
-    if f >= 0.0 {
-        Some(Expr::float(f.sqrt()))
-    } else {
-        None
-    }
-}
-
-fn fold_math_min(args: &[Expr]) -> Option<Expr> {
-    if args.is_empty() {
-        return None;
-    }
-    let mut min_val = get_float(args.first()?)?;
-    for arg in &args[1..] {
-        let f = get_float(arg)?;
-        if f < min_val {
-            min_val = f;
-        }
-    }
-    Some(Expr::float(min_val))
-}
-
-fn fold_math_max(args: &[Expr]) -> Option<Expr> {
-    if args.is_empty() {
-        return None;
-    }
-    let mut max_val = get_float(args.first()?)?;
-    for arg in &args[1..] {
-        let f = get_float(arg)?;
-        if f > max_val {
-            max_val = f;
-        }
-    }
-    Some(Expr::float(max_val))
-}
-
-fn fold_math_pow(args: &[Expr]) -> Option<Expr> {
-    let a = get_float(args.first()?)?;
-    let b = get_float(args.get(1)?)?;
-    let res = a.powf(b);
-    if res.is_finite() {
-        Some(Expr::float(res))
-    } else {
-        None
-    }
-}
-
-fn fold_string_len(args: &[Expr]) -> Option<Expr> {
-    let s = get_str(args.first()?)?;
-    Some(Expr::int(s.len()))
-}
-
-fn fold_string_lower(args: &[Expr]) -> Option<Expr> {
-    let s = get_str(args.first()?)?;
-    Some(Expr::string(s.to_lowercase()))
-}
-
-fn fold_string_upper(args: &[Expr]) -> Option<Expr> {
-    let s = get_str(args.first()?)?;
-    Some(Expr::string(s.to_uppercase()))
 }
 
 fn fold_builtin_int(args: &[Expr]) -> Option<Expr> {

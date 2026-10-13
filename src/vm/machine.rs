@@ -13,7 +13,6 @@ use crate::vm::hash::{FxHashMap, new_map};
 use crate::vm::libs::{
     create_bit_lib, create_buffer_lib, create_coroutine_lib, create_debug_lib, create_json_lib,
     create_math_lib, create_os_lib, create_string_lib, create_table_lib, create_utf8_lib,
-    primitive_sqrt, register_bridged_natives,
 };
 use crate::vm::ops;
 use crate::vm::value::{NativeDef, StrRef, Upvalue, Value, VmClosure, VmTable};
@@ -98,12 +97,9 @@ pub struct VM {
     /// older epoch re-resolve instead of trusting a stale value.
     pub globals_epoch: u64,
     pub gc: GcTracker,
-    pub coroutines: HashMap<usize, Rc<RefCell<CoroutineState>>>,
-    /// Register-VM coroutine states by id, held WEAKLY: each handle table's
-    /// `co_state` field owns its state strongly, so dropping the last
-    /// handle frees a suspended coroutine by refcounting. (`coroutines`
-    /// above is the tree-walker's own registry on its private VM instances
-    /// and is untouched by the register VM's coroutine library.)
+    /// Coroutine states by id, held weakly: each handle table's `co_state`
+    /// field owns its state, so dropping the last handle frees a suspended
+    /// coroutine by refcounting.
     pub co_states: HashMap<usize, Weak<RefCell<CoroutineState>>>,
     /// Map length at the last dead-weak prune: pruning runs when the map
     /// doubles past this, keeping cleanup amortized O(1) per coroutine.
@@ -137,8 +133,11 @@ pub struct VM {
     /// `Vararg` or returning frame. Only meaningful for the instruction that
     /// immediately consumes it.
     pub top: usize,
-    /// Modules already loaded by `require`, so each one runs once.
+    /// Modules already loaded by `require`, so each one runs once. The
+    /// standard libraries are registered here up front.
     pub modules: HashMap<String, Value>,
+    /// The `string` library, which string values index into for methods.
+    pub string_lib: Value,
     /// Every value the frame that just unwound to a `run_to_depth` boundary
     /// returned, so `call_function` can hand back more than the first.
     returned: Vec<Value>,
@@ -158,7 +157,6 @@ impl VM {
             globals: new_map(),
             globals_epoch: 0,
             gc: GcTracker::new(),
-            coroutines: HashMap::new(),
             co_states: HashMap::new(),
             co_states_pruned_at: 0,
             next_co_id: 1,
@@ -173,6 +171,7 @@ impl VM {
             open_upvalues: Vec::new(),
             top: 0,
             modules: HashMap::new(),
+            string_lib: Value::Nil,
             returned: Vec::new(),
         };
         vm.register_builtins();
@@ -182,24 +181,30 @@ impl VM {
     fn register_builtins(&mut self) {
         crate::vm::builtins::register_all(self);
 
-        self.set_global("bit", create_bit_lib());
-        self.set_global("bit32", create_bit_lib());
-        self.set_global("buffer", create_buffer_lib());
-        self.set_global("math", create_math_lib());
-        self.set_global("string", create_string_lib());
-        self.set_global("table", create_table_lib());
-        self.set_global("os", create_os_lib());
-        self.set_global("coroutine", create_coroutine_lib());
-        self.set_global("debug", create_debug_lib());
-        self.set_global("json", create_json_lib());
-        self.set_global("utf8", create_utf8_lib());
-
-        register_bridged_natives(self);
-
-        // Direct VM-native `__sqrt`, shadowing the bridged primitive with an
-        // identical contract: the bundled stdlib calls `__sqrt` hot, and the
-        // bridge round-trip costs ~25% per call.
-        self.set_global("__sqrt", crate::native!("__sqrt", primitive_sqrt));
+        let bit = create_bit_lib();
+        let libs = [
+            ("bit", bit.clone()),
+            ("bit32", bit),
+            ("buffer", create_buffer_lib()),
+            ("coroutine", create_coroutine_lib()),
+            ("debug", create_debug_lib()),
+            ("json", create_json_lib()),
+            ("math", create_math_lib()),
+            ("os", create_os_lib()),
+            ("string", create_string_lib()),
+            ("table", create_table_lib()),
+            ("utf8", create_utf8_lib()),
+        ];
+        for (name, lib) in libs {
+            if name == "string" {
+                self.string_lib = lib.clone();
+            }
+            self.set_global(name, lib.clone());
+            // `require("@neyuki/math")` hands back this same table even if
+            // the script later reassigns the global.
+            self.modules.insert(name.to_string(), lib);
+        }
+        crate::vm::libs::register_natives(self);
     }
 
     pub fn set_global(&mut self, name: &str, value: Value) {
@@ -531,15 +536,9 @@ impl VM {
     /// Drops state-map entries whose coroutine is gone (last handle dropped).
     /// Weak liveness needs no GC visibility: an entry upgrades exactly while
     /// some handle — on a visible stack or a put-aside one — still owns it.
-    /// Resolve a coroutine state by id: register-VM states first (weak,
-    /// owned strongly by their handle table), then tree-walker states
-    /// (strong, owned by its private registry) for bridged flows where the
-    /// tree-walker drives `coroutine_resume` on its own VM instances.
+    /// The live coroutine state with this id, if its handle still exists.
     pub(crate) fn co_state(&self, co_id: usize) -> Option<Rc<RefCell<CoroutineState>>> {
-        self.co_states
-            .get(&co_id)
-            .and_then(|weak| weak.upgrade())
-            .or_else(|| self.coroutines.get(&co_id).cloned())
+        self.co_states.get(&co_id).and_then(|weak| weak.upgrade())
     }
 
     pub(crate) fn prune_co_states(&mut self) {
@@ -2107,7 +2106,17 @@ impl VM {
                     _ => Ok(Value::Nil),
                 }
             }
-            _ => Err("attempted to index a non-table value".to_string()),
+            // Strings index the string library, so `s:upper()` works.
+            Value::String(_) => match (&self.string_lib, key) {
+                (Value::Table(lib), Value::String(name)) => Ok(lib
+                    .borrow()
+                    .fields
+                    .get(&**name)
+                    .cloned()
+                    .unwrap_or(Value::Nil)),
+                _ => Ok(Value::Nil),
+            },
+            other => Err(format!("attempted to index a {} value", other.type_name())),
         }
     }
 
@@ -2204,7 +2213,10 @@ impl VM {
                     _ => Err("invalid buffer index".to_string()),
                 }
             }
-            _ => Err("attempted to set field on a non-table value".to_string()),
+            other => Err(format!(
+                "attempted to set a field on a {} value",
+                other.type_name()
+            )),
         }
     }
 }
@@ -2269,26 +2281,6 @@ mod tests {
             vm.co_states.is_empty(),
             "abandoned suspended coroutines must be collected"
         );
-    }
-
-    #[test]
-    fn test_vm_sqrt_global_is_direct_native() {
-        // `__sqrt` must resolve to the direct VM native, not the bridged
-        // wrapper: the bridge round-trip is what made it ~25% slower than
-        // `math.sqrt`. Contract parity is pinned by tests/sqrt_direct.nyk.
-        let vm = VM::new();
-        match vm.globals.get("__sqrt") {
-            Some(Value::Native(def)) => {
-                // Compare through a fn pointer (casting the function item
-                // directly trips clippy::fn_to_numeric_cast).
-                let direct: crate::vm::value::NativeFn = crate::vm::libs::math::primitive_sqrt;
-                assert_eq!(
-                    def.func as usize, direct as usize,
-                    "__sqrt must be the direct VM native"
-                );
-            }
-            _ => panic!("__sqrt global must be a native"),
-        }
     }
 
     #[test]
@@ -2929,8 +2921,6 @@ return parts[1] .. \",\" .. parts[2]";
 
     #[test]
     fn test_vm_requires_bundled_http_module() {
-        // `@neyuki/http` has no Rust counterpart in the VM: it is the bundled
-        // lib/http.nyk running on the bridged native primitives.
         let code = "local http = require(\"@neyuki/http\")
 local path, params = http.parseQuery(\"/hello?name=you\")
 return path .. \" \" .. params.name .. \" \" .. http.encode(\"a b\")";

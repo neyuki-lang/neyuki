@@ -1,4 +1,4 @@
-// Unwinding engine for extracting stack frames from the VM and runtime.
+// Unwinding engine for extracting stack frames from the VM.
 
 use super::formatter::StackTrace;
 use super::frame::StackFrame;
@@ -51,36 +51,5 @@ impl StackUnwinder {
         }
 
         StackTrace::new(message, trace_frames)
-    }
-
-    /// Unwinds simple string frames (e.g. from AST interpreter runtime stack).
-    pub fn unwind_runtime_strings(raw_frames: &[String], message: Option<String>) -> StackTrace {
-        let total = raw_frames.len();
-        let mut frames = Vec::new();
-
-        for (i, raw) in raw_frames.iter().rev().enumerate() {
-            let depth = total.saturating_sub(i);
-            // Example format: "function 'foo' at line 10" or "foo:10"
-            let func_name = if let Some(start) = raw.find("function '") {
-                let rest = &raw[start + 10..];
-                if let Some(end) = rest.find('\'') {
-                    rest[..end].to_string()
-                } else {
-                    raw.clone()
-                }
-            } else {
-                raw.clone()
-            };
-
-            let line = if let Some(idx) = raw.rfind("line ") {
-                raw[idx + 5..].trim().parse::<usize>().unwrap_or(1)
-            } else {
-                1
-            };
-
-            frames.push(StackFrame::new(depth, func_name, line));
-        }
-
-        StackTrace::new(message, frames)
     }
 }

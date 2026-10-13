@@ -1,3 +1,0 @@
--- Neyuki bundled library: @neyuki/utf8
-local utf8 = require("@neyuki/utf8")
-return utf8

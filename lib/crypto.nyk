@@ -2,7 +2,7 @@ local table = require("@neyuki/table")
 
 local crypto = {}
 
--- Every primitive here is native (src/crypto_lib.rs, on the RustCrypto and
+-- Every primitive here is native (src/vm/libs/crypto.rs, on the RustCrypto and
 -- dalek crates); this module validates arguments and fills in defaults.
 --
 -- Binary values are strings in an `encoding`: "hex", "base64" or

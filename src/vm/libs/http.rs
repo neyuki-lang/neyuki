@@ -16,28 +16,63 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use num_bigint::BigInt;
 use ureq::ResponseExt;
 
-use crate::runtime::{Int, Value, new_table};
+use crate::vm::hash::FxHashMap;
+use crate::vm::machine::VM;
+use crate::vm::value::{NativeDef, StrRef, Value, VmTable};
 
-pub(crate) const NATIVES: &[(&str, crate::runtime::Native)] = &[
-    ("__http_request", builtin_request),
-    ("__http_listen", builtin_listen),
-    ("__http_accept", builtin_accept),
-    ("__http_respond", builtin_respond),
-    ("__http_close", builtin_close),
-    ("__http_proxy", builtin_proxy),
-    ("__http_forward", builtin_forward),
-    ("__http_forward_wait", builtin_forward_wait),
-    ("__http_unforward", builtin_unforward),
-    ("__http_url_encode", builtin_url_encode),
-    ("__http_url_decode", builtin_url_decode),
+pub(crate) const NATIVES: &[NativeDef] = &[
+    NativeDef {
+        name: "__http_request",
+        func: builtin_request,
+    },
+    NativeDef {
+        name: "__http_listen",
+        func: builtin_listen,
+    },
+    NativeDef {
+        name: "__http_accept",
+        func: builtin_accept,
+    },
+    NativeDef {
+        name: "__http_respond",
+        func: builtin_respond,
+    },
+    NativeDef {
+        name: "__http_close",
+        func: builtin_close,
+    },
+    NativeDef {
+        name: "__http_proxy",
+        func: builtin_proxy,
+    },
+    NativeDef {
+        name: "__http_forward",
+        func: builtin_forward,
+    },
+    NativeDef {
+        name: "__http_forward_wait",
+        func: builtin_forward_wait,
+    },
+    NativeDef {
+        name: "__http_unforward",
+        func: builtin_unforward,
+    },
+    NativeDef {
+        name: "__http_url_encode",
+        func: builtin_url_encode,
+    },
+    NativeDef {
+        name: "__http_url_decode",
+        func: builtin_url_decode,
+    },
 ];
 
 /// A running TCP port forward. Only the accept thread touches the listener;
@@ -69,7 +104,7 @@ fn next_id() -> u64 {
 
 fn string_arg(args: &[Value], index: usize, name: &str) -> Result<String, String> {
     match args.get(index) {
-        Some(Value::String(value)) => Ok(value.clone()),
+        Some(Value::String(value)) => Ok(value.to_string()),
         Some(value) => Err(format!(
             "{} must be a string, got {}",
             name,
@@ -87,8 +122,9 @@ fn optional_string_arg(args: &[Value], index: usize, name: &str) -> Result<Optio
 }
 
 fn integer_arg(args: &[Value], index: usize, name: &str) -> Result<u64, String> {
-    let value = args.get(index).cloned().unwrap_or(Value::Nil);
-    let number = crate::runtime::number(value).map_err(|_| format!("{} must be a number", name))?;
+    let value = args.get(index).unwrap_or(&Value::Nil);
+    let number =
+        crate::vm::libs::args::number(value).map_err(|_| format!("{} must be a number", name))?;
     if number < 0.0 || number.fract() != 0.0 {
         return Err(format!("{} must be a non-negative integer", name));
     }
@@ -115,7 +151,7 @@ fn timeout_arg(args: &[Value], index: usize, name: &str) -> Result<Option<Durati
         return Ok(None);
     }
     let seconds =
-        crate::runtime::number(value).map_err(|_| format!("{} must be a number", name))?;
+        crate::vm::libs::args::number(&value).map_err(|_| format!("{} must be a number", name))?;
     if seconds < 0.0 || !seconds.is_finite() {
         return Err(format!("{} must be a non-negative number of seconds", name));
     }
@@ -157,8 +193,8 @@ fn headers_arg(args: &[Value], index: usize, name: &str) -> Result<Vec<(String, 
         .iter()
         .map(|(key, value)| {
             let value = match value {
-                Value::String(text) => text.clone(),
-                Value::Integer(_) | Value::Number(_) => value.to_string(),
+                Value::String(text) => text.to_string(),
+                Value::Int(_) | Value::BigInt(_) | Value::Float(_) => value.to_string(),
                 other => {
                     return Err(format!(
                         "header `{}` must be a string or a number, got {}",
@@ -167,7 +203,7 @@ fn headers_arg(args: &[Value], index: usize, name: &str) -> Result<Vec<(String, 
                     ));
                 }
             };
-            Ok((key.clone(), value))
+            Ok((key.to_string(), value))
         })
         .collect::<Result<_, _>>()?;
     // Deterministic order makes requests reproducible regardless of hashing.
@@ -178,25 +214,25 @@ fn headers_arg(args: &[Value], index: usize, name: &str) -> Result<Vec<(String, 
 /// Builds a `{ name = value }` table with lower-cased names. Repeated headers
 /// are joined with `", "` as RFC 9110 allows.
 fn headers_table<'a>(headers: impl Iterator<Item = (&'a str, &'a [u8])>) -> Value {
-    let mut fields: HashMap<String, Value> = HashMap::new();
+    let mut merged: Vec<(String, String)> = Vec::new();
     for (name, value) in headers {
         let name = name.to_ascii_lowercase();
-        let value = String::from_utf8_lossy(value).into_owned();
-        match fields.get_mut(&name) {
-            Some(Value::String(existing)) => {
+        let value = String::from_utf8_lossy(value);
+        match merged.iter_mut().find(|(existing, _)| *existing == name) {
+            Some((_, existing)) => {
                 existing.push_str(", ");
                 existing.push_str(&value);
             }
-            _ => {
-                fields.insert(name, Value::String(value));
-            }
+            None => merged.push((name, value.into_owned())),
         }
     }
-    let table = new_table(Vec::new());
-    if let Value::Table(inner) = &table {
-        inner.borrow_mut().fields = fields;
+    let mut fields: FxHashMap<StrRef, Value> = crate::vm::hash::new_map();
+    for (name, value) in merged {
+        fields.insert(StrRef::from(name), Value::string(value));
     }
-    table
+    let mut table = VmTable::new();
+    table.fields = fields;
+    Value::Table(Rc::new(RefCell::new(table)))
 }
 
 /// Neyuki strings are UTF-8, so bodies that are not valid UTF-8 have their
@@ -207,32 +243,29 @@ fn bytes_to_string(bytes: Vec<u8>) -> String {
 }
 
 fn record(fields: Vec<(&str, Value)>) -> Value {
-    let table = new_table(Vec::new());
-    if let Value::Table(inner) = &table {
-        let mut inner = inner.borrow_mut();
-        for (name, value) in fields {
-            inner.fields.insert(name.to_string(), value);
-        }
+    let mut table = VmTable::new();
+    for (name, value) in fields {
+        table.fields.insert(StrRef::from(name), value);
     }
-    table
+    Value::Table(Rc::new(RefCell::new(table)))
 }
 
 fn integer(value: u64) -> Value {
-    Value::Integer(Int::from_bigint(BigInt::from(value)))
+    Value::from_u64(value)
 }
 
 /// `__http_request(method, url, headers?, body?, timeout?, follow?, maxBody?)`
 /// performs one request and returns `{ status, headers, body, url }`. Only
 /// transport failures (DNS, connection, TLS, timeout, too many redirects) and
 /// a response body over `maxBody` bytes are errors.
-fn builtin_request(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let method = string_arg(&args, 0, "method")?.to_ascii_uppercase();
-    let url = string_arg(&args, 1, "url")?;
-    let headers = headers_arg(&args, 2, "headers")?;
-    let body = optional_string_arg(&args, 3, "body")?;
-    let timeout = timeout_arg(&args, 4, "timeout")?;
-    let follow = bool_arg(&args, 5, "follow", true)?;
-    let max_body = max_body_arg(&args, 6)?;
+fn builtin_request(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let method = string_arg(args, 0, "method")?.to_ascii_uppercase();
+    let url = string_arg(args, 1, "url")?;
+    let headers = headers_arg(args, 2, "headers")?;
+    let body = optional_string_arg(args, 3, "body")?;
+    let timeout = timeout_arg(args, 4, "timeout")?;
+    let follow = bool_arg(args, 5, "follow", true)?;
+    let max_body = max_body_arg(args, 6)?;
 
     // The crate is built with only the platform TLS backend (see Cargo.toml),
     // so it must be selected explicitly.
@@ -286,8 +319,8 @@ fn builtin_request(args: Vec<Value>) -> Result<Vec<Value>, String> {
     Ok(vec![record(vec![
         ("status", integer(status)),
         ("headers", headers),
-        ("body", Value::String(bytes_to_string(bytes))),
-        ("url", Value::String(final_url)),
+        ("body", Value::string(bytes_to_string(bytes))),
+        ("url", Value::string(final_url)),
     ])])
 }
 
@@ -295,10 +328,10 @@ fn builtin_request(args: Vec<Value>) -> Result<Vec<Value>, String> {
 /// followed by the bound port (port 0 asks the OS for a free one). Requests
 /// with a body over `maxBody` bytes are answered with 413 and never reach
 /// `__http_accept`.
-fn builtin_listen(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let host = string_arg(&args, 0, "host")?;
-    let port = integer_arg(&args, 1, "port")?;
-    let max_body = max_body_arg(&args, 2)?;
+fn builtin_listen(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let host = string_arg(args, 0, "host")?;
+    let port = integer_arg(args, 1, "port")?;
+    let max_body = max_body_arg(args, 2)?;
     if port > u64::from(u16::MAX) {
         return Err(format!("port {} is out of range (0-65535)", port));
     }
@@ -378,9 +411,9 @@ fn read_request_body(request: &mut tiny_http::Request, max_body: u64) -> Request
 /// `__http_accept(server, timeout?)` waits for the next request and returns
 /// `{ id, method, path, headers, body, remote }`, or nil once `timeout`
 /// seconds pass without one.
-fn builtin_accept(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let id = integer_arg(&args, 0, "server")?;
-    let timeout = timeout_arg(&args, 1, "timeout")?;
+fn builtin_accept(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = integer_arg(args, 0, "server")?;
+    let timeout = timeout_arg(args, 1, "timeout")?;
 
     let deadline = timeout.map(|duration| std::time::Instant::now() + duration);
 
@@ -418,7 +451,7 @@ fn builtin_accept(args: Vec<Value>) -> Result<Vec<Value>, String> {
             .map(|header| (header.field.as_str().as_str(), header.value.as_bytes())),
     );
     let remote = match request.remote_addr() {
-        Some(addr) => Value::String(addr.to_string()),
+        Some(addr) => Value::string(addr.to_string()),
         None => Value::Nil,
     };
     let request_id = next_id();
@@ -426,11 +459,11 @@ fn builtin_accept(args: Vec<Value>) -> Result<Vec<Value>, String> {
         ("id", integer(request_id)),
         (
             "method",
-            Value::String(request.method().as_str().to_string()),
+            Value::string(request.method().as_str().to_string()),
         ),
-        ("path", Value::String(request.url().to_string())),
+        ("path", Value::string(request.url().to_string())),
         ("headers", headers),
-        ("body", Value::String(bytes_to_string(bytes.clone()))),
+        ("body", Value::string(bytes_to_string(bytes.clone()))),
         ("remote", remote),
     ]);
     PENDING.with(|pending| pending.borrow_mut().insert(request_id, (request, bytes)));
@@ -439,14 +472,14 @@ fn builtin_accept(args: Vec<Value>) -> Result<Vec<Value>, String> {
 
 /// `__http_respond(request, status, headers?, body?)` answers a request that
 /// `__http_accept` returned. Each request can be answered once.
-fn builtin_respond(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let id = integer_arg(&args, 0, "request")?;
-    let status = integer_arg(&args, 1, "status")?;
+fn builtin_respond(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = integer_arg(args, 0, "request")?;
+    let status = integer_arg(args, 1, "status")?;
     if !(100..=999).contains(&status) {
         return Err(format!("invalid status code {}", status));
     }
-    let headers = headers_arg(&args, 2, "headers")?;
-    let body = optional_string_arg(&args, 3, "body")?.unwrap_or_default();
+    let headers = headers_arg(args, 2, "headers")?;
+    let body = optional_string_arg(args, 3, "body")?.unwrap_or_default();
 
     let (request, _) = PENDING
         .with(|pending| pending.borrow_mut().remove(&id))
@@ -467,8 +500,8 @@ fn builtin_respond(args: Vec<Value>) -> Result<Vec<Value>, String> {
 
 /// `__http_close(server)` stops listening and returns whether the server was
 /// still open. Requests accepted but not yet answered are dropped.
-fn builtin_close(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let id = integer_arg(&args, 0, "server")?;
+fn builtin_close(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = integer_arg(args, 0, "server")?;
     let Some((server, _)) = SERVERS.with(|servers| servers.borrow_mut().remove(&id)) else {
         return Ok(vec![Value::Bool(false)]);
     };
@@ -529,10 +562,10 @@ const HOP_BY_HOP_RESPONSE: &[&str] = &[
 /// headers and raw body back. Redirects are passed through rather than
 /// followed. If the upstream cannot be reached the request is answered with
 /// a 502 and the error is raised, so the caller learns what went wrong.
-fn builtin_proxy(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let id = integer_arg(&args, 0, "request")?;
-    let base = string_arg(&args, 1, "target")?;
-    let timeout = timeout_arg(&args, 2, "timeout")?;
+fn builtin_proxy(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = integer_arg(args, 0, "request")?;
+    let base = string_arg(args, 1, "target")?;
+    let timeout = timeout_arg(args, 2, "timeout")?;
 
     let (request, body) = PENDING
         .with(|pending| pending.borrow_mut().remove(&id))
@@ -671,11 +704,11 @@ fn relay(client: TcpStream, target: &str) {
 /// on background threads. Returns the forward's id and the bound port (0
 /// asks the OS for a free one). Nothing is checked about the target until a
 /// connection arrives, so a forward can be set up before the target starts.
-fn builtin_forward(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let host = string_arg(&args, 0, "host")?;
-    let port = integer_arg(&args, 1, "port")?;
-    let target_host = string_arg(&args, 2, "target host")?;
-    let target_port = integer_arg(&args, 3, "target port")?;
+fn builtin_forward(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let host = string_arg(args, 0, "host")?;
+    let port = integer_arg(args, 1, "port")?;
+    let target_host = string_arg(args, 2, "target host")?;
+    let target_port = integer_arg(args, 3, "target port")?;
     if port > u64::from(u16::MAX) {
         return Err(format!("port {} is out of range (0-65535)", port));
     }
@@ -732,9 +765,9 @@ fn builtin_forward(args: Vec<Value>) -> Result<Vec<Value>, String> {
 /// `timeout` seconds, or until the forward stops on its own without one, so
 /// a script that only forwards can stay alive. Returns whether the forward
 /// is still running.
-fn builtin_forward_wait(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let id = integer_arg(&args, 0, "forward")?;
-    let timeout = timeout_arg(&args, 1, "timeout")?;
+fn builtin_forward_wait(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = integer_arg(args, 0, "forward")?;
+    let timeout = timeout_arg(args, 1, "timeout")?;
     let deadline = timeout.map(|duration| std::time::Instant::now() + duration);
     loop {
         let running = FORWARDS.with(|forwards| {
@@ -768,8 +801,8 @@ fn builtin_forward_wait(args: Vec<Value>) -> Result<Vec<Value>, String> {
 /// `__http_unforward(forward)` stops a forward and returns whether it was
 /// still running. Connections already relayed keep going until they close
 /// on their own; only the listening socket goes away.
-fn builtin_unforward(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let id = integer_arg(&args, 0, "forward")?;
+fn builtin_unforward(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = integer_arg(args, 0, "forward")?;
     let Some(mut forward) = FORWARDS.with(|forwards| forwards.borrow_mut().remove(&id)) else {
         return Ok(vec![Value::Bool(false)]);
     };
@@ -796,8 +829,8 @@ fn builtin_unforward(args: Vec<Value>) -> Result<Vec<Value>, String> {
 }
 
 /// Percent-encodes everything except RFC 3986 unreserved characters.
-fn builtin_url_encode(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let text = string_arg(&args, 0, "s")?;
+fn builtin_url_encode(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let text = string_arg(args, 0, "s")?;
     let mut encoded = String::with_capacity(text.len());
     for byte in text.bytes() {
         match byte {
@@ -807,12 +840,12 @@ fn builtin_url_encode(args: Vec<Value>) -> Result<Vec<Value>, String> {
             _ => encoded.push_str(&format!("%{:02X}", byte)),
         }
     }
-    Ok(vec![Value::String(encoded)])
+    Ok(vec![Value::string(encoded)])
 }
 
 /// Decodes percent-escapes and `+` (as a space, the form-encoding convention).
-fn builtin_url_decode(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let text = string_arg(&args, 0, "s")?;
+fn builtin_url_decode(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let text = string_arg(args, 0, "s")?;
     let bytes = text.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut index = 0;
@@ -837,7 +870,7 @@ fn builtin_url_decode(args: Vec<Value>) -> Result<Vec<Value>, String> {
             }
         }
     }
-    Ok(vec![Value::String(bytes_to_string(decoded))])
+    Ok(vec![Value::string(bytes_to_string(decoded))])
 }
 
 #[cfg(test)]
@@ -847,7 +880,7 @@ mod tests {
     /// Runs `native` and unwraps its single result as a number.
     fn number_result(result: Result<Vec<Value>, String>, index: usize) -> u64 {
         let values = result.expect("native should succeed");
-        crate::runtime::number(values[index].clone()).expect("result should be a number") as u64
+        crate::vm::libs::args::number(&values[index]).expect("result should be a number") as u64
     }
 
     /// Reads one HTTP/1.1 message from `stream` (headers plus a
@@ -890,12 +923,15 @@ mod tests {
             }
         });
 
-        let result = builtin_forward(vec![
-            Value::String("127.0.0.1".into()),
-            integer(0),
-            Value::String("127.0.0.1".into()),
-            integer(u64::from(echo_port)),
-        ])
+        let result = builtin_forward(
+            &mut VM::new(),
+            &[
+                Value::string("127.0.0.1".into()),
+                integer(0),
+                Value::string("127.0.0.1".into()),
+                integer(u64::from(echo_port)),
+            ],
+        )
         .expect("forward should bind");
         let id = number_result(Ok(result.clone()), 0);
         let port = number_result(Ok(result), 1) as u16;
@@ -911,29 +947,33 @@ mod tests {
         assert_eq!(echoed, payload);
 
         // Waiting with a timeout returns once it passes, reporting "running".
-        let waited = builtin_forward_wait(vec![integer(id), Value::Number(0.05)]).unwrap();
+        let waited =
+            builtin_forward_wait(&mut VM::new(), &[integer(id), Value::Float(0.05)]).unwrap();
         assert!(matches!(waited[0], Value::Bool(true)));
 
-        let closed = builtin_unforward(vec![integer(id)]).unwrap();
+        let closed = builtin_unforward(&mut VM::new(), &[integer(id)]).unwrap();
         assert!(matches!(closed[0], Value::Bool(true)));
         assert!(
             TcpListener::bind(("127.0.0.1", port)).is_ok(),
             "closing should release the port"
         );
-        let again = builtin_unforward(vec![integer(id)]).unwrap();
+        let again = builtin_unforward(&mut VM::new(), &[integer(id)]).unwrap();
         assert!(matches!(again[0], Value::Bool(false)));
-        assert!(builtin_forward_wait(vec![integer(id)]).is_err());
+        assert!(builtin_forward_wait(&mut VM::new(), &[integer(id)]).is_err());
     }
 
     #[test]
     fn test_forward_rejects_bad_ports() {
         let bind = |port: u64, target: u64| {
-            builtin_forward(vec![
-                Value::String("127.0.0.1".into()),
-                integer(port),
-                Value::String("127.0.0.1".into()),
-                integer(target),
-            ])
+            builtin_forward(
+                &mut VM::new(),
+                &[
+                    Value::string("127.0.0.1".into()),
+                    integer(port),
+                    Value::string("127.0.0.1".into()),
+                    integer(target),
+                ],
+            )
         };
         assert!(bind(70_000, 80).is_err());
         assert!(bind(0, 0).is_err());
@@ -961,7 +1001,11 @@ mod tests {
             request
         });
 
-        let listen = builtin_listen(vec![Value::String("127.0.0.1".into()), integer(0)]).unwrap();
+        let listen = builtin_listen(
+            &mut VM::new(),
+            &[Value::string("127.0.0.1".into()), integer(0)],
+        )
+        .unwrap();
         let server = number_result(Ok(listen.clone()), 0);
         let port = number_result(Ok(listen), 1) as u16;
 
@@ -980,15 +1024,18 @@ mod tests {
             read_message(&mut stream)
         });
 
-        let accepted = builtin_accept(vec![integer(server)]).unwrap();
+        let accepted = builtin_accept(&mut VM::new(), &[integer(server)]).unwrap();
         let Value::Table(table) = &accepted[0] else {
             panic!("accept should return a table");
         };
         let request_id = table.borrow().fields.get("id").cloned().unwrap();
-        builtin_proxy(vec![
-            request_id,
-            Value::String(format!("http://127.0.0.1:{}", upstream_port)),
-        ])
+        builtin_proxy(
+            &mut VM::new(),
+            &[
+                request_id,
+                Value::string(format!("http://127.0.0.1:{}", upstream_port)),
+            ],
+        )
         .expect("proxy should reach the upstream");
 
         let forwarded = seen.join().unwrap();
@@ -1023,12 +1070,16 @@ mod tests {
             "the raw body should come back"
         );
 
-        builtin_close(vec![integer(server)]).unwrap();
+        builtin_close(&mut VM::new(), &[integer(server)]).unwrap();
     }
 
     #[test]
     fn test_accept_does_not_block_on_an_upgrade_request() {
-        let listen = builtin_listen(vec![Value::String("127.0.0.1".into()), integer(0)]).unwrap();
+        let listen = builtin_listen(
+            &mut VM::new(),
+            &[Value::string("127.0.0.1".into()), integer(0)],
+        )
+        .unwrap();
         let server = number_result(Ok(listen.clone()), 0);
         let port = number_result(Ok(listen), 1) as u16;
         // A WebSocket handshake: the client keeps the connection open,
@@ -1048,7 +1099,7 @@ mod tests {
             read_message(&mut stream)
         });
         let started = std::time::Instant::now();
-        let accepted = builtin_accept(vec![integer(server)]).unwrap();
+        let accepted = builtin_accept(&mut VM::new(), &[integer(server)]).unwrap();
         assert!(
             started.elapsed() < Duration::from_secs(2),
             "accept must not wait for the socket to close"
@@ -1057,15 +1108,19 @@ mod tests {
             panic!("accept should return a table");
         };
         let request_id = table.borrow().fields.get("id").cloned().unwrap();
-        builtin_respond(vec![request_id, integer(426)]).unwrap();
+        builtin_respond(&mut VM::new(), &[request_id, integer(426)]).unwrap();
         let reply = String::from_utf8_lossy(&client.join().unwrap()).to_string();
         assert!(reply.starts_with("HTTP/1.1 426 "), "{}", reply);
-        builtin_close(vec![integer(server)]).unwrap();
+        builtin_close(&mut VM::new(), &[integer(server)]).unwrap();
     }
 
     #[test]
     fn test_proxy_answers_502_when_the_upstream_is_down() {
-        let listen = builtin_listen(vec![Value::String("127.0.0.1".into()), integer(0)]).unwrap();
+        let listen = builtin_listen(
+            &mut VM::new(),
+            &[Value::string("127.0.0.1".into()), integer(0)],
+        )
+        .unwrap();
         let server = number_result(Ok(listen.clone()), 0);
         let port = number_result(Ok(listen), 1) as u16;
         let client = std::thread::spawn(move || {
@@ -1075,17 +1130,20 @@ mod tests {
                 .unwrap();
             read_message(&mut stream)
         });
-        let accepted = builtin_accept(vec![integer(server)]).unwrap();
+        let accepted = builtin_accept(&mut VM::new(), &[integer(server)]).unwrap();
         let Value::Table(table) = &accepted[0] else {
             panic!("accept should return a table");
         };
         let request_id = table.borrow().fields.get("id").cloned().unwrap();
 
         // Port 1 has nothing listening on it.
-        let Err(err) = builtin_proxy(vec![
-            request_id.clone(),
-            Value::String("http://127.0.0.1:1".into()),
-        ]) else {
+        let Err(err) = builtin_proxy(
+            &mut VM::new(),
+            &[
+                request_id.clone(),
+                Value::string("http://127.0.0.1:1".into()),
+            ],
+        ) else {
             panic!("an unreachable upstream should be an error");
         };
         assert!(
@@ -1098,17 +1156,16 @@ mod tests {
         assert!(reply.starts_with("HTTP/1.1 502 "), "{}", reply);
         assert!(reply.contains("Bad Gateway"));
         // The request is gone either way.
-        assert!(builtin_respond(vec![request_id, integer(200)]).is_err());
-        builtin_close(vec![integer(server)]).unwrap();
+        assert!(builtin_respond(&mut VM::new(), &[request_id, integer(200)]).is_err());
+        builtin_close(&mut VM::new(), &[integer(server)]).unwrap();
     }
 
     #[test]
     fn test_accept_answers_413_for_oversized_bodies_and_keeps_waiting() {
-        let listen = builtin_listen(vec![
-            Value::String("127.0.0.1".into()),
-            integer(0),
-            integer(8),
-        ])
+        let listen = builtin_listen(
+            &mut VM::new(),
+            &[Value::string("127.0.0.1".into()), integer(0), integer(8)],
+        )
         .unwrap();
         let server = number_result(Ok(listen.clone()), 0);
         let port = number_result(Ok(listen), 1) as u16;
@@ -1126,21 +1183,21 @@ mod tests {
             };
             (send("far too long a body"), send("fits"))
         });
-        let accepted = builtin_accept(vec![integer(server), integer(10)]).unwrap();
+        let accepted = builtin_accept(&mut VM::new(), &[integer(server), integer(10)]).unwrap();
         let Value::Table(table) = &accepted[0] else {
             panic!("accept should return a table");
         };
         let body = table.borrow().fields.get("body").cloned().unwrap();
         assert!(
-            matches!(&body, Value::String(s) if s == "fits"),
+            matches!(&body, Value::String(s) if &**s == "fits"),
             "only the request that fits should be accepted"
         );
         let request_id = table.borrow().fields.get("id").cloned().unwrap();
-        builtin_respond(vec![request_id, integer(200)]).unwrap();
+        builtin_respond(&mut VM::new(), &[request_id, integer(200)]).unwrap();
         let (rejected, answered) = client.join().unwrap();
         assert!(rejected.starts_with("HTTP/1.1 413 "), "{}", rejected);
         assert!(answered.starts_with("HTTP/1.1 200 "), "{}", answered);
-        builtin_close(vec![integer(server)]).unwrap();
+        builtin_close(&mut VM::new(), &[integer(server)]).unwrap();
     }
 
     #[test]
@@ -1158,17 +1215,20 @@ mod tests {
                     .unwrap();
             }
         });
-        let url = Value::String(format!("http://127.0.0.1:{}/", port));
+        let url = Value::string(format!("http://127.0.0.1:{}/", port));
         let request = |max_body: u64| {
-            builtin_request(vec![
-                Value::String("GET".into()),
-                url.clone(),
-                Value::Nil,
-                Value::Nil,
-                integer(10),
-                Value::Bool(true),
-                integer(max_body),
-            ])
+            builtin_request(
+                &mut VM::new(),
+                &[
+                    Value::string("GET".into()),
+                    url.clone(),
+                    Value::Nil,
+                    Value::Nil,
+                    integer(10),
+                    Value::Bool(true),
+                    integer(max_body),
+                ],
+            )
         };
         let Err(err) = request(4) else {
             panic!("a body over maxBody should be an error");

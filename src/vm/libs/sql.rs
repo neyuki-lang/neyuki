@@ -25,14 +25,31 @@ use postgres::types::private::BytesMut;
 use postgres::types::{Format, FromSql, IsNull, Kind, ToSql, Type};
 use postgres_protocol::types as pg;
 
-use crate::runtime::{Int, Value, new_table};
+use crate::vm::libs::args::array as new_table;
+use crate::vm::machine::VM;
+use crate::vm::value::{NativeDef, StrRef, Value};
 
-pub(crate) const NATIVES: &[(&str, crate::runtime::Native)] = &[
-    ("__sql_open", builtin_open),
-    ("__sql_close", builtin_close),
-    ("__sql_query", builtin_query),
-    ("__sql_execute", builtin_execute),
-    ("__sql_ping", builtin_ping),
+pub(crate) const NATIVES: &[NativeDef] = &[
+    NativeDef {
+        name: "__sql_open",
+        func: builtin_open,
+    },
+    NativeDef {
+        name: "__sql_close",
+        func: builtin_close,
+    },
+    NativeDef {
+        name: "__sql_query",
+        func: builtin_query,
+    },
+    NativeDef {
+        name: "__sql_execute",
+        func: builtin_execute,
+    },
+    NativeDef {
+        name: "__sql_ping",
+        func: builtin_ping,
+    },
 ];
 
 enum Connection {
@@ -73,7 +90,7 @@ fn with_connection<T>(
 
 fn string_arg(args: &[Value], index: usize, name: &str) -> Result<String, String> {
     match args.get(index) {
-        Some(Value::String(value)) => Ok(value.clone()),
+        Some(Value::String(value)) => Ok(value.to_string()),
         Some(value) => Err(format!(
             "{} must be a string, got {}",
             name,
@@ -84,8 +101,9 @@ fn string_arg(args: &[Value], index: usize, name: &str) -> Result<String, String
 }
 
 fn integer_arg(args: &[Value], index: usize, name: &str) -> Result<u64, String> {
-    let value = args.get(index).cloned().unwrap_or(Value::Nil);
-    let number = crate::runtime::number(value).map_err(|_| format!("{} must be a number", name))?;
+    let value = args.get(index).unwrap_or(&Value::Nil);
+    let number =
+        crate::vm::libs::args::number(value).map_err(|_| format!("{} must be a number", name))?;
     if number < 0.0 || number.fract() != 0.0 {
         return Err(format!("{} must be a non-negative integer", name));
     }
@@ -99,7 +117,7 @@ fn params_arg(args: &[Value], index: usize) -> Result<Vec<Value>, String> {
         None | Some(Value::Nil) => Ok(Vec::new()),
         Some(Value::Table(table)) => {
             let table = table.borrow();
-            if !table.fields.is_empty() {
+            if !table.fields.is_empty() || table.general.is_some() {
                 return Err(
                     "params must be an array; named parameters are not supported".to_string(),
                 );
@@ -111,19 +129,19 @@ fn params_arg(args: &[Value], index: usize) -> Result<Vec<Value>, String> {
 }
 
 fn integer(value: u64) -> Value {
-    Value::Integer(Int::from_u64(value))
+    Value::from_u64(value)
 }
 
 /// Builds the result of a query: an array of `{ column = value }` rows that
 /// also carries the column names, in select order, under `columns`.
 fn result_table(columns: Vec<String>, rows: Vec<Value>) -> Value {
-    let names = new_table(columns.into_iter().map(Value::String).collect());
+    let names = new_table(columns.into_iter().map(Value::string).collect());
     let table = new_table(rows);
     if let Value::Table(inner) = &table {
         inner
             .borrow_mut()
             .fields
-            .insert("columns".to_string(), names);
+            .insert(StrRef::from("columns"), names);
     }
     table
 }
@@ -136,7 +154,7 @@ fn row_table(columns: &[String], values: Vec<Value>) -> Value {
             // Only nil-free fields are stored so `row.column == nil` reads as
             // NULL and iteration skips it, like any other absent key.
             if !matches!(value, Value::Nil) {
-                inner.fields.insert(name.clone(), value);
+                inner.fields.insert(StrRef::from(name.as_str()), value);
             }
         }
     }
@@ -178,7 +196,7 @@ fn options_arg(args: &[Value], index: usize) -> Result<OpenOptions, String> {
     let string = |name: &str| -> Result<Option<String>, String> {
         match table.fields.get(name) {
             None | Some(Value::Nil) => Ok(None),
-            Some(Value::String(value)) => Ok(Some(value.clone())),
+            Some(Value::String(value)) => Ok(Some(value.to_string())),
             Some(value) => Err(format!(
                 "{} must be a string, got {}",
                 name,
@@ -189,7 +207,7 @@ fn options_arg(args: &[Value], index: usize) -> Result<OpenOptions, String> {
     let port = match table.fields.get("port") {
         None | Some(Value::Nil) => None,
         Some(value) => {
-            let number = crate::runtime::number(value.clone())
+            let number = crate::vm::libs::args::number(value)
                 .map_err(|_| "port must be a number".to_string())?;
             if number < 1.0 || number > f64::from(u16::MAX) || number.fract() != 0.0 {
                 return Err(format!("port {} is out of range (1-65535)", value));
@@ -205,7 +223,7 @@ fn options_arg(args: &[Value], index: usize) -> Result<OpenOptions, String> {
     let timeout = match table.fields.get("timeout") {
         None | Some(Value::Nil) => None,
         Some(value) => {
-            let seconds = crate::runtime::number(value.clone())
+            let seconds = crate::vm::libs::args::number(value)
                 .map_err(|_| "timeout must be a number".to_string())?;
             if seconds < 0.0 || !seconds.is_finite() {
                 return Err("timeout must be a non-negative number of seconds".to_string());
@@ -374,8 +392,8 @@ fn open_mysql(options: &OpenOptions) -> Result<mysql::Conn, String> {
 /// its driver name. `options` holds `driver` and/or `url` plus optional
 /// `host`, `port`, `user`, `password`, `database`, `ssl` and `timeout`
 /// fields, which override what the URL says.
-fn builtin_open(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let options = options_arg(&args, 0)?;
+fn builtin_open(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let options = options_arg(args, 0)?;
     let driver = driver_name(&options)?;
     let connection = match driver {
         "postgres" => Connection::Postgres(Box::new(open_postgres(&options)?)),
@@ -383,19 +401,19 @@ fn builtin_open(args: Vec<Value>) -> Result<Vec<Value>, String> {
     };
     let id = next_id();
     CONNECTIONS.with(|connections| connections.borrow_mut().insert(id, connection));
-    Ok(vec![integer(id), Value::String(driver.to_string())])
+    Ok(vec![integer(id), Value::str(driver)])
 }
 
 /// `__sql_close(connection)` drops the connection; closing twice is fine.
-fn builtin_close(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let id = integer_arg(&args, 0, "connection")?;
+fn builtin_close(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = integer_arg(args, 0, "connection")?;
     CONNECTIONS.with(|connections| connections.borrow_mut().remove(&id));
     Ok(vec![Value::Nil])
 }
 
 /// `__sql_ping(connection)` returns whether the server still answers.
-fn builtin_ping(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let id = integer_arg(&args, 0, "connection")?;
+fn builtin_ping(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = integer_arg(args, 0, "connection")?;
     let alive = with_connection(id, |connection| {
         Ok(match connection {
             Connection::Postgres(client) => client.is_valid(Duration::from_secs(30)).is_ok(),
@@ -408,10 +426,10 @@ fn builtin_ping(args: Vec<Value>) -> Result<Vec<Value>, String> {
 /// `__sql_query(connection, sql, params?)` runs one statement and returns
 /// its rows as an array of `{ column = value }` tables with the column names
 /// under `columns`.
-fn builtin_query(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let id = integer_arg(&args, 0, "connection")?;
-    let sql = string_arg(&args, 1, "sql")?;
-    let params = params_arg(&args, 2)?;
+fn builtin_query(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = integer_arg(args, 0, "connection")?;
+    let sql = string_arg(args, 1, "sql")?;
+    let params = params_arg(args, 2)?;
     let result = with_connection(id, |connection| match connection {
         Connection::Postgres(client) => pg_query(client, &sql, &params),
         Connection::MySql(conn) => my_query(conn, &sql, &params),
@@ -424,10 +442,10 @@ fn builtin_query(args: Vec<Value>) -> Result<Vec<Value>, String> {
 /// auto-increment only; nil elsewhere). Without parameters the statement
 /// goes through the simple protocol, which also accepts what servers refuse
 /// to prepare (`BEGIN`, DDL on some versions).
-fn builtin_execute(args: Vec<Value>) -> Result<Vec<Value>, String> {
-    let id = integer_arg(&args, 0, "connection")?;
-    let sql = string_arg(&args, 1, "sql")?;
-    let params = params_arg(&args, 2)?;
+fn builtin_execute(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = integer_arg(args, 0, "connection")?;
+    let sql = string_arg(args, 1, "sql")?;
+    let params = params_arg(args, 2)?;
     let (affected, last_id) = with_connection(id, |connection| match connection {
         Connection::Postgres(client) => pg_execute(client, &sql, &params),
         Connection::MySql(conn) => my_execute(conn, &sql, &params),
@@ -470,9 +488,10 @@ impl Param {
         Ok(Param(match value {
             Value::Nil => None,
             Value::Bool(value) => Some(if *value { "t" } else { "f" }.to_string()),
-            Value::Integer(value) => Some(value.to_string()),
-            Value::Number(value) => Some(float_text(*value)),
-            Value::String(value) => Some(value.clone()),
+            Value::Int(value) => Some(value.to_string()),
+            Value::BigInt(value) => Some(value.to_string()),
+            Value::Float(value) => Some(float_text(*value)),
+            Value::String(value) => Some(value.to_string()),
             other => {
                 return Err(format!(
                     "parameter {} must be nil, a boolean, a number or a string, got {}",
@@ -543,9 +562,9 @@ impl Cell {
         match self {
             Cell::Null => Value::Nil,
             Cell::Bool(value) => Value::Bool(value),
-            Cell::Int(value) => Value::Integer(Int::Small(value)),
-            Cell::Float(value) => Value::Number(value),
-            Cell::Text(value) => Value::String(value),
+            Cell::Int(value) => Value::Int(value),
+            Cell::Float(value) => Value::Float(value),
+            Cell::Text(value) => Value::string(value),
             Cell::List(items) => new_table(items.into_iter().map(Cell::into_value).collect()),
         }
     }
@@ -869,11 +888,11 @@ fn my_params(params: &[Value]) -> Result<mysql::Params, String> {
             Ok(match value {
                 Value::Nil => mysql::Value::NULL,
                 Value::Bool(value) => mysql::Value::Int(i64::from(*value)),
-                Value::Integer(Int::Small(value)) => mysql::Value::Int(*value),
+                Value::Int(value) => mysql::Value::Int(*value),
                 // Past i64 the server parses the digits itself (DECIMAL).
-                Value::Integer(big) => mysql::Value::Bytes(big.to_string().into_bytes()),
-                Value::Number(value) => mysql::Value::Double(*value),
-                Value::String(value) => mysql::Value::Bytes(value.clone().into_bytes()),
+                Value::BigInt(big) => mysql::Value::Bytes(big.to_string().into_bytes()),
+                Value::Float(value) => mysql::Value::Double(*value),
+                Value::String(value) => mysql::Value::Bytes(value.as_bytes().to_vec()),
                 other => {
                     return Err(format!(
                         "parameter {} must be nil, a boolean, a number or a string, got {}",
@@ -894,11 +913,11 @@ fn my_value(value: &mysql::Value, column: &mysql::Column) -> Value {
     use mysql::consts::ColumnType;
     match value {
         mysql::Value::NULL => Value::Nil,
-        mysql::Value::Bytes(bytes) => Value::String(bytes_to_string(bytes)),
-        mysql::Value::Int(value) => Value::Integer(Int::Small(*value)),
-        mysql::Value::UInt(value) => Value::Integer(Int::from_u64(*value)),
-        mysql::Value::Float(value) => Value::Number(f64::from(*value)),
-        mysql::Value::Double(value) => Value::Number(*value),
+        mysql::Value::Bytes(bytes) => Value::string(bytes_to_string(bytes)),
+        mysql::Value::Int(value) => Value::Int(*value),
+        mysql::Value::UInt(value) => Value::from_u64(*value),
+        mysql::Value::Float(value) => Value::Float(f64::from(*value)),
+        mysql::Value::Double(value) => Value::Float(*value),
         mysql::Value::Date(year, month, day, hour, minute, second, micros) => {
             let mut out = format!("{:04}-{:02}-{:02}", year, month, day);
             if column.column_type() != ColumnType::MYSQL_TYPE_DATE {
@@ -910,7 +929,7 @@ fn my_value(value: &mysql::Value, column: &mysql::Column) -> Value {
                     }
                 }
             }
-            Value::String(out)
+            Value::string(out)
         }
         mysql::Value::Time(negative, days, hours, minutes, seconds, micros) => {
             let mut out = format!(
@@ -926,7 +945,7 @@ fn my_value(value: &mysql::Value, column: &mysql::Column) -> Value {
                     out.pop();
                 }
             }
-            Value::String(out)
+            Value::string(out)
         }
     }
 }

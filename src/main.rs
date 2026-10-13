@@ -91,26 +91,12 @@ fn run_cli() {
             }
         }
     } else if action == "run" {
-        // Programs run on the register VM. `--tree-walker` selects the
-        // original AST interpreter instead; `--opt-ir` is accepted for
-        // compatibility and means the default.
-        let use_tree_walker = args.iter().any(|a| a == "--tree-walker");
-        let non_flag_args: Vec<&String> = args
-            .iter()
-            .skip(2)
-            .filter(|a| !a.starts_with('-'))
-            .collect();
-        let Some(path) = non_flag_args.first() else {
-            eprintln!("Usage: {} run <path> [--tree-walker]", args[0]);
+        let Some(path) = args.get(2) else {
+            eprintln!("Usage: {} run <path> [args...]", args[0]);
             process::exit(1);
         };
-        if use_tree_walker {
-            if let Err(err) = runtime::run_file(path) {
-                eprintln!("runtime error: {}", err);
-                process::exit(1);
-            }
-        } else if let Err(err) = vm::run_file(path) {
-            eprintln!("vm error: {}", err);
+        if let Err(err) = vm::run_file(path) {
+            eprintln!("error: {}", err);
             process::exit(1);
         }
     } else if action == "dump-ir" {

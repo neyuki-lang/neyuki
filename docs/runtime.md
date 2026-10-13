@@ -14,7 +14,7 @@ cargo run -- test
 
 `lint` prints tokens and checks parsing. `compile` compiles a file to `.nykb` bytecode. `run` compiles the file (or loads a `.nykb`) and executes it on the register VM. `disasm` prints the bytecode the compiler emits, and `dump-ir` the intermediate representation before and after optimization. `test` runs every `.nyk` file in `tests/`.
 
-Programs go through the optimizing IR pipeline by default. `run --tree-walker` executes the file on the original AST interpreter instead, and `compile --direct` uses the older single-pass bytecode compiler; both exist for comparison and debugging.
+Programs go through the optimizing IR pipeline by default. `compile --direct` and `disasm --direct` use the older single-pass bytecode compiler instead, for comparison and debugging.
 
 ## Builtins
 

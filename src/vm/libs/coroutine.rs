@@ -179,11 +179,7 @@ fn resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
             Value::Native(def) => {
                 let res = (def.func)(vm, resume_args);
                 co_rc.borrow_mut().status = "dead".to_string();
-                // Dead in both registries: register-VM states live in
-                // `co_states`, tree-walker states (bridged resume) in
-                // `coroutines`. One of the two removes is always a no-op.
                 vm.co_states.remove(&co_id);
-                vm.coroutines.remove(&co_id);
                 vm.close_upvalues(0);
                 vm.stack = caller_stack;
                 vm.frames = caller_frames;
@@ -253,7 +249,6 @@ fn resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
             cs.status = "dead".to_string();
             drop(cs);
             vm.co_states.remove(&co_id);
-            vm.coroutines.remove(&co_id);
 
             vm.stack = caller_stack;
             vm.frames = caller_frames;
@@ -268,7 +263,6 @@ fn resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
             cs.status = "dead".to_string();
             drop(cs);
             vm.co_states.remove(&co_id);
-            vm.coroutines.remove(&co_id);
 
             vm.stack = caller_stack;
             vm.frames = caller_frames;
