@@ -1,0 +1,34 @@
+-- utf8: characters rather than bytes.
+
+local word = "héllo wörld"
+assert(#word == 13, "# counts bytes")
+assert(utf8.len(word) == 11, "len counts characters")
+assert(utf8.char(72, 233, 0x1F600) == "Hé😀", "char")
+assert(utf8.codepoint("é") == 233, "codepoint")
+local a, b = utf8.codepoint("ab", 1, 2)
+assert(a == 97 and b == 98, "codepoint range")
+assert(utf8.sub(word, 2, 4) == "éll", "sub by characters")
+assert(utf8.sub(word, -5) == "wörld", "sub from the end")
+assert(utf8.sub(word, 5, 2) == "", "empty sub")
+assert(utf8.offset(word, 3) == 4, "offset of the third character")
+assert(utf8.offset(word, -1) == 13, "offset of the last character")
+assert(utf8.offset("é", 0, 2) == 1, "offset 0 finds the character start")
+
+local seen = {}
+for pos, code in utf8.codes("aé") do
+    seen[#seen + 1] = tostring(pos) .. ":" .. tostring(code)
+end
+assert(table.concat(seen, ",") == "1:97,2:233", "codes yields positions and code points")
+
+local chars = {}
+for c in utf8.chars("日本語") do
+    chars[#chars + 1] = c
+end
+assert(#chars == 3 and chars[2] == "本", "chars yields characters")
+
+local ok = try(utf8.char, 0xD800)
+assert(not ok, "surrogates are not characters")
+local ok2 = try(utf8.codepoint, "é", 2)
+assert(not ok2, "a position inside a character is an error")
+
+print("[pass] utf8")

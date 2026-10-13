@@ -1,297 +1,216 @@
-// UTF-8 standard library for Neyuki VM.
+//! The `utf8` library. Neyuki strings are always valid UTF-8; these
+//! functions work in characters (code points) where `string` works in
+//! bytes. Byte positions are 1-based like everywhere else.
 
-use num_bigint::BigInt;
-use num_traits::ToPrimitive;
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use crate::vm::libs::args::{int_arg, opt_int_arg, str_arg};
+use crate::vm::libs::strlib::{pos_relat_end, pos_relat_start};
 use crate::vm::machine::VM;
 use crate::vm::value::{Value, VmTable};
 
 pub fn create_utf8_lib() -> Value {
-    let t = Rc::new(RefCell::new(VmTable::new()));
-    let mut b = t.borrow_mut();
-
-    b.set_str("char", crate::native!("utf8.char", utf8_char));
-    b.set_str(
-        "codepoint",
-        crate::native!("utf8.codepoint", utf8_codepoint),
-    );
-    b.set_str("len", crate::native!("utf8.len", utf8_len));
-    b.set_str("offset", crate::native!("utf8.offset", utf8_offset));
-    b.set_str("codes", crate::native!("utf8.codes", utf8_codes));
-    b.set_str(
-        "charpattern",
-        Value::str("[\u{0000}-\u{007F}\u{00C2}-\u{00FD}][\u{0080}-\u{00BF}]*"),
-    );
-    drop(b);
-
-    Value::Table(t)
+    let mut table = VmTable::new();
+    macro_rules! reg {
+        ($($name:literal => $func:ident),* $(,)?) => {
+            $(table.set_str($name, crate::native!(concat!("utf8.", $name), $func));)*
+        };
+    }
+    reg! {
+        "char" => utf8_char,
+        "chars" => utf8_chars,
+        "codepoint" => utf8_codepoint,
+        "codes" => utf8_codes,
+        "len" => utf8_len,
+        "offset" => utf8_offset,
+        "sub" => utf8_sub,
+    }
+    crate::vm::libs::args::frozen(table)
 }
 
+/// `utf8.char(...)`: the string made of the given code points.
 fn utf8_char(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let mut out = String::new();
-    for (idx, arg) in args.iter().enumerate() {
-        let code = match arg {
-            Value::Int(i) => i.to_u32().ok_or_else(|| {
-                format!(
-                    "bad argument #{} to 'utf8.char' (value out of range)",
-                    idx + 1
-                )
-            })?,
-            Value::Float(f) => *f as u32,
-            _ => {
-                return Err(format!(
-                    "bad argument #{} to 'utf8.char' (number expected, got {})",
-                    idx + 1,
-                    arg.type_name()
-                ));
-            }
-        };
-
-        if code > 0x10FFFF || (0xD800..=0xDFFF).contains(&code) {
-            return Err(format!(
-                "bad argument #{} to 'utf8.char' (value out of range)",
-                idx + 1
-            ));
-        }
-
-        if let Some(c) = char::from_u32(code) {
-            out.push(c);
-        } else {
-            return Err(format!(
-                "bad argument #{} to 'utf8.char' (invalid codepoint)",
-                idx + 1
-            ));
-        }
+    let mut out = String::with_capacity(args.len());
+    for index in 0..args.len() {
+        let code = int_arg(args, index, &format!("code point {}", index + 1))?;
+        let c = u32::try_from(code)
+            .ok()
+            .and_then(char::from_u32)
+            .ok_or_else(|| format!("code point {} is not a valid character", code))?;
+        out.push(c);
     }
     Ok(vec![Value::string(out)])
 }
 
+/// The byte range `i..=j` (1-based, negative from the end) as a 0-based
+/// half-open range that starts on a character boundary.
+fn byte_range(s: &str, i: i64, j: i64) -> Result<(usize, usize), String> {
+    let start = pos_relat_start(i, s.len()) - 1;
+    let end = pos_relat_end(j, s.len());
+    if start < end && !s.is_char_boundary(start) {
+        return Err(format!("byte position {} is inside a character", start + 1));
+    }
+    Ok((start, end.max(start)))
+}
+
+/// `utf8.codepoint(s, i?, j?)`: the code points of the characters that
+/// start between byte positions `i` and `j` (both default to `i`).
 fn utf8_codepoint(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let s = match args.first() {
-        Some(Value::String(s)) => &**s,
-        _ => return Err("bad argument #1 to 'utf8.codepoint' (string expected)".to_string()),
-    };
-
-    let len = s.len() as isize;
-    let i = match args.get(1) {
-        Some(Value::Int(n)) => n.to_isize().unwrap_or(1),
-        Some(Value::Float(f)) => *f as isize,
-        _ => 1,
-    };
-    let j = match args.get(2) {
-        Some(Value::Int(n)) => n.to_isize().unwrap_or(i),
-        Some(Value::Float(f)) => *f as isize,
-        _ => i,
-    };
-
-    let start_byte = if i > 0 {
-        (i - 1).min(len) as usize
-    } else {
-        (len + i).max(0) as usize
-    };
-
-    let end_byte = if j > 0 {
-        j.min(len) as usize
-    } else {
-        (len + j + 1).max(0) as usize
-    };
-
-    if start_byte >= end_byte || start_byte >= s.len() {
-        return Ok(Vec::new());
-    }
-
-    let slice = match s.get(start_byte..end_byte) {
-        Some(sl) => sl,
-        None => return Err("invalid UTF-8 byte boundary in slice".to_string()),
-    };
-
-    let mut results = Vec::new();
-    for ch in slice.chars() {
-        results.push(Value::from_bigint(BigInt::from(ch as u32)));
-    }
-
-    Ok(results)
+    let s = str_arg(args, 0, "s")?;
+    let i = opt_int_arg(args, 1, "i", 1)?;
+    let j = opt_int_arg(args, 2, "j", i)?;
+    let (start, end) = byte_range(s, i, j)?;
+    Ok(s[start..]
+        .char_indices()
+        .take_while(|(offset, _)| start + offset < end)
+        .map(|(_, c)| Value::Int(c as i64))
+        .collect())
 }
 
+/// `utf8.len(s, i?, j?)`: how many characters start between byte positions
+/// `i` and `j`.
 fn utf8_len(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let s = match args.first() {
-        Some(Value::String(s)) => &**s,
-        _ => return Err("bad argument #1 to 'utf8.len' (string expected)".to_string()),
-    };
-
-    let len = s.len() as isize;
-    let i = match args.get(1) {
-        Some(Value::Int(n)) => n.to_isize().unwrap_or(1),
-        Some(Value::Float(f)) => *f as isize,
-        _ => 1,
-    };
-    let j = match args.get(2) {
-        Some(Value::Int(n)) => n.to_isize().unwrap_or(-1),
-        Some(Value::Float(f)) => *f as isize,
-        _ => -1,
-    };
-
-    let start_byte = if i > 0 {
-        (i - 1).min(len) as usize
-    } else {
-        (len + i).max(0) as usize
-    };
-
-    let end_byte = if j > 0 {
-        j.min(len) as usize
-    } else {
-        (len + j + 1).max(0) as usize
-    };
-
-    if start_byte > end_byte || start_byte > s.len() {
-        return Ok(vec![Value::from_bigint(BigInt::from(0))]);
-    }
-
-    let bytes = s.as_bytes();
-    let slice = &bytes[start_byte..end_byte.min(bytes.len())];
-
-    match std::str::from_utf8(slice) {
-        Ok(valid_str) => Ok(vec![Value::from_bigint(BigInt::from(
-            valid_str.chars().count(),
-        ))]),
-        Err(err) => {
-            let error_pos = start_byte + err.valid_up_to() + 1;
-            Ok(vec![
-                Value::Nil,
-                Value::from_bigint(BigInt::from(error_pos)),
-            ])
-        }
-    }
+    let s = str_arg(args, 0, "s")?;
+    let i = opt_int_arg(args, 1, "i", 1)?;
+    let j = opt_int_arg(args, 2, "j", -1)?;
+    let (start, end) = byte_range(s, i, j)?;
+    let count = s[start..]
+        .char_indices()
+        .take_while(|(offset, _)| start + offset < end)
+        .count();
+    Ok(vec![Value::from_usize(count)])
 }
 
+/// `utf8.offset(s, n, i?)`: the byte position where the `n`th character
+/// counting from byte position `i` starts (backwards for a negative `n`;
+/// `n = 0` finds the start of the character containing `i`), or nil.
 fn utf8_offset(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let s = match args.first() {
-        Some(Value::String(s)) => &**s,
-        _ => return Err("bad argument #1 to 'utf8.offset' (string expected)".to_string()),
-    };
-
-    let n = match args.get(1) {
-        Some(Value::Int(i)) => i.to_isize().unwrap_or(1),
-        Some(Value::Float(f)) => *f as isize,
-        _ => return Err("bad argument #2 to 'utf8.offset' (number expected)".to_string()),
-    };
-
-    let i = match args.get(2) {
-        Some(Value::Int(v)) => {
-            v.to_isize()
-                .unwrap_or(if n >= 0 { 1 } else { s.len() as isize + 1 })
-        }
-        Some(Value::Float(f)) => *f as isize,
-        _ => {
-            if n >= 0 {
-                1
-            } else {
-                s.len() as isize + 1
-            }
-        }
-    };
-
-    let len = s.len() as isize;
-    let start_byte = if i > 0 {
-        (i - 1).min(len) as usize
-    } else {
-        (len + i).max(0) as usize
-    };
-
-    if start_byte > s.len() {
+    let s = str_arg(args, 0, "s")?;
+    let n = int_arg(args, 1, "n")?;
+    let default_i = if n >= 0 { 1 } else { s.len() as i64 + 1 };
+    let i = opt_int_arg(args, 2, "i", default_i)?;
+    let mut pos = pos_relat_start(i, s.len()) - 1;
+    if pos > s.len() {
         return Ok(vec![Value::Nil]);
     }
-
     if n == 0 {
-        // Find beginning of current char
-        let mut pos = start_byte;
         while pos > 0 && !s.is_char_boundary(pos) {
             pos -= 1;
         }
-        return Ok(vec![Value::from_bigint(BigInt::from(pos + 1))]);
+        return Ok(vec![Value::from_usize(pos + 1)]);
     }
-
-    let mut count = 0isize;
-    if n > 0 {
-        for (idx, _) in s[start_byte..].char_indices() {
-            count += 1;
-            if count == n {
-                return Ok(vec![Value::from_bigint(BigInt::from(start_byte + idx + 1))]);
-            }
-        }
+    if !s.is_char_boundary(pos) {
+        return Err(format!("byte position {} is inside a character", pos + 1));
+    }
+    let found = if n > 0 {
+        let skip = (n - 1) as usize;
+        s[pos..]
+            .char_indices()
+            .map(|(offset, _)| pos + offset)
+            .chain(std::iter::once(s.len()))
+            .nth(skip)
     } else {
-        // n < 0
-        let target = -n;
-        let mut indices: Vec<usize> = Vec::new();
-        for (idx, _) in s[..start_byte].char_indices() {
-            indices.push(idx);
-        }
-        if (target as usize) <= indices.len() {
-            let pos = indices[indices.len() - target as usize];
-            return Ok(vec![Value::from_bigint(BigInt::from(pos + 1))]);
-        }
-    }
-
-    Ok(vec![Value::Nil])
+        let back = n.unsigned_abs() as usize;
+        s[..pos]
+            .char_indices()
+            .rev()
+            .map(|(offset, _)| offset)
+            .nth(back - 1)
+    };
+    Ok(vec![match found {
+        Some(p) if p <= s.len() => Value::from_usize(p + 1),
+        _ => Value::Nil,
+    }])
 }
 
-/// One step of the `utf8.codes` iterator: the state table carries the
-/// string and the byte position of the next character.
-fn utf8_iter(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let state = match args.first() {
-        Some(Value::Table(t)) => t.clone(),
-        _ => return Ok(vec![Value::Nil]),
-    };
+/// `utf8.sub(s, i, j?)`: the characters from the `i`th to the `j`th,
+/// counted like `string.sub` counts bytes (negative from the end).
+fn utf8_sub(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let s = str_arg(args, 0, "s")?;
+    let i = opt_int_arg(args, 1, "i", 1)?;
+    let j = opt_int_arg(args, 2, "j", -1)?;
+    let count = s.chars().count();
+    let first = pos_relat_start(i, count);
+    let last = pos_relat_end(j, count);
+    if first > last {
+        return Ok(vec![Value::str("")]);
+    }
+    let out: String = s.chars().skip(first - 1).take(last + 1 - first).collect();
+    Ok(vec![Value::string(out)])
+}
 
-    let (str_val, pos_val) = {
-        let b = state.borrow();
-        (b.get_str("string"), b.get_str("pos"))
-    };
+/// An iterator over `s`: a table holding the string and the next byte
+/// offset, called through `__call`.
+fn iterator(s: &str, step: Value) -> Value {
+    let mut meta = VmTable::new();
+    meta.set_str("__call", step);
+    let mut state = VmTable::new();
+    state.set_str("s", Value::str(s));
+    state.set_str("pos", Value::Int(0));
+    state.metatable = Some(Rc::new(RefCell::new(meta)));
+    Value::Table(Rc::new(RefCell::new(state)))
+}
 
-    let s = match str_val {
-        Value::String(s) => s,
-        _ => return Ok(vec![Value::Nil]),
+/// The string and next byte offset an iterator table carries.
+fn iterator_state(
+    args: &[Value],
+) -> Option<(Rc<RefCell<VmTable>>, crate::vm::value::StrRef, usize)> {
+    let Some(Value::Table(state)) = args.first() else {
+        return None;
     };
-
-    let pos = match pos_val {
-        Value::Int(i) => i.to_usize().unwrap_or(1),
-        _ => 1,
+    let st = state.borrow();
+    let (Value::String(s), Value::Int(pos)) = (st.get_str("s"), st.get_str("pos")) else {
+        return None;
     };
+    drop(st);
+    Some((state.clone(), s, pos as usize))
+}
 
-    let start_byte = pos.saturating_sub(1);
-    if start_byte >= s.len() {
+fn codes_step(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let Some((state, s, pos)) = iterator_state(args) else {
         return Ok(vec![Value::Nil]);
-    }
-
-    if let Some(ch) = s[start_byte..].chars().next() {
-        let next_pos = pos + ch.len_utf8();
-        state
-            .borrow_mut()
-            .set_str("pos", Value::from_bigint(BigInt::from(next_pos)));
-        Ok(vec![
-            Value::from_bigint(BigInt::from(pos)),
-            Value::from_bigint(BigInt::from(ch as u32)),
-        ])
-    } else {
-        Ok(vec![Value::Nil])
+    };
+    match s.get(pos..).and_then(|rest| rest.chars().next()) {
+        Some(c) => {
+            state
+                .borrow_mut()
+                .set_str("pos", Value::from_usize(pos + c.len_utf8()));
+            Ok(vec![Value::from_usize(pos + 1), Value::Int(c as i64)])
+        }
+        None => Ok(vec![Value::Nil]),
     }
 }
 
-fn utf8_codes(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let s = match args.first() {
-        Some(Value::String(s)) => s.clone(),
-        _ => return Err("bad argument #1 to 'utf8.codes' (string expected)".to_string()),
+fn chars_step(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let Some((state, s, pos)) = iterator_state(args) else {
+        return Ok(vec![Value::Nil]);
     };
+    match s.get(pos..).and_then(|rest| rest.chars().next()) {
+        Some(c) => {
+            state
+                .borrow_mut()
+                .set_str("pos", Value::from_usize(pos + c.len_utf8()));
+            Ok(vec![Value::string(c.to_string())])
+        }
+        None => Ok(vec![Value::Nil]),
+    }
+}
 
-    // Return a stateful table iterator or closure
-    let tbl = Rc::new(RefCell::new(VmTable::new()));
-    tbl.borrow_mut().set_str("string", Value::String(s));
-    tbl.borrow_mut()
-        .set_str("pos", Value::from_bigint(BigInt::from(1)));
+/// `utf8.codes(s)`: iterates `position, code point` for each character.
+fn utf8_codes(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let s = str_arg(args, 0, "s")?;
+    Ok(vec![iterator(
+        s,
+        crate::native!("utf8.codes iterator", codes_step),
+    )])
+}
 
-    let iter_fn = crate::native!("utf8_iter", utf8_iter);
-
-    Ok(vec![iter_fn, Value::Table(tbl)])
+/// `utf8.chars(s)`: iterates each character as a string.
+fn utf8_chars(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let s = str_arg(args, 0, "s")?;
+    Ok(vec![iterator(
+        s,
+        crate::native!("utf8.chars iterator", chars_step),
+    )])
 }
