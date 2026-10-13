@@ -307,7 +307,8 @@ pub fn parse_table(parser: &mut Parser) -> Result<Expr, String> {
                 entries.push(TableEntry::positional(value));
             }
 
-            if !parser.match_symbol(",") {
+            // Entries are separated by `,` or `;`, and one may trail.
+            if !(parser.match_symbol(",") || parser.match_symbol(";")) || parser.check_symbol("}") {
                 break;
             }
         }

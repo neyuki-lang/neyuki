@@ -113,4 +113,8 @@ assert(positional[1] == "first" and #positional == 2, "positional entries count 
 assert(_G.print == print, "_G reads globals")
 assert(string.find(_VERSION, "Neyuki") == 1, "_VERSION")
 
+-- entries may be separated by `;` and end with a separator
+local trailing = { 1; 2, name = "x", }
+assert(#trailing == 2 and trailing.name == "x", "trailing separators")
+
 print("[pass] tables and iteration")
