@@ -1,0 +1,41 @@
+-- json: exact numbers, deterministic objects, options and strict parsing.
+
+assert(json.encode({ b = 1, a = 2, c = { 3, 4 } }) == '{"a":2,"b":1,"c":[3,4]}', "keys are sorted")
+assert(json.encode(2 ^ 70) == "1180591620717411303424", "big integers stay exact")
+assert(json.encode(1.0) == "1.0" and json.encode(0.1) == "0.1", "floats keep a fraction")
+assert(json.encode(1e300) == "1e300", "large floats use an exponent")
+assert(json.encode("a\"b\n") == '"a\\"b\\n"', "strings are escaped")
+assert(json.encode({}) == "{}" and json.encode(json.array()) == "[]", "empty object and array")
+assert(json.encode({ 1, json.null, 3 }) == "[1,null,3]", "json.null encodes as null")
+assert(json.encode({ [1.5] = "f" }) == '{"1.5":"f"}', "number keys become strings")
+local pretty = json.encode({ list = { 1 } }, { indent = 2 })
+assert(pretty == '{\n  "list": [\n    1\n  ]\n}', "indent: " .. pretty)
+
+local custom = setmetatable({ secret = 1 }, { __tojson = function(self) return { visible = true } end })
+assert(json.encode(custom) == '{"visible":true}', "__tojson")
+
+local loop = {}
+loop.self = loop
+local ok, err = try(json.encode, loop)
+assert(not ok and string.find(err, "contains itself") != nil, "cycles are rejected")
+local okf = try(json.encode, 0 / 0)
+assert(not okf, "NaN is rejected")
+
+local value = json.decode('{"n": 12345678901234567890123, "f": 2.5, "s": "\\u00e9\\ud83d\\ude00", "list": [1, null, 3], "t": true}')
+assert(value.n == 12345678901234567890123, "integers decode exactly")
+assert(value.f == 2.5 and value.t == true, "floats and booleans")
+assert(value.s == "é😀", "escapes and surrogate pairs")
+assert(#value.list == 3 and value.list[2] == nil, "null in an array leaves a hole")
+local kept = json.decode('{"x": null}', { keepNull = true })
+assert(kept.x == json.null, "keepNull keeps the key")
+
+for _, bad in { "[1,]", "{\"a\" 1}", "01", "--1", "1.", "\"\\x\"", "[1] 2", "nul" } do
+    local okb, errb = try(json.decode, bad)
+    assert(not okb, "rejects " .. bad)
+    assert(string.find(errb, "line 1, column") != nil, "errors carry a position: " .. errb)
+end
+
+local round = json.decode(json.encode({ name = "neyuki", tags = { "a", "b" }, n = 1.5 }))
+assert(round.name == "neyuki" and round.tags[2] == "b" and round.n == 1.5, "round trip")
+
+print("[pass] json")

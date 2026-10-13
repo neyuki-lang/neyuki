@@ -1,108 +1,267 @@
-// JSON encoding and decoding library for Neyuki VM.
+//! The `json` library.
+//!
+//! `encode` turns nil, booleans, numbers, strings and tables into JSON text:
+//! a table with only an array part becomes an array, anything else an
+//! object with its keys sorted. `decode` parses strict JSON (RFC 8259);
+//! integers stay exact, other numbers become floats.
 
-use num_bigint::BigInt;
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::str::FromStr;
 
+use num_bigint::BigInt;
+
+use crate::vm::libs::args::table_arg;
 use crate::vm::machine::VM;
 use crate::vm::value::{StrRef, Value, VmTable};
 
-pub fn create_json_lib() -> Value {
-    let t = Rc::new(RefCell::new(VmTable::new()));
-    let mut b = t.borrow_mut();
+const MAX_DEPTH: usize = 256;
 
-    b.set_str("encode", crate::native!("json.encode", json_encode));
-    b.set_str("decode", crate::native!("json.decode", json_decode));
-
-    Value::Table(t.clone())
-}
-
-const MAX_JSON_DEPTH: usize = 256;
-
-/// The longest JSON text `encode` produces. A table that shares a subtable
-/// under several keys, level after level, encodes to exponentially much text
+/// The longest text `encode` produces. A table that shares a subtable under
+/// several keys, level after level, encodes to exponentially much text
 /// while staying under the depth limit.
-const MAX_JSON_OUTPUT: usize = 64 * 1024 * 1024;
+const MAX_OUTPUT: usize = 64 * 1024 * 1024;
 
-pub(crate) fn encode_to_string(val: &Value) -> Result<String, String> {
-    let mut out = String::new();
-    encode_value(val, &mut out, 0)?;
-    Ok(out)
+/// Marks a table in its metatable as one `encode` writes as an array.
+const ARRAY_MARK: &str = "__jsonarray";
+
+pub fn create_json_lib() -> Value {
+    let mut table = VmTable::new();
+    table.set_str("encode", crate::native!("json.encode", json_encode));
+    table.set_str("decode", crate::native!("json.decode", json_decode));
+    table.set_str("array", crate::native!("json.array", json_array));
+    table.set_str("null", null_sentinel());
+    crate::vm::libs::args::frozen(table)
 }
 
-fn json_encode(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let val = args.first().unwrap_or(&Value::Nil);
-    let out = encode_to_string(val)?;
-    Ok(vec![Value::string(out)])
+thread_local! {
+    static NULL: Rc<RefCell<VmTable>> = {
+        let mut meta = VmTable::new();
+        meta.set_str("__tostring", crate::native!("json.null", null_tostring));
+        let mut null = VmTable::new();
+        null.metatable = Some(Rc::new(RefCell::new(meta)));
+        null.frozen = true;
+        Rc::new(RefCell::new(null))
+    };
 }
 
-fn encode_value(val: &Value, out: &mut String, depth: usize) -> Result<(), String> {
-    if depth >= MAX_JSON_DEPTH {
-        return Err("JSON nesting depth limit (256) exceeded during encode".to_string());
+/// `json.null`: a value that encodes as `null`, and what `decode` produces
+/// for `null` with `keepNull`, so the key stays present.
+fn null_sentinel() -> Value {
+    NULL.with(|n| Value::Table(n.clone()))
+}
+
+fn is_null(value: &Value) -> bool {
+    matches!(value, Value::Table(t) if NULL.with(|n| Rc::ptr_eq(n, t)))
+}
+
+fn null_tostring(_vm: &mut VM, _args: &[Value]) -> Result<Vec<Value>, String> {
+    Ok(vec![Value::str("null")])
+}
+
+/// `json.array(t?)`: marks `t` (or a new table) so it always encodes as an
+/// array, even when empty.
+fn json_array(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let table = match args.first() {
+        None | Some(Value::Nil) => Rc::new(RefCell::new(VmTable::new())),
+        _ => table_arg(args, 0, "t")?.clone(),
+    };
+    let meta = table.borrow().metatable.clone();
+    let meta = meta.unwrap_or_else(|| {
+        let meta = Rc::new(RefCell::new(VmTable::new()));
+        table.borrow_mut().metatable = Some(meta.clone());
+        meta
+    });
+    meta.borrow_mut().set_str(ARRAY_MARK, Value::Bool(true));
+    Ok(vec![Value::Table(table)])
+}
+
+// ---------------------------------------------------------------------------
+// encode
+// ---------------------------------------------------------------------------
+
+struct Encoder<'a> {
+    vm: &'a mut VM,
+    out: String,
+    indent: String,
+    sort_keys: bool,
+    /// Tables being encoded, to reject cycles.
+    open: Vec<*const RefCell<VmTable>>,
+}
+
+/// `json.encode(value, options?)` with `indent` (a number of spaces or a
+/// string; compact by default) and `sortKeys` (true by default).
+fn json_encode(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let value = args.first().cloned().unwrap_or(Value::Nil);
+    let (indent, sort_keys) = match args.get(1) {
+        None | Some(Value::Nil) => (String::new(), true),
+        Some(Value::Table(opts)) => {
+            let opts = opts.borrow();
+            let indent = match opts.get_str("indent") {
+                Value::Nil => String::new(),
+                Value::Int(n) if (0..=16).contains(&n) => " ".repeat(n as usize),
+                Value::String(s) => s.to_string(),
+                _ => return Err("indent must be a number from 0 to 16 or a string".to_string()),
+            };
+            let sort_keys = !matches!(opts.get_str("sortKeys"), Value::Bool(false));
+            (indent, sort_keys)
+        }
+        Some(other) => {
+            return Err(format!(
+                "options must be a table, got {}",
+                other.type_name()
+            ));
+        }
+    };
+    let mut encoder = Encoder {
+        vm,
+        out: String::new(),
+        indent,
+        sort_keys,
+        open: Vec::new(),
+    };
+    encoder.value(&value, 0)?;
+    Ok(vec![Value::string(encoder.out)])
+}
+
+fn format_float(f: f64) -> Option<String> {
+    if !f.is_finite() {
+        return None;
     }
-    if out.len() > MAX_JSON_OUTPUT {
-        return Err(format!(
-            "JSON output exceeds the {} MiB limit during encode",
-            MAX_JSON_OUTPUT / (1024 * 1024)
-        ));
-    }
-    match val {
-        Value::Nil => out.push_str("null"),
-        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
-        Value::Int(i) => out.push_str(&i.to_string()),
-        Value::Float(f) => {
-            if f.is_nan() || f.is_infinite() {
-                out.push_str("null");
-            } else {
-                out.push_str(&f.to_string());
+    // Debug formatting is the shortest text that reads back to the same
+    // float, keeps a fraction or exponent (`1.0`, `1e300`) so the value
+    // stays a float, and never prints hundreds of digits.
+    Some(format!("{:?}", f))
+}
+
+impl Encoder<'_> {
+    fn newline(&mut self, depth: usize) {
+        if !self.indent.is_empty() {
+            self.out.push('\n');
+            for _ in 0..depth {
+                self.out.push_str(&self.indent);
             }
         }
-        Value::String(s) => encode_string(s, out),
-        Value::Table(t) => {
+    }
+
+    fn value(&mut self, value: &Value, depth: usize) -> Result<(), String> {
+        if depth >= MAX_DEPTH {
+            return Err(format!("nesting is deeper than {} levels", MAX_DEPTH));
+        }
+        if self.out.len() > MAX_OUTPUT {
+            return Err(format!(
+                "output exceeds the {} MiB limit",
+                MAX_OUTPUT / (1024 * 1024)
+            ));
+        }
+        match value {
+            Value::Nil => self.out.push_str("null"),
+            Value::Bool(b) => self.out.push_str(if *b { "true" } else { "false" }),
+            Value::Int(i) => self.out.push_str(&i.to_string()),
+            Value::BigInt(i) => self.out.push_str(&i.to_string()),
+            Value::Float(f) => match format_float(*f) {
+                Some(text) => self.out.push_str(&text),
+                None => return Err(format!("cannot encode {} as JSON", f)),
+            },
+            Value::String(s) => write_string(&mut self.out, s),
+            Value::Table(_) if is_null(value) => self.out.push_str("null"),
+            Value::Table(t) => {
+                let custom = t.borrow().metamethod("__tojson");
+                if let Some(handler) = custom {
+                    let result = self
+                        .vm
+                        .call_function(handler, std::slice::from_ref(value))?;
+                    let result = result.into_iter().next().unwrap_or(Value::Nil);
+                    if let Value::Table(r) = &result
+                        && Rc::ptr_eq(r, t)
+                    {
+                        return Err("__tojson returned its own table".to_string());
+                    }
+                    return self.value(&result, depth + 1);
+                }
+                let ptr = Rc::as_ptr(t);
+                if self.open.contains(&ptr) {
+                    return Err("cannot encode a table that contains itself".to_string());
+                }
+                self.open.push(ptr);
+                let result = self.table(t, depth);
+                self.open.pop();
+                result?;
+            }
+            other => {
+                return Err(format!("cannot encode a {} as JSON", other.type_name()));
+            }
+        }
+        Ok(())
+    }
+
+    fn table(&mut self, t: &Rc<RefCell<VmTable>>, depth: usize) -> Result<(), String> {
+        let (is_array, items, entries) = {
             let tbl = t.borrow();
-            if !tbl.array.is_empty() && tbl.fields.is_empty() {
-                // Encode as JSON array
-                out.push('[');
-                for (idx, item) in tbl.array.iter().enumerate() {
-                    if idx > 0 {
-                        out.push(',');
-                    }
-                    encode_value(item, out, depth + 1)?;
-                }
-                out.push(']');
+            let marked = tbl
+                .metatable
+                .as_ref()
+                .is_some_and(|m| m.borrow().get_str(ARRAY_MARK).is_truthy());
+            let has_keys = !tbl.fields.is_empty() || tbl.general.is_some();
+            if (marked || !tbl.array.is_empty()) && !has_keys {
+                (true, tbl.array.clone(), Vec::new())
             } else {
-                // Encode as JSON object
-                out.push('{');
-                let mut first = true;
-                for (key, item) in &tbl.fields {
-                    if !first {
-                        out.push(',');
-                    }
-                    first = false;
-                    encode_string(key, out);
-                    out.push(':');
-                    encode_value(item, out, depth + 1)?;
-                }
-                // If array elements also exist in mixed table, include them as numeric string keys
-                for (idx, item) in tbl.array.iter().enumerate() {
-                    if !first {
-                        out.push(',');
-                    }
-                    first = false;
-                    encode_string(&(idx + 1).to_string(), out);
-                    out.push(':');
-                    encode_value(item, out, depth + 1)?;
-                }
-                out.push('}');
+                let entries = crate::vm::libs::table::entries(&tbl);
+                (false, Vec::new(), entries)
             }
+        };
+        if is_array {
+            self.out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    self.out.push(',');
+                }
+                self.newline(depth + 1);
+                self.value(item, depth + 1)?;
+            }
+            if !items.is_empty() {
+                self.newline(depth);
+            }
+            self.out.push(']');
+            return Ok(());
         }
-        _ => return Err(format!("cannot encode {} to JSON", val.type_name())),
+        let mut pairs = Vec::with_capacity(entries.len());
+        for (key, value) in entries {
+            let key = match key {
+                Value::String(s) => s.to_string(),
+                Value::Int(_) | Value::BigInt(_) => key.to_string(),
+                Value::Float(f) => format_float(f).unwrap_or_default(),
+                other => {
+                    return Err(format!(
+                        "cannot encode a table key of type {} as JSON",
+                        other.type_name()
+                    ));
+                }
+            };
+            pairs.push((key, value));
+        }
+        if self.sort_keys {
+            pairs.sort_by(|a, b| a.0.cmp(&b.0));
+        }
+        self.out.push('{');
+        let separator = if self.indent.is_empty() { ":" } else { ": " };
+        for (i, (key, value)) in pairs.iter().enumerate() {
+            if i > 0 {
+                self.out.push(',');
+            }
+            self.newline(depth + 1);
+            write_string(&mut self.out, key);
+            self.out.push_str(separator);
+            self.value(value, depth + 1)?;
+        }
+        if !pairs.is_empty() {
+            self.newline(depth);
+        }
+        self.out.push('}');
+        Ok(())
     }
-    Ok(())
 }
 
-fn encode_string(s: &str, out: &mut String) {
+fn write_string(out: &mut String, s: &str) {
     out.push('"');
     for c in s.chars() {
         match c {
@@ -111,288 +270,313 @@ fn encode_string(s: &str, out: &mut String) {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            '\x08' => out.push_str("\\b"),
-            '\x0c' => out.push_str("\\f"),
-            _ if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            _ => out.push(c),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
         }
     }
     out.push('"');
 }
 
-pub fn decode_from_str(s: &str) -> Result<Value, String> {
-    let mut parser = JsonParser::new(s);
-    let val = parser.parse_value()?;
-    parser.skip_whitespace();
-    if parser.cursor < parser.chars.len() {
-        return Err(format!(
-            "unexpected trailing data at position {}",
-            parser.cursor
-        ));
-    }
-    Ok(val)
-}
+// ---------------------------------------------------------------------------
+// decode
+// ---------------------------------------------------------------------------
 
+/// `json.decode(text, options?)`. With `keepNull`, `null` becomes
+/// `json.null` instead of nil, so object keys holding it stay present.
 fn json_decode(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let s = match args.first() {
-        Some(Value::String(s)) => &**s,
-        _ => return Err("bad argument #1 to 'json.decode' (string expected)".to_string()),
+    let text = match args.first() {
+        Some(Value::String(s)) => s,
+        Some(other) => {
+            return Err(format!("text must be a string, got {}", other.type_name()));
+        }
+        None => return Err("text must be provided".to_string()),
     };
-
-    let val = decode_from_str(s)?;
-    Ok(vec![val])
+    let keep_null = match args.get(1) {
+        Some(Value::Table(opts)) => opts.borrow().get_str("keepNull").is_truthy(),
+        _ => false,
+    };
+    Ok(vec![decode_with(text, keep_null)?])
 }
 
-struct JsonParser {
-    chars: Vec<char>,
-    cursor: usize,
+/// Parses a whole JSON text.
+pub fn decode_from_str(text: &str) -> Result<Value, String> {
+    decode_with(text, false)
+}
+
+fn decode_with(text: &str, keep_null: bool) -> Result<Value, String> {
+    let mut parser = Parser {
+        bytes: text.as_bytes(),
+        pos: 0,
+        depth: 0,
+        keep_null,
+    };
+    parser.skip_whitespace();
+    let value = parser.value()?;
+    parser.skip_whitespace();
+    if parser.pos < parser.bytes.len() {
+        return Err(parser.error("unexpected data after the value"));
+    }
+    Ok(value)
+}
+
+struct Parser<'a> {
+    bytes: &'a [u8],
+    pos: usize,
     depth: usize,
+    keep_null: bool,
 }
 
-impl JsonParser {
-    fn new(input: &str) -> Self {
-        Self {
-            chars: input.chars().collect(),
-            cursor: 0,
-            depth: 0,
-        }
+impl Parser<'_> {
+    fn error(&self, message: &str) -> String {
+        let before = &self.bytes[..self.pos.min(self.bytes.len())];
+        let line = before.iter().filter(|b| **b == b'\n').count() + 1;
+        let column = before.iter().rev().take_while(|b| **b != b'\n').count() + 1;
+        format!(
+            "invalid JSON at line {}, column {}: {}",
+            line, column, message
+        )
     }
 
-    fn peek(&self) -> Option<char> {
-        self.chars.get(self.cursor).copied()
-    }
-
-    fn advance(&mut self) -> Option<char> {
-        if self.cursor < self.chars.len() {
-            let ch = self.chars[self.cursor];
-            self.cursor += 1;
-            Some(ch)
-        } else {
-            None
-        }
+    fn peek(&self) -> Option<u8> {
+        self.bytes.get(self.pos).copied()
     }
 
     fn skip_whitespace(&mut self) {
-        while let Some(c) = self.peek() {
-            if c.is_whitespace() {
-                self.cursor += 1;
-            } else {
-                break;
+        while matches!(self.peek(), Some(b' ' | b'\t' | b'\n' | b'\r')) {
+            self.pos += 1;
+        }
+    }
+
+    fn expect_literal(&mut self, word: &str, value: Value) -> Result<Value, String> {
+        if self.bytes[self.pos..].starts_with(word.as_bytes()) {
+            self.pos += word.len();
+            Ok(value)
+        } else {
+            Err(self.error("unknown literal"))
+        }
+    }
+
+    fn value(&mut self) -> Result<Value, String> {
+        match self.peek() {
+            None => Err(self.error("unexpected end of input")),
+            Some(b'n') => {
+                let null = if self.keep_null {
+                    null_sentinel()
+                } else {
+                    Value::Nil
+                };
+                self.expect_literal("null", null)
+            }
+            Some(b't') => self.expect_literal("true", Value::Bool(true)),
+            Some(b'f') => self.expect_literal("false", Value::Bool(false)),
+            Some(b'"') => self.string().map(Value::string),
+            Some(b'[') => self.nested(Self::array),
+            Some(b'{') => self.nested(Self::object),
+            Some(b'-' | b'0'..=b'9') => self.number(),
+            Some(_) => Err(self.error("expected a value")),
+        }
+    }
+
+    fn nested(&mut self, parse: fn(&mut Self) -> Result<Value, String>) -> Result<Value, String> {
+        if self.depth >= MAX_DEPTH {
+            return Err(self.error("nesting is too deep"));
+        }
+        self.depth += 1;
+        let result = parse(self);
+        self.depth -= 1;
+        result
+    }
+
+    fn digits(&mut self) -> usize {
+        let start = self.pos;
+        while matches!(self.peek(), Some(b'0'..=b'9')) {
+            self.pos += 1;
+        }
+        self.pos - start
+    }
+
+    fn number(&mut self) -> Result<Value, String> {
+        let start = self.pos;
+        if self.peek() == Some(b'-') {
+            self.pos += 1;
+        }
+        match self.peek() {
+            Some(b'0') => self.pos += 1,
+            Some(b'1'..=b'9') => {
+                self.digits();
+            }
+            _ => return Err(self.error("expected a digit")),
+        }
+        let mut is_float = false;
+        if self.peek() == Some(b'.') {
+            self.pos += 1;
+            is_float = true;
+            if self.digits() == 0 {
+                return Err(self.error("expected a digit after '.'"));
             }
         }
-    }
-
-    fn parse_value(&mut self) -> Result<Value, String> {
-        self.skip_whitespace();
-        let ch = self
-            .peek()
-            .ok_or_else(|| "unexpected end of JSON input".to_string())?;
-        match ch {
-            'n' => self.parse_null(),
-            't' | 'f' => self.parse_bool(),
-            '"' => self.parse_string().map(Value::string),
-            '[' => self.parse_array(),
-            '{' => self.parse_object(),
-            '-' | '0'..='9' => self.parse_number(),
-            _ => Err(format!(
-                "unexpected character '{}' at position {}",
-                ch, self.cursor
-            )),
+        if matches!(self.peek(), Some(b'e' | b'E')) {
+            self.pos += 1;
+            is_float = true;
+            if matches!(self.peek(), Some(b'+' | b'-')) {
+                self.pos += 1;
+            }
+            if self.digits() == 0 {
+                return Err(self.error("expected a digit in the exponent"));
+            }
         }
-    }
-
-    fn parse_null(&mut self) -> Result<Value, String> {
-        if self.chars[self.cursor..].starts_with(&['n', 'u', 'l', 'l']) {
-            self.cursor += 4;
-            Ok(Value::Nil)
+        let text = std::str::from_utf8(&self.bytes[start..self.pos]).unwrap_or("0");
+        if is_float {
+            text.parse::<f64>()
+                .map(Value::Float)
+                .map_err(|_| self.error("invalid number"))
+        } else if let Ok(i) = text.parse::<i64>() {
+            Ok(Value::Int(i))
         } else {
-            Err(format!("invalid literal at position {}", self.cursor))
+            text.parse::<BigInt>()
+                .map(Value::from_bigint)
+                .map_err(|_| self.error("invalid number"))
         }
     }
 
-    fn parse_bool(&mut self) -> Result<Value, String> {
-        if self.chars[self.cursor..].starts_with(&['t', 'r', 'u', 'e']) {
-            self.cursor += 4;
-            Ok(Value::Bool(true))
-        } else if self.chars[self.cursor..].starts_with(&['f', 'a', 'l', 's', 'e']) {
-            self.cursor += 5;
-            Ok(Value::Bool(false))
-        } else {
-            Err(format!("invalid boolean at position {}", self.cursor))
-        }
+    fn hex4(&mut self) -> Result<u32, String> {
+        let digits = self
+            .bytes
+            .get(self.pos..self.pos + 4)
+            .ok_or_else(|| self.error("unfinished \\u escape"))?;
+        let text = std::str::from_utf8(digits).map_err(|_| self.error("invalid \\u escape"))?;
+        let code = u32::from_str_radix(text, 16).map_err(|_| self.error("invalid \\u escape"))?;
+        self.pos += 4;
+        Ok(code)
     }
 
-    fn parse_string(&mut self) -> Result<String, String> {
-        self.advance(); // consume opening '"'
+    fn string(&mut self) -> Result<String, String> {
+        self.pos += 1;
         let mut out = String::new();
-        while let Some(c) = self.advance() {
-            match c {
-                '"' => return Ok(out),
-                '\\' => {
-                    let esc = self
-                        .advance()
-                        .ok_or_else(|| "unexpected end of escape".to_string())?;
-                    match esc {
-                        '"' => out.push('"'),
-                        '\\' => out.push('\\'),
-                        '/' => out.push('/'),
-                        'b' => out.push('\x08'),
-                        'f' => out.push('\x0c'),
-                        'n' => out.push('\n'),
-                        'r' => out.push('\r'),
-                        't' => out.push('\t'),
-                        'u' => {
-                            let mut hex = String::new();
-                            for _ in 0..4 {
-                                hex.push(
-                                    self.advance()
-                                        .ok_or_else(|| "unclosed unicode escape".to_string())?,
-                                );
-                            }
-                            let cp = u32::from_str_radix(&hex, 16)
-                                .map_err(|_| "invalid unicode escape".to_string())?;
-                            let ch = char::from_u32(cp).ok_or_else(|| {
-                                format!("invalid unicode codepoint \\u{:04x}", cp)
-                            })?;
-                            out.push(ch);
+        loop {
+            let start = self.pos;
+            while let Some(b) = self.peek() {
+                if b == b'"' || b == b'\\' || b < 0x20 {
+                    break;
+                }
+                self.pos += 1;
+            }
+            // The input is a Rust string, so any run between ASCII
+            // delimiters is valid UTF-8.
+            out.push_str(std::str::from_utf8(&self.bytes[start..self.pos]).unwrap_or_default());
+            match self.peek() {
+                Some(b'"') => {
+                    self.pos += 1;
+                    return Ok(out);
+                }
+                Some(b'\\') => {
+                    self.pos += 1;
+                    let escape = self.peek().ok_or_else(|| self.error("unfinished escape"))?;
+                    self.pos += 1;
+                    match escape {
+                        b'"' => out.push('"'),
+                        b'\\' => out.push('\\'),
+                        b'/' => out.push('/'),
+                        b'b' => out.push('\u{8}'),
+                        b'f' => out.push('\u{c}'),
+                        b'n' => out.push('\n'),
+                        b'r' => out.push('\r'),
+                        b't' => out.push('\t'),
+                        b'u' => {
+                            let high = self.hex4()?;
+                            let code = if (0xD800..0xDC00).contains(&high) {
+                                if !self.bytes[self.pos..].starts_with(b"\\u") {
+                                    return Err(self.error("unpaired surrogate"));
+                                }
+                                self.pos += 2;
+                                let low = self.hex4()?;
+                                if !(0xDC00..0xE000).contains(&low) {
+                                    return Err(self.error("unpaired surrogate"));
+                                }
+                                0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00)
+                            } else {
+                                high
+                            };
+                            out.push(
+                                char::from_u32(code)
+                                    .ok_or_else(|| self.error("unpaired surrogate"))?,
+                            );
                         }
-                        _ => return Err(format!("invalid escape character '\\{}'", esc)),
+                        _ => return Err(self.error("invalid escape")),
                     }
                 }
-                _ => out.push(c),
+                Some(_) => return Err(self.error("control character in string")),
+                None => return Err(self.error("unfinished string")),
             }
         }
-        Err("unclosed string literal".to_string())
     }
 
-    fn parse_number(&mut self) -> Result<Value, String> {
-        let mut num_str = String::new();
-        let mut has_dot_or_exp = false;
-
-        while let Some(c) = self.peek() {
-            if c.is_ascii_digit() || c == '-' || c == '+' || c == '.' || c == 'e' || c == 'E' {
-                if c == '.' || c == 'e' || c == 'E' {
-                    has_dot_or_exp = true;
-                }
-                num_str.push(c);
-                self.cursor += 1;
-            } else {
-                break;
-            }
-        }
-
-        if has_dot_or_exp {
-            let f = f64::from_str(&num_str)
-                .map_err(|e| format!("invalid float '{}': {}", num_str, e))?;
-            Ok(Value::Float(f))
+    fn array(&mut self) -> Result<Value, String> {
+        self.pos += 1;
+        let mut items = Vec::new();
+        self.skip_whitespace();
+        if self.peek() == Some(b']') {
+            self.pos += 1;
         } else {
-            let i = BigInt::from_str(&num_str)
-                .map_err(|e| format!("invalid int '{}': {}", num_str, e))?;
-            Ok(Value::from_bigint(i))
-        }
-    }
-
-    fn parse_array(&mut self) -> Result<Value, String> {
-        if self.depth >= MAX_JSON_DEPTH {
-            return Err("JSON nesting depth limit (256) exceeded during decode".to_string());
-        }
-        self.depth += 1;
-        let res = self.parse_array_inner();
-        self.depth -= 1;
-        res
-    }
-
-    fn parse_array_inner(&mut self) -> Result<Value, String> {
-        self.advance(); // consume '['
-        self.skip_whitespace();
-
-        let tbl = Rc::new(RefCell::new(VmTable::new()));
-        if self.peek() == Some(']') {
-            self.advance();
-            return Ok(Value::Table(tbl));
-        }
-
-        loop {
-            let val = self.parse_value()?;
-            tbl.borrow_mut().array.push(val);
-            self.skip_whitespace();
-
-            match self.peek() {
-                Some(',') => {
-                    self.advance();
-                    self.skip_whitespace();
+            loop {
+                self.skip_whitespace();
+                items.push(self.value()?);
+                self.skip_whitespace();
+                match self.peek() {
+                    Some(b',') => self.pos += 1,
+                    Some(b']') => {
+                        self.pos += 1;
+                        break;
+                    }
+                    _ => return Err(self.error("expected ',' or ']'")),
                 }
-                Some(']') => {
-                    self.advance();
-                    break;
-                }
-                _ => return Err(format!("expected ',' or ']' at position {}", self.cursor)),
             }
         }
-
-        Ok(Value::Table(tbl))
-    }
-
-    fn parse_object(&mut self) -> Result<Value, String> {
-        if self.depth >= MAX_JSON_DEPTH {
-            return Err("JSON nesting depth limit (256) exceeded during decode".to_string());
+        // Trailing nulls would leave the array with a nil end.
+        while matches!(items.last(), Some(Value::Nil)) {
+            items.pop();
         }
-        self.depth += 1;
-        let res = self.parse_object_inner();
-        self.depth -= 1;
-        res
+        let mut table = VmTable::new();
+        table.array = items;
+        Ok(Value::Table(Rc::new(RefCell::new(table))))
     }
 
-    fn parse_object_inner(&mut self) -> Result<Value, String> {
-        self.advance(); // consume '{'
+    fn object(&mut self) -> Result<Value, String> {
+        self.pos += 1;
+        let mut table = VmTable::new();
         self.skip_whitespace();
-
-        let tbl = Rc::new(RefCell::new(VmTable::new()));
-        if self.peek() == Some('}') {
-            self.advance();
-            return Ok(Value::Table(tbl));
+        if self.peek() == Some(b'}') {
+            self.pos += 1;
+            return Ok(Value::Table(Rc::new(RefCell::new(table))));
         }
-
         loop {
             self.skip_whitespace();
-            if self.peek() != Some('"') {
-                return Err(format!(
-                    "expected string key in object at position {}",
-                    self.cursor
-                ));
+            if self.peek() != Some(b'"') {
+                return Err(self.error("expected a string key"));
             }
-            let key = self.parse_string()?;
+            let key = self.string()?;
             self.skip_whitespace();
-
-            if self.peek() != Some(':') {
-                return Err(format!(
-                    "expected ':' after key at position {}",
-                    self.cursor
-                ));
+            if self.peek() != Some(b':') {
+                return Err(self.error("expected ':'"));
             }
-            self.advance(); // consume ':'
-
-            let val = self.parse_value()?;
-            tbl.borrow_mut()
-                .fields
-                .insert(StrRef::from(key.as_str()), val);
+            self.pos += 1;
             self.skip_whitespace();
-
+            let value = self.value()?;
+            if !matches!(value, Value::Nil) {
+                table.fields.insert(StrRef::from(key), value);
+            }
+            self.skip_whitespace();
             match self.peek() {
-                Some(',') => {
-                    self.advance();
-                    self.skip_whitespace();
-                }
-                Some('}') => {
-                    self.advance();
+                Some(b',') => self.pos += 1,
+                Some(b'}') => {
+                    self.pos += 1;
                     break;
                 }
-                _ => return Err(format!("expected ',' or '}}' at position {}", self.cursor)),
+                _ => return Err(self.error("expected ',' or '}'")),
             }
         }
-
-        Ok(Value::Table(tbl))
+        Ok(Value::Table(Rc::new(RefCell::new(table))))
     }
 }
