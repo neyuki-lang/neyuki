@@ -43,6 +43,36 @@ fn os_difftime(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     Ok(vec![Value::Float(t2 - t1)])
 }
 
+/// Blocks the script for `seconds` (fractions allowed).
+fn os_sleep(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let seconds = crate::vm::libs::args::number_arg(args, 0, "seconds")?;
+    if !seconds.is_finite() || seconds < 0.0 {
+        return Err("seconds must be a non-negative number".to_string());
+    }
+    std::thread::sleep(std::time::Duration::from_secs_f64(seconds));
+    Ok(vec![])
+}
+
+/// Ends the process. `true` or nothing exits with 0, `false` with 1 and an
+/// integer with that code. Standard output is flushed first.
+fn os_exit(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let code = match args.first() {
+        None | Some(Value::Nil) | Some(Value::Bool(true)) => 0,
+        Some(Value::Bool(false)) => 1,
+        Some(Value::Int(i)) => i32::try_from(*i).map_err(|_| "exit code is out of range")?,
+        Some(other) => {
+            return Err(format!(
+                "code must be a boolean or an integer, got {}",
+                other.type_name()
+            ));
+        }
+    };
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    std::process::exit(code)
+}
+
 // Capability-based security sandbox for os.getenv:
 // Only explicitly permitted non-sensitive environment variables can be accessed.
 pub fn is_env_var_allowed(name: &str) -> bool {
@@ -76,6 +106,8 @@ pub fn create_os_lib() -> Value {
     table.set_str("time", crate::native!("os.time", os_time));
     table.set_str("difftime", crate::native!("os.difftime", os_difftime));
     table.set_str("getenv", crate::native!("os.getenv", os_getenv));
+    table.set_str("sleep", crate::native!("os.sleep", os_sleep));
+    table.set_str("exit", crate::native!("os.exit", os_exit));
     table.frozen = true;
     Value::Table(Rc::new(RefCell::new(table)))
 }

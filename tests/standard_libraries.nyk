@@ -71,4 +71,11 @@ local frozen = table.freeze({})
 local okf = try(function() frozen.x = 1 end)
 assert(not okf, "frozen tables reject writes")
 
+-- os.sleep blocks for the given seconds
+local before = os.clock()
+os.sleep(0.02)
+assert(os.clock() - before >= 0.015, "sleep waits")
+assert(not try(function() os.sleep(-1) end), "sleep rejects negative durations")
+assert(not try(function() os.exit("x") end), "exit takes a boolean or an integer")
+
 print("[pass] standard libraries")
