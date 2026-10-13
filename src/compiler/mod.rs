@@ -300,6 +300,21 @@ mod tests {
         assert_eq!(res.to_string(), "30");
     }
 
+    #[test]
+    fn test_multiple_returns_and_generic_for_state() {
+        let code = "local function rotate(a, b, c) return b, c, a end
+                    local x, y, z = rotate(1, 2, 3)
+                    local function step(t, i) i = i + 1 if t[i] == nil then return nil end return i, t[i] end
+                    local function each(t) return step, t, 0 end
+                    local sum = 0
+                    for i, v in each({10, 20}) do sum = sum + i * v end
+                    return x * 100 + y * 10 + z + sum";
+        let stmts = compile_source(code).expect("syntax error");
+        let proto = try_compile_to_proto_via_ir(&stmts).expect("IR compilation failed");
+        let res = crate::vm::machine::VM::new().execute(proto).expect("exec failed");
+        assert_eq!(res.to_string(), "281");
+    }
+
     /// The parser's nesting limit has to keep every later pass inside an
     /// ordinary thread's stack: library users and `cargo test` do not get the
     /// CLI's large one. The deepest programs it accepts, in each shape that

@@ -1049,9 +1049,15 @@ impl IrBuilder {
                         for arg in args {
                             arg_vars.push(self.compile_expr(arg, None));
                         }
+                        if callee_var != base {
+                            self.emit(IrInst::Move {
+                                dst: base,
+                                src: callee_var,
+                            });
+                        }
                         self.emit(IrInst::Call {
-                            dsts: vec![callee_var],
-                            callee: callee_var,
+                            dsts: vec![base, state_var, ctrl_var],
+                            callee: base,
                             args: arg_vars,
                             retc: 3,
                         });

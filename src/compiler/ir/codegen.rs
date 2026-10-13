@@ -939,19 +939,12 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
                     proto.emit(Instruction::Return { base: r, count: 1 }, 1);
                 } else {
                     let base = regs.get(vars[0], &mut proto);
-                    for (i, v) in vars[1..].iter().enumerate() {
-                        let vr = regs.get(*v, &mut proto);
-                        let target_r = base + 1 + i as u8;
-                        if vr != target_r {
-                            proto.emit(
-                                Instruction::Move {
-                                    dst: target_r,
-                                    src: vr,
-                                },
-                                1,
-                            );
-                        }
-                    }
+                    let moves: Vec<(u8, u8)> = vars[1..]
+                        .iter()
+                        .enumerate()
+                        .map(|(i, v)| (base + 1 + i as u8, regs.get(*v, &mut proto)))
+                        .collect();
+                    emit_parallel_moves(&mut proto, moves)?;
                     let needed = base as usize + vars.len();
                     if needed > proto.max_registers as usize {
                         proto.max_registers = needed as u8;
@@ -1047,4 +1040,45 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
     }
 
     Ok(proto)
+}
+
+/// Emits `dst <- src` moves as if they all happened at once: a move runs
+/// only after every move reading its destination has run, and a cycle is
+/// broken through a scratch register above the frame's registers.
+fn emit_parallel_moves(proto: &mut Proto, moves: Vec<(u8, u8)>) -> Result<(), String> {
+    let mut pending: Vec<(u8, u8)> = moves.into_iter().filter(|(d, s)| d != s).collect();
+    while !pending.is_empty() {
+        let ready = pending
+            .iter()
+            .position(|(dst, _)| !pending.iter().any(|(_, src)| src == dst));
+        match ready {
+            Some(i) => {
+                let (dst, src) = pending.remove(i);
+                proto.emit(Instruction::Move { dst, src }, 1);
+            }
+            None => {
+                // Every destination is still read by another move: park one
+                // source in a scratch register and read it from there.
+                let scratch = proto.max_registers;
+                if scratch == u8::MAX {
+                    return Err("register allocation failure: no scratch register".to_string());
+                }
+                proto.max_registers += 1;
+                let parked = pending[0].1;
+                proto.emit(
+                    Instruction::Move {
+                        dst: scratch,
+                        src: parked,
+                    },
+                    1,
+                );
+                for (_, src) in pending.iter_mut() {
+                    if *src == parked {
+                        *src = scratch;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
