@@ -12,7 +12,7 @@ cargo run -- disasm examples/hello.nyk
 cargo run -- test
 ```
 
-`lint` prints tokens and checks parsing. `compile` compiles a file to `.nykb` bytecode. `run` compiles the file (or loads a `.nykb`) and executes it on the register VM. `disasm` prints the bytecode the compiler emits, and `dump-ir` the intermediate representation before and after optimization. `test` runs every `.nyk` file in `tests/`.
+`lint` reports syntax errors, undefined names, `const` writes, type mismatches and unused or unreachable code with their positions; `lint --json` prints them as a JSON array for editors and `lint --stdin <path>` checks source read from standard input. `compile` compiles a file to `.nykb` bytecode. `run` compiles the file (or loads a `.nykb`) and executes it on the register VM. `disasm` prints the bytecode the compiler emits, and `dump-ir` the intermediate representation before and after optimization. `test` runs every `.nyk` file in `tests/`.
 
 ## Builtins
 

@@ -22,6 +22,7 @@ pub use value_tracking::{TrackedValue, ValueTracker, value_tracking_cfg};
 pub struct Parsed {
     pub stmts: Vec<Stmt>,
     pub lines: Rc<HashMap<NodeId, u32>>,
+    pub spans: crate::ast::span::SpanPool,
 }
 
 /// How a program is compiled.
@@ -78,6 +79,7 @@ pub fn parse(source: &str) -> Result<Parsed, String> {
     Ok(Parsed {
         stmts,
         lines: Rc::new(pool.start_lines()),
+        spans: pool,
     })
 }
 
@@ -91,7 +93,7 @@ pub fn compile_source(source: &str) -> Result<Vec<Stmt>, String> {
 pub fn compile_program(source: &str, chunk: &str, options: Options) -> Result<Proto, String> {
     let parsed = parse(source)?;
     if options.check {
-        check(&parsed.stmts, source)?;
+        check(&parsed.stmts, source, Some(&parsed.spans))?;
     }
     let mut proto = lower(&parsed.stmts, Some(parsed.lines), options)?;
     proto.set_source(Rc::from(chunk));
@@ -107,20 +109,33 @@ pub fn compile_file(path: &str) -> Result<Vec<Stmt>, String> {
 
 /// Rejects programs with semantic errors (undefined names, const writes,
 /// type mismatches).
-fn check(statements: &[Stmt], source: &str) -> Result<(), String> {
-    let diags = crate::sema::analyze(statements, source);
-    match diags
+fn check(
+    statements: &[Stmt],
+    source: &str,
+    spans: Option<&crate::ast::span::SpanPool>,
+) -> Result<(), String> {
+    let diags = match spans {
+        Some(spans) => crate::sema::analyze_with_spans(statements, source, spans),
+        None => crate::sema::analyze(statements, source),
+    };
+    let Some(err) = diags
         .iter()
         .find(|d| d.severity == crate::diagnostics::severity::Severity::Error)
-    {
-        Some(err) => Err(format!("semantic error: {}", err.message)),
-        None => Ok(()),
+    else {
+        return Ok(());
+    };
+    match err.primary_label.as_ref().filter(|_| spans.is_some()) {
+        Some(label) => Err(format!(
+            "semantic error: [line {}] {}",
+            label.span.start.line, err.message
+        )),
+        None => Err(format!("semantic error: {}", err.message)),
     }
 }
 
 /// Checks and compiles statements (without line information).
 pub fn try_compile_to_proto(statements: &[Stmt]) -> Result<Proto, String> {
-    check(statements, "")?;
+    check(statements, "", None)?;
     lower(statements, None, Options::RUN)
 }
 

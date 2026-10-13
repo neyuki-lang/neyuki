@@ -38,11 +38,7 @@ fn run_cli() {
     let action = &args[1];
 
     if action == "lint" {
-        let path = args
-            .get(2)
-            .map(String::as_str)
-            .unwrap_or("examples/hello.nyk");
-        if let Err(err) = lint::lint(path) {
+        if let Err(err) = lint::run_cli(&args[2..]) {
             eprintln!("{}", err);
             process::exit(1);
         }

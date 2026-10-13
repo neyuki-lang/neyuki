@@ -19,6 +19,17 @@ pub fn analyze(statements: &[Stmt], source: &str) -> Vec<Diagnostic> {
     analyzer.diagnostics
 }
 
+/// Like `analyze`, placing each diagnostic with the parser's node spans.
+pub fn analyze_with_spans(
+    statements: &[Stmt],
+    source: &str,
+    spans: &crate::ast::span::SpanPool,
+) -> Vec<Diagnostic> {
+    let mut analyzer = SemanticAnalyzer::new(source).with_spans(spans);
+    analyzer.analyze_program(statements);
+    analyzer.diagnostics
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

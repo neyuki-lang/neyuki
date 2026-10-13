@@ -6,6 +6,7 @@ use crate::ast::expr::Expr;
 use crate::ast::literal::Literal;
 use crate::ast::op::{BinOp, UnOp};
 use crate::ast::pattern::AssignTarget;
+use crate::ast::span::SpanPool;
 use crate::ast::stmt::Stmt;
 use crate::diagnostics::diagnostic::Diagnostic;
 use crate::diagnostics::error_code::ErrorCode;
@@ -21,6 +22,7 @@ pub struct SemanticAnalyzer<'a> {
     pub known_globals: HashSet<String>,
     current_return_type: Option<NeyukiType>,
     current_line: u32,
+    spans: Option<&'a SpanPool>,
 }
 
 impl<'a> SemanticAnalyzer<'a> {
@@ -80,7 +82,50 @@ impl<'a> SemanticAnalyzer<'a> {
             known_globals,
             current_return_type: None,
             current_line: 1,
+            spans: None,
         }
+    }
+
+    /// Uses the parser's node positions to place diagnostics; without them
+    /// every diagnostic points at line 1.
+    pub fn with_spans(mut self, spans: &'a SpanPool) -> Self {
+        self.spans = Some(spans);
+        self
+    }
+
+    /// Moves `current_line` to where `stmt` starts.
+    fn enter_stmt(&mut self, stmt: &Stmt) {
+        if let Some(span) = self.spans.and_then(|pool| pool.get(stmt.node_id()))
+            && span.start.line > 0
+        {
+            self.current_line = span.start.line;
+        }
+    }
+
+    /// Converts a parser span to a diagnostic span on its first line, with
+    /// trailing whitespace trimmed (a parser span ends at the next token).
+    fn diagnostic_span(&self, span: crate::ast::span::Span) -> Span {
+        let line = span.start.line;
+        let text = self
+            .source
+            .lines()
+            .nth(line.saturating_sub(1) as usize)
+            .unwrap_or("");
+        let start = span.start.column.max(1);
+        let mut end = if span.end.line == line && span.end.column > start {
+            span.end.column
+        } else {
+            text.len() as u32 + 1
+        };
+        while end > start + 1
+            && text
+                .as_bytes()
+                .get(end as usize - 2)
+                .is_some_and(|b| b.is_ascii_whitespace())
+        {
+            end -= 1;
+        }
+        Span::single_line(line, start, end)
     }
 
     fn is_known_global(&self, name: &str) -> bool {
@@ -116,6 +161,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 ..
             } = stmt
             {
+                self.enter_stmt(stmt);
                 let span = self.find_ident_span(fn_name);
                 let param_types: Vec<NeyukiType> = params
                     .iter()
@@ -149,6 +195,7 @@ impl<'a> SemanticAnalyzer<'a> {
         let mut unreachable = false;
         for stmt in statements {
             if unreachable {
+                self.enter_stmt(stmt);
                 let span = self.find_stmt_span(stmt);
                 let diag = Diagnostic::warning("unreachable code")
                     .with_code(ErrorCode::W0004)
@@ -169,6 +216,7 @@ impl<'a> SemanticAnalyzer<'a> {
     }
 
     fn analyze_stmt(&mut self, stmt: &Stmt) {
+        self.enter_stmt(stmt);
         match stmt {
             Stmt::Local {
                 name,
@@ -828,24 +876,41 @@ impl<'a> SemanticAnalyzer<'a> {
         }
     }
 
+    /// The first whole-word occurrence of `ident` on the current line.
     fn find_ident_span(&self, ident: &str) -> Span {
-        for (line_idx, line) in self.source.lines().enumerate() {
-            if let Some(col) = line.find(ident) {
-                return Span::single_line(
-                    (line_idx + 1) as u32,
-                    (col + 1) as u32,
-                    (col + 1 + ident.len()) as u32,
-                );
+        let line = self.current_line;
+        let text = self
+            .source
+            .lines()
+            .nth(line.saturating_sub(1) as usize)
+            .unwrap_or("");
+        let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+        let bytes = text.as_bytes();
+        let mut from = 0;
+        while let Some(found) = text[from..].find(ident) {
+            let col = from + found;
+            let after = col + ident.len();
+            if (col == 0 || !is_word(bytes[col - 1]))
+                && bytes.get(after).is_none_or(|b| !is_word(*b))
+            {
+                return Span::single_line(line, col as u32 + 1, after as u32 + 1);
             }
+            from = col + 1;
         }
-        Span::line(1)
+        Span::line(line)
     }
 
-    fn find_stmt_span(&self, _stmt: &Stmt) -> Span {
-        Span::line(self.current_line)
+    fn find_stmt_span(&self, stmt: &Stmt) -> Span {
+        match self.spans.and_then(|pool| pool.get(stmt.node_id())) {
+            Some(span) if span.start.line > 0 => self.diagnostic_span(span),
+            _ => Span::line(self.current_line),
+        }
     }
 
-    fn find_expr_span(&self, _expr: &Expr) -> Span {
-        Span::line(self.current_line)
+    fn find_expr_span(&self, expr: &Expr) -> Span {
+        match self.spans.and_then(|pool| pool.get(expr.node_id())) {
+            Some(span) if span.start.line > 0 => self.diagnostic_span(span),
+            _ => Span::line(self.current_line),
+        }
     }
 }

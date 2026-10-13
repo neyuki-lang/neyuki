@@ -51,7 +51,8 @@ pub fn render_report(source_name: &str, source: &str, diagnostics: &[Diagnostic]
                 } else {
                     col_idx
                 };
-                let width = (end_col - start_col).max(1);
+                // Span ends are exclusive.
+                let width = (end_col - col_idx).max(1);
                 let spaces = " ".repeat(start_col);
                 let carets = "^".repeat(width);
 
