@@ -1,5 +1,5 @@
-// Loop Invariant Code Motion (LICM) pass on CFG.
-// Detects natural loops using dominator analysis and hoists invariant pure expressions.
+//! Loop invariant code motion: pure expressions that do not change inside
+//! a loop move in front of it.
 
 use std::collections::{HashMap, HashSet};
 

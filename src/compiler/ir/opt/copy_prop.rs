@@ -1,5 +1,4 @@
-// Copy propagation optimization pass for IR.
-// Eliminates redundant Move instructions by forwarding source variables.
+//! Copy propagation: uses of a moved variable read the original instead.
 
 use std::collections::HashMap;
 

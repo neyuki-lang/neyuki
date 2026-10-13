@@ -1,4 +1,4 @@
-// Binary serialization for Neyuki bytecode files.
+//! Writes `.nyc` bytecode files.
 
 use crate::bytecode::format::BytecodeHeader;
 use crate::bytecode::instruction::Instruction;

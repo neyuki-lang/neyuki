@@ -1,4 +1,4 @@
-// Package manager command-line interface commands driver.
+//! The `neyuki pkg` commands.
 
 use std::fs;
 use std::path::Path;

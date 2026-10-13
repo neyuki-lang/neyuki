@@ -1,4 +1,4 @@
-// Bytecode file header and magic bytes specification.
+//! The bytecode file header.
 
 // Magic bytes at the start of compiled bytecode binary
 pub const MAGIC: &[u8; 7] = b"neyuki!";

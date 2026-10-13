@@ -1,4 +1,4 @@
-// AST Type Annotation expressions for Neyuki.
+//! Type annotations.
 
 use std::fmt;
 

@@ -1,4 +1,4 @@
-// Local package installation store and directory manager.
+//! The local directory installed packages live in.
 
 use std::fs;
 use std::path::{Path, PathBuf};

@@ -1,4 +1,4 @@
-// AST Expression node definitions for Neyuki.
+//! Expression nodes.
 
 use num_bigint::BigInt;
 

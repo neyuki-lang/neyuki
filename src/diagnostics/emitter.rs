@@ -1,4 +1,4 @@
-// Terminal formatter rendering point-to-source diagnostics reports with source code context.
+//! Renders diagnostics in the terminal with the source lines they point at.
 
 use crate::diagnostics::diagnostic::Diagnostic;
 

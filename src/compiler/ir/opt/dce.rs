@@ -1,4 +1,4 @@
-// Dead Code Elimination (DCE) and unreachable code removal pass on IR.
+//! Dead code and unreachable block removal.
 
 use std::collections::HashSet;
 

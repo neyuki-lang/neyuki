@@ -1,4 +1,4 @@
-// Value tracking lattice, dataflow analysis, and optimization pass for Neyuki compiler.
+//! Dataflow over IR tracking what each variable is known to hold.
 
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;

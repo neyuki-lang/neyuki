@@ -1,4 +1,4 @@
-// Fast cursor and position scanning engine for Neyuki tokenizer.
+//! The character cursor and position tracking.
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourcePos {

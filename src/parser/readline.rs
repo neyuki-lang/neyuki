@@ -1,4 +1,4 @@
-// Interactive line reader and multi-line chunk engine for Neyuki parser & REPL.
+//! Line reading for the REPL, including unfinished multi-line chunks.
 
 #[derive(Clone, Debug, Default)]
 pub struct LineHistory {

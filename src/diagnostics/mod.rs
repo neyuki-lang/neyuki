@@ -1,4 +1,4 @@
-// Unified compiler diagnostics and error reporting system for Neyuki.
+//! Compiler diagnostics.
 
 pub mod diagnostic;
 pub mod emitter;

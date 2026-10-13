@@ -1,4 +1,4 @@
-// Execution frame
+//! Call frames.
 
 use crate::vm::value::{Value, VmClosure};
 use std::rc::Rc;

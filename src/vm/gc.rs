@@ -1,5 +1,5 @@
-// Tricolor Mark-and-Sweep Garbage Collector with weak-pool cycle collection
-// and reference-safety checks preventing data corruption on live external references.
+//! The cycle collector. Values are reference counted; this mark-and-sweep
+//! pass frees tables and closures that only keep each other alive.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};

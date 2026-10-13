@@ -1,4 +1,4 @@
-// AST Statement node definitions for Neyuki.
+//! Statement nodes.
 
 use crate::ast::expr::{Expr, Param};
 use crate::ast::node_id::NodeId;

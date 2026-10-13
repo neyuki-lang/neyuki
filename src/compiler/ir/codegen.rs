@@ -1,4 +1,4 @@
-// Lowering from IR to Neyuki Bytecode Proto with register allocation and jump patching.
+//! Emits bytecode from IR: register assignment and jump patching.
 
 use std::collections::HashMap;
 

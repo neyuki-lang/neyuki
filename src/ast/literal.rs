@@ -1,4 +1,4 @@
-// Typed AST Literal definitions for Neyuki.
+//! Literal values.
 
 use num_bigint::BigInt;
 use std::fmt;

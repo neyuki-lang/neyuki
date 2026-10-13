@@ -1,4 +1,4 @@
-// Module cache and circular dependency detection engine.
+//! Loaded modules and circular `require` detection.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;

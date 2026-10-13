@@ -1,5 +1,4 @@
-// IR and CFG integrity verification pass.
-// Checks structural well-formedness, jump targets, edge reciprocity, and variable definition rules.
+//! Structural checks on IR: jump targets, edges and variable definitions.
 
 use std::collections::HashSet;
 

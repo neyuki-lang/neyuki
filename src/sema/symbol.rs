@@ -1,4 +1,4 @@
-// Semantic symbols and symbol table representations.
+//! Symbols and symbol tables.
 
 use crate::diagnostics::span::Span;
 use crate::sema::types::NeyukiType;

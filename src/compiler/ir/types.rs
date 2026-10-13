@@ -1,4 +1,4 @@
-// IR Primitive types, variables, constants, and operators for Neyuki.
+//! IR variables, constants and operators.
 
 use num_bigint::BigInt;
 

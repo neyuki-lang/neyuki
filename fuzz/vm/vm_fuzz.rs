@@ -1,8 +1,6 @@
 #![allow(dead_code)]
 
-// VM Execution, Arithmetic, Coroutine, and Metatable Fuzz Suite.
-// Fuzzes instruction boundaries, arithmetic exceptions (divide-by-zero, shifts),
-// coroutine lifecycle, metatable loop prevention, and sorting robustness.
+// Arithmetic edge cases, coroutine lifecycles, metatable loops and sorting.
 
 use crate::compiler::{compile_source, compile_to_proto};
 use crate::vm::machine::VM;

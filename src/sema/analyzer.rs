@@ -1,4 +1,4 @@
-// Semantic analyzer visiting AST nodes, building symbol tables, and generating diagnostics.
+//! Walks the syntax tree, builds symbol tables and reports diagnostics.
 
 use std::collections::HashSet;
 

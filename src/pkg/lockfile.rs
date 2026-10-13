@@ -1,4 +1,4 @@
-// Lockfile (neyuki.lock) manager with SHA-256 integrity verification.
+//! `neyuki.lock` with SHA-256 checksums.
 
 use std::str::FromStr;
 

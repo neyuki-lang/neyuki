@@ -1,7 +1,5 @@
-// Comprehensive Fuzzing Suite for Neyuki Programming Language.
-// Covers AST tree fuzzing, malformed bytecode files, memory safety / buffer overflow attacks,
-// VM execution robustness (divide-by-zero, shifts, coroutines, metatables, sorting),
-// and standard library edge cases (JSON, UTF-8, tonumber, crypto, sandbox).
+//! Fuzzers for `neyuki fuzz`: syntax trees, bytecode files, memory, the VM
+//! and the standard libraries.
 
 pub mod file;
 pub mod libs;

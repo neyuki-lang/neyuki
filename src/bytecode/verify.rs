@@ -1,6 +1,5 @@
-// Bytecode verification pass ensuring integrity and safety of deserialized Prototypes.
-// Prevents out-of-bounds register accesses, invalid constant pool indices,
-// corrupted branch offsets, and invalid nested prototype references.
+//! Checks loaded prototypes before they run: registers, constant indices,
+//! jump targets and nested prototypes must all be in range.
 
 use crate::bytecode::instruction::{Instruction, MULTRET};
 use crate::bytecode::proto::Proto;
@@ -58,8 +57,6 @@ fn verify_proto_depth(proto: &Proto, depth: usize) -> Result<(), BytecodeVerifyE
     let num_insts = proto.instructions.len();
 
     let check_reg = |reg: u8, pc: usize| -> Result<(), BytecodeVerifyError> {
-        // Fixed: was `proto.max_registers > 0 && ...` which silently allowed
-        // all registers when max_registers==0. Now always enforce the limit.
         if reg >= proto.max_registers {
             return Err(BytecodeVerifyError {
                 message: format!(

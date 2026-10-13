@@ -1,4 +1,4 @@
-// Bytecode disassembler for inspecting and dumping Neyuki bytecode.
+//! Prints bytecode as readable assembly.
 
 use crate::bytecode::instruction::Instruction;
 use crate::bytecode::proto::{Constant, Proto};

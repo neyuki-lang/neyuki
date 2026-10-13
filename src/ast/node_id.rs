@@ -1,4 +1,4 @@
-// Unique node identifier for AST nodes in Neyuki compiler.
+//! Unique ids for syntax tree nodes.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 

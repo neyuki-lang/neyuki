@@ -1,4 +1,4 @@
-// AST Folder trait for pure, functional AST transformations in Neyuki.
+//! A folder that rebuilds the tree, for pure AST transformations.
 
 use crate::ast::expr::{Expr, InterpPart, TableEntry};
 use crate::ast::pattern::AssignTarget;

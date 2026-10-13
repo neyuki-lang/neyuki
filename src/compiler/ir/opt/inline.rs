@@ -1,5 +1,4 @@
-// Function inlining pass for IR.
-// Inlines small, straight-line leaf functions to eliminate call overhead.
+//! Inlines small straight-line leaf functions.
 //
 // Soundness rules (all enforced below; anything else stays a call):
 // - the body holds only frame-independent ops plus one trailing Return of

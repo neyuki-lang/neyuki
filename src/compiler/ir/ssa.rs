@@ -1,4 +1,4 @@
-// Static Single Assignment (SSA) form construction and destruction.
+//! Conversion into and out of SSA form.
 
 use std::collections::{HashMap, HashSet};
 

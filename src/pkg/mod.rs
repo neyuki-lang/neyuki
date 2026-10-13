@@ -1,4 +1,4 @@
-// Neyuki Package Manager (pkg) - Comprehensive dependency and package engine.
+//! The package manager.
 
 pub mod cli;
 pub mod lockfile;

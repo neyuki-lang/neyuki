@@ -1,4 +1,4 @@
-// Function prototype and constant definitions for bytecode.
+//! Function prototypes and their constants.
 
 use crate::bytecode::instruction::Instruction;
 use crate::vm::value::{Value, VmTable};

@@ -1,4 +1,4 @@
-// Comprehensive linting framework for Neyuki source files.
+//! `neyuki lint`: style and correctness rules over parsed source.
 
 pub mod rules;
 pub use rules::run_all_rules;

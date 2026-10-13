@@ -1,4 +1,4 @@
-// Standard 32-bit bitwise manipulation library for Neyuki VM.
+//! The `bit` library: 32-bit bitwise operations.
 
 use num_bigint::BigInt;
 use num_traits::{ToPrimitive, Zero};

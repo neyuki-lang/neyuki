@@ -1,5 +1,4 @@
-// Semantic analysis (sema) module for Neyuki.
-// Provides scope resolution, const-checking, type-checking, arity checking, and dead-code detection.
+//! Semantic checks: scopes, `const`, types, arity and dead code.
 
 pub mod analyzer;
 pub mod scope;

@@ -1,4 +1,4 @@
-// Linter rule checking for reassignment or mutation of const variables.
+//! Flags assignments to `const` variables.
 
 use crate::ast::stmt::Stmt;
 use crate::diagnostics::diagnostic::Diagnostic;

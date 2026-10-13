@@ -1,4 +1,4 @@
-// In-place AST mutable visitor trait and walking functions for Neyuki.
+//! A visitor that edits the syntax tree in place.
 
 use crate::ast::expr::{Expr, InterpPart, TableEntry};
 use crate::ast::stmt::Stmt;

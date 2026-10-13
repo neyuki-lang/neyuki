@@ -1,5 +1,4 @@
-// Common Subexpression Elimination (CSE) pass on IR.
-// Replaces repeated identical pure computations with Move from the first computed variable.
+//! Common subexpression elimination for pure instructions.
 
 use std::collections::HashMap;
 

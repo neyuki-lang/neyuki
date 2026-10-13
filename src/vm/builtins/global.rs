@@ -1,4 +1,5 @@
-// Global built-in functions: print, assert, type, typeof, tostring, tonumber, int, float, error, pcall, xpcall, require.
+//! The global functions: print, assert, type, tostring, tonumber, error,
+//! pcall, require and friends.
 
 use num_bigint::BigInt;
 use num_traits::{FromPrimitive, ToPrimitive};

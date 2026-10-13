@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-// Memory safety fuzz tests for buffers, heap limits, and cyclic GC.
+// Buffers, allocation limits and reference cycles.
 
 use std::cell::RefCell;
 use std::rc::Rc;

@@ -1,4 +1,4 @@
-// Dominator Tree and Dominance Frontier analysis for IR CFG.
+//! Dominator trees and dominance frontiers.
 
 use std::collections::{HashMap, HashSet};
 

@@ -1,4 +1,4 @@
-// Statement parsing implementation for Neyuki.
+//! Statement parsing.
 
 use super::Parser;
 use super::action_helper::ActionHelper;

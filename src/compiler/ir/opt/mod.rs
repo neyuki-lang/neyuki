@@ -1,4 +1,4 @@
-// IR Optimization module coordinating all mid-level passes.
+//! The IR optimization passes and their order.
 
 pub mod const_fold;
 pub mod copy_prop;

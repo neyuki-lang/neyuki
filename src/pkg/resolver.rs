@@ -1,4 +1,4 @@
-// Dependency graph resolver and version constraint solver.
+//! Dependency resolution against version constraints.
 
 use std::collections::{HashMap, HashSet};
 

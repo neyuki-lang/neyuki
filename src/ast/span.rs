@@ -1,4 +1,4 @@
-// Source code span and location tracking for AST nodes.
+//! Source positions of syntax tree nodes.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct SourceLocation {

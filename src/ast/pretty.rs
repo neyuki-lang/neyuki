@@ -1,4 +1,4 @@
-// Pretty printer and S-expression dumper for Neyuki AST.
+//! Prints a syntax tree as source or as S-expressions.
 
 use crate::ast::expr::{Expr, InterpPart};
 use crate::ast::stmt::Stmt;

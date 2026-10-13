@@ -1,4 +1,4 @@
-// AST to IR translation builder with scope analysis and variable resolution.
+//! Lowers the syntax tree to IR, resolving scopes and variables.
 
 use num_bigint::BigInt;
 use std::collections::HashMap;

@@ -1,4 +1,4 @@
-// Lexical scoping and scope stack manager for semantic analysis.
+//! The scope stack.
 
 use std::collections::HashMap;
 

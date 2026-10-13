@@ -1,8 +1,7 @@
 #![allow(dead_code)]
 
-// Standard Libraries Fuzz Suite: JSON, String, UTF-8, Tonumber, Crypto, and Sandbox.
-// Ensures robust handling of malformed inputs, depth limits, encoding boundaries,
-// and security restrictions across all standard library modules.
+// Fuzzes the standard libraries with malformed input: json, string, utf8,
+// tonumber, crypto and the sandbox.
 
 use crate::compiler::{compile_source, compile_to_proto};
 use crate::vm::libs::json::decode_from_str;

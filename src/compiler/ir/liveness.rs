@@ -1,4 +1,4 @@
-// Liveness analysis on Control Flow Graph using backward dataflow equations.
+//! Backward liveness analysis over the control flow graph.
 
 use std::collections::{HashMap, HashSet};
 

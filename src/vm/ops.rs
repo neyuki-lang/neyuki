@@ -1,4 +1,4 @@
-// Arithmetic, bitwise, and comparison evaluation operations for Neyuki VM.
+//! Arithmetic, bitwise and comparison operators.
 //
 // Every operator has an `i64` fast path that the interpreter loop inlines,
 // and falls back to `BigInt` when an operand is already big or the `i64`

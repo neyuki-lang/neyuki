@@ -1,4 +1,4 @@
-// CFG Builder: Transforms linear flat IrInst sequence into a real ControlFlowGraph.
+//! Splits a linear IR sequence into a control flow graph.
 
 use std::collections::{HashMap, HashSet};
 

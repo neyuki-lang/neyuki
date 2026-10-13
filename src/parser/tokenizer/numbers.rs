@@ -1,4 +1,4 @@
-// Numeric scanning engine for Neyuki tokenizer.
+//! Number literals.
 
 use super::scanner::Scanner;
 

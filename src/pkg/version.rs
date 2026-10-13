@@ -1,4 +1,4 @@
-// Semantic versioning (SemVer 2.0.0) parser and constraint solver for Neyuki.
+//! Semantic versions and version constraints.
 
 use std::cmp::Ordering;
 use std::fmt;

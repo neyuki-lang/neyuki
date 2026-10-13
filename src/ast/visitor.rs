@@ -1,4 +1,4 @@
-// AST Visitor pattern trait for AST traversal, linting, analysis and transformations.
+//! A read-only visitor over the syntax tree.
 
 use crate::ast::expr::Expr;
 use crate::ast::stmt::Stmt;

@@ -1,4 +1,4 @@
-// Core Diagnostic structure representing a structured compiler diagnostic.
+//! A compiler diagnostic: message, code, spans and notes.
 
 use crate::diagnostics::error_code::ErrorCode;
 use crate::diagnostics::severity::Severity;

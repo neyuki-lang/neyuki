@@ -1,4 +1,4 @@
-// Garbage collection builtin function: collectgarbage.
+//! `collectgarbage`.
 
 use num_traits::ToPrimitive;
 

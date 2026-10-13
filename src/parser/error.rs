@@ -1,4 +1,4 @@
-// Parser error types, error codes, and rich diagnostics engine for Neyuki.
+//! Parse errors and their diagnostics.
 
 use std::fmt;
 

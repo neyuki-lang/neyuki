@@ -1,4 +1,4 @@
-// Pretty-printer for IR Control Flow Graph and instructions.
+//! Prints IR for `neyuki ir`.
 
 use std::fmt::Write;
 

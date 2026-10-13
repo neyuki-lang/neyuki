@@ -2394,7 +2394,7 @@ mod tests {
     fn test_vm_hook_yield_errors() {
         // Yielding from inside a hook with no coroutine active is an
         // error (Lua: "attempt to yield across a C-call boundary"),
-        // never a hang. Probed to return in ~0.3s, not block.
+        // never a hang.
         let code = "debug.sethook(function() return coroutine.yield(99) end, \"c\")\nlocal function foo() return 1 end\nreturn foo()";
         let err = run_err(code);
         assert!(
@@ -2688,7 +2688,7 @@ mod tests {
 
     #[test]
     fn test_vm_debug_hook_pcall_path() {
-        // Lua 5.4 ground truth: sethook-return, pcall-call, add-call,
+        // As in Lua 5.4: sethook-return, pcall-call, add-call,
         // add-return, pcall-return, clearing call.
         let code = "local events = {}\nlocal function tracer(ev)\n  events[#events + 1] = ev\nend\nlocal function add(x, y)\n  return x + y\nend\ndebug.sethook(tracer, \"cr\")\nlocal ok, v = pcall(add, 1, 2)\ndebug.sethook(nil)\nassert(ok == true)\nassert(v == 3)\nreturn table.concat(events, \",\")";
         let res = run_code(code);
@@ -2697,7 +2697,7 @@ mod tests {
 
     #[test]
     fn test_vm_debug_hook_tail_call_event() {
-        // Lua 5.4 ground truth: sethook-return, initial call, one "tail
+        // As in Lua 5.4: sethook-return, initial call, one "tail
         // call" per replaced frame, final return, clearing call.
         let code = "local events = {}\nlocal function tracer(ev)\n  events[#events + 1] = ev\nend\nlocal function loop(n, acc)\n  if n == 0 then return acc end\n  return loop(n - 1, acc + n)\nend\ndebug.sethook(tracer, \"cr\")\nlocal r = loop(3, 0)\ndebug.sethook(nil)\nassert(r == 6)\nreturn table.concat(events, \",\")";
         let res = run_code(code);

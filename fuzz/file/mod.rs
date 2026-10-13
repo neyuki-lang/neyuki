@@ -1,5 +1,4 @@
-// File and Binary Bytecode Deserializer Fuzzer for Neyuki.
-// Tests resilience against corrupted magic headers, truncated byte streams,
-// invalid opcodes, out-of-range registers, and illegal jump targets.
+//! Fuzzes the bytecode loader with corrupted headers, truncated input,
+//! bad opcodes, registers and jump targets.
 
 pub mod bytecode_fuzz;

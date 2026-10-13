@@ -1,4 +1,4 @@
-// Built-in modules and global functions registry for Neyuki VM.
+//! Registers the global functions.
 
 pub mod gc;
 pub mod global;

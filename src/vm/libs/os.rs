@@ -1,4 +1,4 @@
-// Standard operating system interface library for Neyuki VM.
+//! The `os` library.
 
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;

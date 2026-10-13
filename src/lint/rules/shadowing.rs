@@ -1,4 +1,4 @@
-// Linter rule checking for variable shadowing across scopes.
+//! Flags locals that shadow an outer variable.
 
 use crate::ast::stmt::Stmt;
 use crate::diagnostics::diagnostic::Diagnostic;

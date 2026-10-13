@@ -1,4 +1,4 @@
-// VM runtime values and table structures.
+//! Runtime values and tables.
 
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;

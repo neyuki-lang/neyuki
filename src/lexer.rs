@@ -1,4 +1,4 @@
-// Lexical token definitions and tokenization interface for Neyuki.
+//! Tokens and the tokenizer interface.
 
 #[cfg(test)]
 mod tests {

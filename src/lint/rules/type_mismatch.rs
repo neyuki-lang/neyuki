@@ -1,4 +1,4 @@
-// Linter rule checking for type mismatches between annotations and values.
+//! Flags values that do not match their type annotation.
 
 use crate::ast::stmt::Stmt;
 use crate::diagnostics::diagnostic::Diagnostic;

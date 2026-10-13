@@ -1,4 +1,4 @@
-// Expression parsing implementation for Neyuki.
+//! Expression parsing.
 
 use super::Parser;
 use super::action_helper::ActionHelper;

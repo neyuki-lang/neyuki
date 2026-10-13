@@ -1,4 +1,4 @@
-// Neyuki modular syntax parser.
+//! The parser.
 
 pub mod action_helper;
 pub mod error;

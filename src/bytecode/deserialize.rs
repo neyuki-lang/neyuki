@@ -1,4 +1,4 @@
-// Binary deserialization for Neyuki bytecode files with integrated verification.
+//! Reads `.nyc` bytecode files and verifies what it loads.
 
 use crate::bytecode::format::BytecodeHeader;
 use crate::bytecode::instruction::Instruction;

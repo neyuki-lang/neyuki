@@ -1,4 +1,4 @@
-// Safe path resolution and sandbox validation engine for external module requires.
+//! Path resolution that keeps `require` inside the project.
 
 use std::path::{Path, PathBuf};
 

@@ -1,4 +1,4 @@
-// Compile-time constant folding and expression optimization.
+//! Constant folding on the syntax tree.
 
 use num_bigint::{BigInt, Sign};
 use num_integer::Integer as _;

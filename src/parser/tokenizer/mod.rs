@@ -1,4 +1,4 @@
-// Modular high-performance tokenizer engine for Neyuki.
+//! The tokenizer.
 
 pub mod comments;
 pub mod numbers;

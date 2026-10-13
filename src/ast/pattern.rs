@@ -1,4 +1,4 @@
-// Assignable l-value / pattern definitions for Neyuki.
+//! Assignment targets.
 
 use crate::ast::expr::Expr;
 use crate::ast::node_id::NodeId;

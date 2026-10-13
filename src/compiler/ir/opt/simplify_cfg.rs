@@ -1,5 +1,5 @@
-// CFG Simplification pass: eliminates unreachable blocks, merges single-edge blocks,
-// collapses empty jump blocks, and simplifies constant conditional branches.
+//! Control flow cleanup: drops unreachable blocks, merges straight-line
+//! blocks, skips empty jumps and resolves constant branches.
 
 use std::collections::{HashSet, VecDeque};
 

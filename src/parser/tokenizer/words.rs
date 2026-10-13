@@ -1,4 +1,4 @@
-// Keyword and identifier scanning engine for Neyuki tokenizer.
+//! Keywords and identifiers.
 
 use super::scanner::Scanner;
 

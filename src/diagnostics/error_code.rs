@@ -1,4 +1,4 @@
-// Standardized error and warning codes for Neyuki.
+//! Error and warning codes.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ErrorCode {

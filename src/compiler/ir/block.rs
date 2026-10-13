@@ -1,4 +1,4 @@
-// Control Flow Graph (CFG) and BasicBlock definitions for IR.
+//! Basic blocks and the control flow graph.
 
 use crate::compiler::ir::inst::IrInst;
 use crate::compiler::ir::types::{IrLabel, IrVar};

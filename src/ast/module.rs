@@ -1,4 +1,4 @@
-// Module / Chunk root node representing a complete source file AST.
+//! The root node of one source file.
 
 use crate::ast::node_id::NodeId;
 use crate::ast::span::Span;

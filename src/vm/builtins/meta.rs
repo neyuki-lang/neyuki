@@ -1,4 +1,5 @@
-// Metatable and raw table built-in functions: setmetatable, getmetatable, rawget, rawset, rawequal, rawlen.
+//! Metatables and raw access: setmetatable, getmetatable, rawget, rawset,
+//! rawequal, rawlen.
 
 use std::rc::Rc;
 

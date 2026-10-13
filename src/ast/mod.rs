@@ -1,4 +1,4 @@
-// Abstract Syntax Tree (AST) definitions and traversal tools for Neyuki.
+//! The syntax tree and its traversals.
 
 pub mod decl;
 pub mod expr;

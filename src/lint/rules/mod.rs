@@ -1,4 +1,4 @@
-// Submodules for individual lint rules.
+//! The lint rules.
 
 pub mod const_mutation;
 pub mod shadowing;

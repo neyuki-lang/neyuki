@@ -1,4 +1,4 @@
-// Bytecode textual assembly parser for loading disassemblies back into Prototypes.
+//! Parses assembly from the disassembler back into prototypes.
 
 use num_bigint::BigInt;
 use std::str::FromStr;

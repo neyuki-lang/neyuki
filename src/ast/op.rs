@@ -1,4 +1,4 @@
-// Type-safe operator definitions for AST expressions and statements.
+//! Unary and binary operators.
 
 use std::fmt;
 

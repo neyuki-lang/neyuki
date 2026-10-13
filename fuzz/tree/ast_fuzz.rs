@@ -1,8 +1,7 @@
 #![allow(dead_code)]
 
-// AST and Syntax Tree fuzz tests.
-// Exercises parser resilience against unbounded depth, invalid syntax,
-// malformed interpolation, and token corruption without panicking.
+// Deep nesting, invalid syntax, broken interpolation and corrupted tokens
+// must give parse errors, never panics.
 
 use crate::compiler::compile_source;
 use crate::parser::Parser;

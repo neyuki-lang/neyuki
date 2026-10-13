@@ -1,4 +1,4 @@
-// Package manifest (neyuki.toml) parser and serializer.
+//! `neyuki.toml` reading and writing.
 
 use std::collections::BTreeMap;
 use std::str::FromStr;

@@ -1,6 +1,5 @@
-// Modular external module loader engine for Neyuki.
-// Supports requires outside of bundles, relative directory imports,
-// init.nyk resolution, package.path searchers, and circular dependency protection.
+//! Resolves `require` for files on disk: relative paths, `init.nyk`
+//! directories and search paths.
 
 pub mod cache;
 pub mod path;

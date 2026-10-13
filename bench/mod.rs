@@ -1,6 +1,4 @@
-// Comprehensive Benchmark Suite for Neyuki Programming Language.
-// Benchmarks all core subsystems: Lexer, Parser, Compiler, VM Arithmetic,
-// Tables, Strings, Coroutines, Garbage Collector, Crypto, Buffer, and JSON.
+//! Micro-benchmarks for `neyuki bench`: the front end, the VM and the libraries.
 
 use crate::compiler::{compile_source, compile_to_proto};
 use crate::lexer::Lexer;

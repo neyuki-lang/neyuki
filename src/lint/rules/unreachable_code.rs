@@ -1,4 +1,4 @@
-// Linter rule checking for unreachable code following terminal control flow statements.
+//! Flags statements after `return`, `break` or `continue`.
 
 use crate::ast::stmt::Stmt;
 use crate::diagnostics::diagnostic::Diagnostic;

@@ -1,6 +1,4 @@
-// Advanced table key representation and hashing for general Lua/Neyuki tables.
-// Supports arbitrary non-nil, non-NaN values as keys: booleans, floats, integers,
-// strings, tables, closures, natives, and buffers.
+//! Hashable table keys. Any value except nil and NaN can be a key.
 
 use std::cell::RefCell;
 use std::hash::{Hash, Hasher};

@@ -1,4 +1,4 @@
-// Constant propagation and folding pass on IR.
+//! Constant propagation and folding on IR.
 
 use std::collections::HashMap;
 

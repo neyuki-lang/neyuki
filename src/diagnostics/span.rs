@@ -1,4 +1,4 @@
-// Source span and location definitions for the unified diagnostics system.
+//! Source spans for diagnostics.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct SourceLocation {

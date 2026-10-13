@@ -1,4 +1,4 @@
-// Linter rule checking for unused local variables.
+//! Flags unused locals.
 
 use crate::ast::stmt::Stmt;
 use crate::diagnostics::diagnostic::Diagnostic;

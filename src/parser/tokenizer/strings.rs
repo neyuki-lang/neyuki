@@ -1,4 +1,4 @@
-// String and literal scanning engine for Neyuki tokenizer.
+//! String literals and interpolation.
 
 use super::scanner::Scanner;
 

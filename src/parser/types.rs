@@ -1,4 +1,4 @@
-// Type annotation and expression parsing engine for Neyuki parser.
+//! Type annotation parsing.
 
 use super::Parser;
 use crate::ast::ty::TypeExpr;

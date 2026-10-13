@@ -1,4 +1,4 @@
-// Semantic type representations and type compatibility checking for Neyuki.
+//! Static types and their compatibility rules.
 
 use crate::ast::ty::TypeExpr;
 

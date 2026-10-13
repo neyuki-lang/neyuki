@@ -1,4 +1,4 @@
-// IR Instruction definitions for 3-Address Code and SSA.
+//! IR instructions.
 
 use crate::compiler::ir::types::{IrBinaryOp, IrConstant, IrLabel, IrUnaryOp, IrVar};
 

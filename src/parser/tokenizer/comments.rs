@@ -1,4 +1,4 @@
-// Comment and doc comment scanning engine for Neyuki tokenizer.
+//! Comments and doc comments.
 
 use super::scanner::Scanner;
 use super::strings::StringEngine;

@@ -1,4 +1,4 @@
-// Declaration definitions for Neyuki AST.
+//! Declarations: functions, locals and type aliases.
 
 use crate::ast::expr::{Expr, Param};
 use crate::ast::span::Span;

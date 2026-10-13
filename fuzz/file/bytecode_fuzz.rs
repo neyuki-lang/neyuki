@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
-// Bytecode binary deserializer and verifier fuzz tests.
-// Ensures corrupt, truncated, or hostile binary inputs never cause panics or memory crashes.
+// Corrupt, truncated and hostile bytecode must fail cleanly, never panic.
 
 use crate::bytecode::instruction::Instruction;
 use crate::bytecode::proto::Proto;

@@ -1,5 +1,4 @@
-// AST and Syntax Tree Fuzzer for Neyuki.
-// Tests resilience against recursion depth attacks, deeply nested ASTs,
-// malformed string interpolations, and unbalanced token streams.
+//! Fuzzes the parser with deep nesting, broken interpolation and unbalanced
+//! tokens.
 
 pub mod ast_fuzz;

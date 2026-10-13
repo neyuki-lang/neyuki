@@ -1,4 +1,4 @@
-// Syntactic action helpers and precedence engines for the Neyuki parser.
+//! Operator precedence and small helpers for the parser.
 
 use crate::ast::*;
 use crate::lexer::Token;

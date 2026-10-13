@@ -1,5 +1,5 @@
-// Linear scan CFG-aware register allocator.
-// Maps unbounded virtual IrVars to physical VM registers (0..255) using live intervals.
+//! Linear scan register allocation from IR variables to the 256 VM
+//! registers.
 
 use std::collections::{BTreeSet, HashMap};
 

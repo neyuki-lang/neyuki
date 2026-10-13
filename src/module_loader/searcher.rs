@@ -1,4 +1,4 @@
-// Pattern-based module searcher engine following standard package.path conventions.
+//! Searches `package.path`-style patterns for a module.
 
 use std::path::{Path, PathBuf};
 

@@ -1,4 +1,4 @@
-// Linter rule checking for unused function parameters.
+//! Flags unused function parameters.
 
 use crate::ast::stmt::Stmt;
 use crate::diagnostics::diagnostic::Diagnostic;
