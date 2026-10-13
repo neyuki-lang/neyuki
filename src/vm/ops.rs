@@ -11,6 +11,37 @@ use num_traits::{FromPrimitive, Signed, ToPrimitive, Zero};
 
 use crate::vm::value::Value;
 
+/// The largest integer, in bits, that arithmetic will produce (about 315,000
+/// decimal digits). Past this, multiplying, raising to a power or shifting
+/// left would let one expression allocate gigabytes or run for hours, so it
+/// is a catchable error instead.
+pub const MAX_INT_BITS: u64 = 1 << 20;
+
+/// Errors when a result of `bits` bits would exceed `MAX_INT_BITS`.
+pub fn check_int_bits(bits: u64) -> Result<(), String> {
+    if bits > MAX_INT_BITS {
+        return Err(format!(
+            "integer result is too large (more than {} bits)",
+            MAX_INT_BITS
+        ));
+    }
+    Ok(())
+}
+
+/// An estimate of the bits in `base ^ exp`, for `check_int_bits`.
+pub fn pow_result_bits(base: &BigInt, exp: u64) -> u64 {
+    if base.bits() <= 1 {
+        // 0, 1 and -1 stay that size.
+        return 1;
+    }
+    let log2 = base
+        .to_f64()
+        .filter(|f| f.is_finite())
+        .map(|f| f.abs().log2())
+        .unwrap_or(base.bits() as f64);
+    (log2 * exp as f64).ceil() as u64
+}
+
 pub fn to_bigint(v: &Value) -> Result<BigInt, String> {
     match v {
         Value::Int(i) => Ok(BigInt::from(*i)),
@@ -59,6 +90,7 @@ pub fn eval_add(a: &Value, b: &Value) -> Result<Value, String> {
         });
     }
     if let Some((ia, ib)) = big_pair(a, b) {
+        check_int_bits(ia.bits().max(ib.bits()) + 1)?;
         return Ok(Value::from_bigint(ia + ib));
     }
     Ok(Value::Float(to_f64(a)? + to_f64(b)?))
@@ -73,6 +105,7 @@ pub fn eval_sub(a: &Value, b: &Value) -> Result<Value, String> {
         });
     }
     if let Some((ia, ib)) = big_pair(a, b) {
+        check_int_bits(ia.bits().max(ib.bits()) + 1)?;
         return Ok(Value::from_bigint(ia - ib));
     }
     Ok(Value::Float(to_f64(a)? - to_f64(b)?))
@@ -87,6 +120,7 @@ pub fn eval_mul(a: &Value, b: &Value) -> Result<Value, String> {
         });
     }
     if let Some((ia, ib)) = big_pair(a, b) {
+        check_int_bits(ia.bits() + ib.bits())?;
         return Ok(Value::from_bigint(ia * ib));
     }
     Ok(Value::Float(to_f64(a)? * to_f64(b)?))
@@ -157,13 +191,29 @@ pub fn eval_pow(a: &Value, b: &Value) -> Result<Value, String> {
     {
         return Ok(match ia.checked_pow(exp) {
             Some(r) => Value::Int(r),
-            None => Value::from_bigint(BigInt::from(*ia).pow(exp)),
+            None => {
+                let base = BigInt::from(*ia);
+                check_int_bits(pow_result_bits(&base, exp as u64))?;
+                Value::from_bigint(base.pow(exp))
+            }
         });
     }
     if let Some((ia, ib)) = big_pair(a, b)
         && ib.sign() != Sign::Minus
-        && let Some(exp) = ib.to_u32()
     {
+        // Exponents past u32 only fit when the base is 0, 1 or -1.
+        if ia.bits() <= 1 {
+            return Ok(Value::Int(if ia.is_zero() {
+                if ib.is_zero() { 1 } else { 0 }
+            } else if ia.is_negative() && ib.is_odd() {
+                -1
+            } else {
+                1
+            }));
+        }
+        let exp = ib.to_u64().unwrap_or(u64::MAX);
+        check_int_bits(pow_result_bits(&ia, exp))?;
+        let exp = u32::try_from(exp).map_err(|_| "integer exponent is too large".to_string())?;
         return Ok(Value::from_bigint(ia.pow(exp)));
     }
     Ok(Value::Float(to_f64(a)?.powf(to_f64(b)?)))
@@ -207,7 +257,12 @@ fn shift_left(ia: &Value, shift: usize) -> Result<Value, String> {
             return Ok(Value::Int(i << shift));
         }
     }
-    Ok(Value::from_bigint(to_bigint(ia)? << shift))
+    let big = to_bigint(ia)?;
+    if big.is_zero() {
+        return Ok(Value::Int(0));
+    }
+    check_int_bits(big.bits().saturating_add(shift as u64))?;
+    Ok(Value::from_bigint(big << shift))
 }
 
 /// Arithmetic shift right (floors towards negative infinity, like BigInt).

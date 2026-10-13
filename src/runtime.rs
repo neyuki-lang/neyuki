@@ -1,3 +1,4 @@
+use crate::vm::ops::{check_int_bits, pow_result_bits};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -94,6 +95,14 @@ impl Int {
             Int::Big(value) => ((**value).clone() & BigInt::from(u64::MAX))
                 .to_u64()
                 .unwrap_or(0),
+        }
+    }
+
+    /// Bits in the magnitude, for `ops::check_int_bits`.
+    pub(crate) fn bits(&self) -> u64 {
+        match self {
+            Int::Small(value) => 64 - value.unsigned_abs().leading_zeros() as u64,
+            Int::Big(value) => value.bits(),
         }
     }
 
@@ -1358,6 +1367,15 @@ impl Runtime {
             if (op == BinOp::IDiv || op == BinOp::Mod) && b.is_zero() {
                 return Err("division by zero".to_string());
             }
+            match op {
+                BinOp::Add | BinOp::Sub => check_int_bits(a.bits().max(b.bits()) + 1)?,
+                BinOp::Mul => check_int_bits(a.bits() + b.bits())?,
+                BinOp::Pow if !b.is_negative() => {
+                    let exp = b.to_bigint().to_u64().unwrap_or(u64::MAX);
+                    check_int_bits(pow_result_bits(&a.to_bigint(), exp))?;
+                }
+                _ => {}
+            }
             return match op {
                 BinOp::Add => Ok(Value::Integer(a + b)),
                 BinOp::Sub => Ok(Value::Integer(a - b)),
@@ -1366,6 +1384,17 @@ impl Runtime {
                 BinOp::IDiv => Ok(Value::Integer(a.checked_div_floor(b))),
                 BinOp::Mod => Ok(Value::Integer(a.mod_floor(b))),
                 BinOp::Pow if !b.is_negative() => {
+                    // 0, 1 and -1 take exponents of any size.
+                    if a.bits() <= 1 {
+                        let odd = b.to_bigint().is_odd();
+                        return Ok(Value::Integer(Int::Small(if a.is_zero() {
+                            if b.is_zero() { 1 } else { 0 }
+                        } else if a.is_negative() && odd {
+                            -1
+                        } else {
+                            1
+                        })));
+                    }
                     let exponent = b
                         .to_u32()
                         .ok_or_else(|| "integer exponent is too large".to_string())?;
@@ -1742,6 +1771,9 @@ fn bitwise(left: Value, op: BinOp, right: Value) -> Result<Value, String> {
                 } else if shift > 65536 {
                     return Err("shift is too large".to_string());
                 } else {
+                    if !a.is_zero() {
+                        check_int_bits(a.bits() + shift as u64)?;
+                    }
                     a.shl(shift as usize)
                 }
             } else {
@@ -1755,6 +1787,9 @@ fn bitwise(left: Value, op: BinOp, right: Value) -> Result<Value, String> {
                     if u > 65536 {
                         return Err("shift is too large".to_string());
                     } else {
+                        if !a.is_zero() {
+                            check_int_bits(a.bits() + u)?;
+                        }
                         a.shl(u as usize)
                     }
                 } else if shift > 65536 {

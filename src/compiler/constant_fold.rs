@@ -109,7 +109,37 @@ fn fold_unary_op(op: UnOp, val: FoldVal) -> Option<FoldVal> {
 }
 
 // Fold constant binary operations
+/// Whether folding `a op b` stays within the runtime's integer size limit.
+/// Anything larger is left for runtime, which reports it as an error instead
+/// of the compiler trying to build it.
+fn int_fold_fits(op: BinOp, a: &BigInt, b: &BigInt) -> bool {
+    use crate::vm::ops::{MAX_INT_BITS, pow_result_bits};
+    let bits = match op {
+        BinOp::Add | BinOp::Sub => a.bits().max(b.bits()) + 1,
+        BinOp::Mul => a.bits() + b.bits(),
+        BinOp::Pow => match b.to_u64() {
+            Some(exp) => pow_result_bits(a, exp),
+            None => return true,
+        },
+        BinOp::Shl | BinOp::Shr => {
+            let widens = (op == BinOp::Shl) == (b.sign() != Sign::Minus);
+            if !widens || a.is_zero() {
+                return true;
+            }
+            a.bits()
+                .saturating_add(b.magnitude().to_u64().unwrap_or(u64::MAX))
+        }
+        _ => return true,
+    };
+    bits <= MAX_INT_BITS
+}
+
 fn fold_binary_op(op: BinOp, left: FoldVal, right: FoldVal) -> Option<FoldVal> {
+    if let (FoldVal::Int(a), FoldVal::Int(b)) = (&left, &right)
+        && !int_fold_fits(op, a, b)
+    {
+        return None;
+    }
     match op {
         BinOp::Add => match (left, right) {
             (FoldVal::Int(a), FoldVal::Int(b)) => Some(FoldVal::Int(a + b)),

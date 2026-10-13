@@ -18,6 +18,13 @@ pub fn constant_propagation(module: &mut IrModule) {
             }
             IrInst::BinOp { dst, op, lhs, rhs } => {
                 let folded = match (const_map.get(&lhs), const_map.get(&rhs)) {
+                    // Results past the runtime's integer limit are left for
+                    // runtime to report rather than built here.
+                    (Some(IrConstant::Int(a)), Some(IrConstant::Int(b)))
+                        if a.bits() + b.bits() > crate::vm::ops::MAX_INT_BITS =>
+                    {
+                        None
+                    }
                     (Some(IrConstant::Int(a)), Some(IrConstant::Int(b))) => match op {
                         IrBinaryOp::Add => Some(IrConstant::Int(a + b)),
                         IrBinaryOp::Sub => Some(IrConstant::Int(a - b)),
