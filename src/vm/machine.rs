@@ -704,6 +704,12 @@ impl VM {
         Ok(())
     }
 
+    /// Every value the last frame to finish at a `run_to_depth` boundary
+    /// returned.
+    pub fn take_returned(&mut self) -> Vec<Value> {
+        std::mem::take(&mut self.returned)
+    }
+
     pub fn run(&mut self) -> Result<Value, String> {
         self.run_to_depth(0)
     }

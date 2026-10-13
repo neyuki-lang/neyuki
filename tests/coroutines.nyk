@@ -1,0 +1,70 @@
+-- coroutine: values in and out, statuses, wrap, close and limits.
+
+local co = coroutine.create(function(a: number, b: number): (number, number, number)
+    local c = coroutine.yield(a + b)
+    local d, e = coroutine.yield(c * 2)
+    return d, e, a
+end)
+assert(type(co) == "thread", "a coroutine is a thread")
+assert(coroutine.status(co) == "suspended", "starts suspended")
+local ok, sum = coroutine.resume(co, 1, 2)
+assert(ok and sum == 3, "first yield")
+local ok2, doubled = coroutine.resume(co, 10)
+assert(ok2 and doubled == 20, "resume passes values in")
+local ok3, x, y, z = coroutine.resume(co, "p", "q")
+assert(ok3 and x == "p" and y == "q" and z == 1, "every return value comes back")
+assert(coroutine.status(co) == "dead", "finished")
+local again, message = coroutine.resume(co)
+assert(not again and message == "cannot resume dead coroutine", "dead stays dead")
+
+-- running, normal and isyieldable
+local outer
+local inner = coroutine.create(function(): string
+    return coroutine.status(outer)
+end)
+outer = coroutine.create(function(): string
+    assert(coroutine.running() == outer, "running is the handle")
+    assert(coroutine.isyieldable(), "yieldable inside")
+    local _, seen = coroutine.resume(inner)
+    return seen
+end)
+local _, status = coroutine.resume(outer)
+assert(status == "normal", "a resumer is normal while the other runs")
+assert(not coroutine.isyieldable(), "the main chunk cannot yield")
+
+-- errors
+local failing = coroutine.create(function() error("inside") end)
+local okf, err = coroutine.resume(failing)
+assert(not okf and string.find(err, "inside") != nil, "errors become resume results")
+
+-- wrap as a generator
+local function range(n: number): any
+    return coroutine.wrap(function()
+        for i = 1, n do
+            coroutine.yield(i)
+        end
+    end)
+end
+local total = 0
+for i in range(4) do
+    total += i
+end
+assert(total == 10, "wrap drives a for loop")
+
+-- close
+local paused = coroutine.create(function() coroutine.yield() end)
+coroutine.resume(paused)
+assert(coroutine.close(paused) == true, "close a suspended coroutine")
+assert(coroutine.status(paused) == "dead", "closed is dead")
+
+-- yields cannot cross native calls
+local crossing = coroutine.create(function()
+    table.sort({ 2, 1 }, function(a, b)
+        coroutine.yield()
+        return a < b
+    end)
+end)
+local okc, errc = coroutine.resume(crossing)
+assert(not okc and string.find(errc, "native") != nil, "yield across a native call is an error")
+
+print("[pass] coroutines")

@@ -1,4 +1,4 @@
-// Coroutine standard library for Neyuki VM.
+//! The `coroutine` library.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -33,6 +33,8 @@ pub fn create_coroutine_lib() -> Value {
         "isyieldable",
         crate::native!("coroutine.isyieldable", coroutine_isyieldable),
     );
+    b.set_str("close", crate::native!("coroutine.close", coroutine_close));
+    b.frozen = true;
 
     Value::Table(t.clone())
 }
@@ -123,16 +125,10 @@ fn resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let co_rc = vm.co_state(co_id).expect("live coroutine state vanished");
 
     let current_status = co_rc.borrow().status.clone();
-    if current_status == "dead" {
+    if current_status != "suspended" {
         return Ok(vec![
             Value::Bool(false),
-            Value::str("cannot resume dead coroutine"),
-        ]);
-    }
-    if current_status == "running" {
-        return Ok(vec![
-            Value::Bool(false),
-            Value::str("cannot resume running coroutine"),
+            Value::string(format!("cannot resume {} coroutine", current_status)),
         ]);
     }
 
@@ -142,6 +138,16 @@ fn resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let caller_stack = std::mem::take(&mut vm.stack);
     let caller_frames = std::mem::take(&mut vm.frames);
     let caller_co = vm.current_co;
+    // A coroutine that resumes another is "normal" until it gets control back.
+    let caller_state = caller_co.and_then(|id| vm.co_state(id));
+    if let Some(caller) = &caller_state {
+        caller.borrow_mut().status = "normal".to_string();
+    }
+    let restore_caller = || {
+        if let Some(caller) = &caller_state {
+            caller.borrow_mut().status = "running".to_string();
+        }
+    };
 
     let is_initial = co_rc.borrow().frames.is_empty();
     {
@@ -185,6 +191,8 @@ fn resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
                 vm.frames = caller_frames;
                 vm.current_co = caller_co;
                 vm.unpark_upvalues(caller_open_upvalues);
+                restore_caller();
+                vm.error_trace = None;
                 return match res {
                     Ok(vals) => {
                         let mut out = vec![Value::Bool(true)];
@@ -200,6 +208,7 @@ fn resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
                 vm.frames = caller_frames;
                 vm.current_co = caller_co;
                 vm.unpark_upvalues(caller_open_upvalues);
+                restore_caller();
                 return Err("coroutine function is not callable".to_string());
             }
         }
@@ -238,12 +247,17 @@ fn resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
             vm.frames = caller_frames;
             vm.current_co = caller_co;
             vm.unpark_upvalues(caller_open_upvalues);
+            restore_caller();
 
             let mut out = vec![Value::Bool(true)];
             out.extend(yielded);
             Ok(out)
         }
-        Ok(ret_val) => {
+        Ok(first) => {
+            let mut returned = vm.take_returned();
+            if returned.is_empty() {
+                returned.push(first);
+            }
             vm.close_upvalues(0);
             let mut cs = co_rc.borrow_mut();
             cs.status = "dead".to_string();
@@ -254,8 +268,11 @@ fn resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
             vm.frames = caller_frames;
             vm.current_co = caller_co;
             vm.unpark_upvalues(caller_open_upvalues);
+            restore_caller();
 
-            Ok(vec![Value::Bool(true), ret_val])
+            let mut out = vec![Value::Bool(true)];
+            out.extend(returned);
+            Ok(out)
         }
         Err(err) => {
             vm.close_upvalues(0);
@@ -268,6 +285,8 @@ fn resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
             vm.frames = caller_frames;
             vm.current_co = caller_co;
             vm.unpark_upvalues(caller_open_upvalues);
+            restore_caller();
+            vm.error_trace = None;
 
             Ok(vec![Value::Bool(false), Value::string(err)])
         }
@@ -357,6 +376,34 @@ fn coroutine_wrap(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     Ok(vec![Value::Table(wrapper_table)])
 }
 
+/// Whether `coroutine.yield` would succeed here: inside a coroutine and not
+/// under a native function that called back into Neyuki.
 fn coroutine_isyieldable(vm: &mut VM, _args: &[Value]) -> Result<Vec<Value>, String> {
-    Ok(vec![Value::Bool(vm.current_co.is_some())])
+    Ok(vec![Value::Bool(
+        vm.current_co.is_some() && vm.native_calls <= vm.yield_floor,
+    )])
+}
+
+/// `coroutine.close(co)`: kills a suspended or finished coroutine, freeing
+/// its stack. Returns true, or false and a message for one still running.
+fn coroutine_close(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let Some(co_id) = live_coroutine(vm, args.first(), "coroutine.close")? else {
+        return Ok(vec![Value::Bool(true)]);
+    };
+    let co = vm.co_state(co_id).expect("live coroutine state vanished");
+    let status = co.borrow().status.clone();
+    if status != "suspended" {
+        return Ok(vec![
+            Value::Bool(false),
+            Value::string(format!("cannot close a {} coroutine", status)),
+        ]);
+    }
+    let mut state = co.borrow_mut();
+    state.status = "dead".to_string();
+    state.stack = Vec::new();
+    state.frames = Vec::new();
+    state.open_upvalues = Vec::new();
+    drop(state);
+    vm.co_states.remove(&co_id);
+    Ok(vec![Value::Bool(true)])
 }
