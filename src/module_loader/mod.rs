@@ -104,18 +104,12 @@ impl ModuleLoader {
         } else {
             let src = std::str::from_utf8(bytes)
                 .map_err(|_| format!("cannot read module '{}': invalid UTF-8", requested_name))?;
-            let stmts = crate::compiler::compile_source(src)?;
-            let diags = crate::sema::analyze(&stmts, src);
-            if let Some(err) = diags
-                .iter()
-                .find(|d| d.severity == crate::diagnostics::severity::Severity::Error)
-            {
-                return Err(format!(
-                    "semantic error in module '{}': {}",
-                    requested_name, err.message
-                ));
-            }
-            crate::compiler::try_compile_to_proto_via_ir(&stmts)?
+            crate::compiler::compile_program(
+                src,
+                &path.to_string_lossy(),
+                crate::compiler::Options::RUN,
+            )
+            .map_err(|err| format!("in module '{}': {}", requested_name, err))?
         };
 
         let rc = Rc::new(proto);

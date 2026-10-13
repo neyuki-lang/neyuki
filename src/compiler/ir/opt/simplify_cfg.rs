@@ -64,9 +64,14 @@ pub fn eliminate_empty_jump_blocks(cfg: &mut ControlFlowGraph) -> bool {
         .blocks
         .iter()
         .filter(|b| b.label != cfg.entry_label)
-        .filter_map(|b| match b.instructions.as_slice() {
-            [IrInst::Jump(target)] if *target != b.label => Some((b.label, *target)),
-            _ => None,
+        .filter_map(|b| {
+            let mut code = b.instructions.iter().filter(|i| !i.is_debug_marker());
+            match (code.next(), code.next()) {
+                (Some(IrInst::Jump(target)), None) if *target != b.label => {
+                    Some((b.label, *target))
+                }
+                _ => None,
+            }
         })
         .collect();
 

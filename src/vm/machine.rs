@@ -89,6 +89,24 @@ impl HookEvent {
     }
 }
 
+/// One line of a traceback: where a frame was when an error was raised.
+#[derive(Clone, Debug)]
+pub struct TraceFrame {
+    pub function: Option<String>,
+    pub source: Option<Rc<str>>,
+    pub line: u32,
+}
+
+impl std::fmt::Display for TraceFrame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let source = self.source.as_deref().unwrap_or("?");
+        match self.function.as_deref() {
+            None | Some("main") => write!(f, "{}:{} in main chunk", source, self.line),
+            Some(name) => write!(f, "{}:{} in function '{}'", source, self.line, name),
+        }
+    }
+}
+
 pub struct VM {
     pub stack: Vec<Value>,
     pub frames: Vec<CallFrame>,
@@ -141,6 +159,9 @@ pub struct VM {
     /// Every value the frame that just unwound to a `run_to_depth` boundary
     /// returned, so `call_function` can hand back more than the first.
     returned: Vec<Value>,
+    /// The call stack where the error now unwinding was raised, innermost
+    /// frame first. Cleared when `try`, `pcall` or `xpcall` catches it.
+    pub error_trace: Option<Vec<TraceFrame>>,
 }
 
 impl Default for VM {
@@ -173,6 +194,7 @@ impl VM {
             modules: HashMap::new(),
             string_lib: Value::Nil,
             returned: Vec::new(),
+            error_trace: None,
         };
         vm.register_builtins();
         vm
@@ -230,6 +252,7 @@ impl VM {
         self.yield_floor = 0;
         self.current_co = None;
         self.is_yielding = false;
+        self.error_trace = None;
 
         // Ensure stack has enough capacity for main frame
         let max_reg = closure.proto.max_registers as usize;
@@ -659,6 +682,62 @@ impl VM {
     /// the instruction pointer back first so that code sees a consistent
     /// frame.
     pub fn run_to_depth(&mut self, target_depth: usize) -> Result<Value, String> {
+        let result = self.run_loop(target_depth);
+        if result.is_err() && !self.is_yielding && self.error_trace.is_none() {
+            self.error_trace = Some(self.capture_trace());
+        }
+        result
+    }
+
+    /// Where every live frame is, innermost first. Deep stacks keep their
+    /// innermost and outermost frames.
+    pub fn capture_trace(&self) -> Vec<TraceFrame> {
+        const KEEP: usize = 12;
+        let frame_at = |frame: &crate::vm::frame::CallFrame| {
+            let proto = &frame.closure.proto;
+            TraceFrame {
+                function: proto.name.clone(),
+                source: proto.source.clone(),
+                line: proto
+                    .lines
+                    .get(frame.ip.saturating_sub(1))
+                    .copied()
+                    .unwrap_or(0),
+            }
+        };
+        let frames: Vec<_> = self.frames.iter().rev().collect();
+        if frames.len() <= KEEP * 2 {
+            return frames.into_iter().map(frame_at).collect();
+        }
+        let mut trace: Vec<TraceFrame> = frames[..KEEP].iter().map(|f| frame_at(f)).collect();
+        trace.push(TraceFrame {
+            function: Some(format!("... {} more frames", frames.len() - KEEP * 2)),
+            source: None,
+            line: 0,
+        });
+        trace.extend(frames[frames.len() - KEEP..].iter().map(|f| frame_at(f)));
+        trace
+    }
+
+    /// An error message followed by the traceback recorded for it, if any.
+    pub fn describe_error(&self, message: &str) -> String {
+        let mut out = message.to_string();
+        if let Some(trace) = &self.error_trace {
+            for frame in trace {
+                if frame.source.is_none() && frame.line == 0 {
+                    out.push_str(&format!(
+                        "\n    {}",
+                        frame.function.as_deref().unwrap_or("")
+                    ));
+                } else {
+                    out.push_str(&format!("\n    at {}", frame));
+                }
+            }
+        }
+        out
+    }
+
+    fn run_loop(&mut self, target_depth: usize) -> Result<Value, String> {
         if self.frames.len() <= target_depth {
             return Ok(Value::Nil);
         }
@@ -2186,6 +2265,13 @@ mod tests {
         vm.execute(proto).expect("execution error")
     }
 
+    /// Compiled like a debug session: no inlining, so hooks see every call.
+    fn run_debug(src: &str) -> Value {
+        let proto = crate::compiler::compile_program(src, "test", crate::compiler::Options::DEBUG)
+            .expect("compile error");
+        VM::new().execute(proto).expect("execution error")
+    }
+
     fn run_err(src: &str) -> String {
         let mut parser = Parser::new(src);
         let (stmts, _pool) = parser.parse_program().expect("syntax error");
@@ -2502,7 +2588,7 @@ mod tests {
         // return (hook is active by then), then add's pair, then the
         // clearing sethook reports its call (but no return: hook is off).
         let code = "local events = {}\nlocal function tracer(ev)\n  events[#events + 1] = ev\nend\ndebug.sethook(tracer, \"cr\")\nlocal function add(x, y)\n  return x + y\nend\nlocal s = add(1, 2)\ndebug.sethook(nil)\nreturn table.concat(events, \",\")";
-        let res = run_code(code);
+        let res = run_debug(code);
         assert_eq!(res.to_string(), "return,call,return,call");
     }
 

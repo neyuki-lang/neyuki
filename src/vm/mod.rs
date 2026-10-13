@@ -32,9 +32,9 @@ pub fn run_file(path: &str) -> Result<(), String> {
     }
     let source = String::from_utf8(bytes)
         .map_err(|_| format!("failed to read {}: file is not valid UTF-8", path))?;
-    let stmts =
-        crate::compiler::compile_source(&source).map_err(|e| format!("syntax error: {}", e))?;
-    let proto = crate::compiler::try_compile_to_proto_via_ir(&stmts)?;
+    let proto = crate::compiler::compile_program(&source, path, crate::compiler::Options::RUN)?;
     let mut vm = VM::new();
-    vm.execute(proto).map(|_| ())
+    vm.execute(proto)
+        .map(|_| ())
+        .map_err(|err| vm.describe_error(&err))
 }

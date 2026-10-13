@@ -16,7 +16,7 @@ pub fn deserialize(bytes: &[u8]) -> Result<Proto, String> {
             header.checksum, actual_checksum
         ));
     }
-    let proto = read_proto(bytes, &mut cursor, 0)?;
+    let proto = read_proto(bytes, &mut cursor, 0, None)?;
     // Verify bytecode integrity before allowing execution
     verify_proto(&proto).map_err(|e| e.to_string())?;
     Ok(proto)
@@ -386,7 +386,12 @@ fn read_instruction(bytes: &[u8], cursor: &mut usize) -> Result<Instruction, Str
     }
 }
 
-fn read_proto(bytes: &[u8], cursor: &mut usize, depth: usize) -> Result<Proto, String> {
+fn read_proto(
+    bytes: &[u8],
+    cursor: &mut usize,
+    depth: usize,
+    parent_source: Option<std::rc::Rc<str>>,
+) -> Result<Proto, String> {
     const MAX_PROTO_DEPTH: usize = 64;
     if depth > MAX_PROTO_DEPTH {
         return Err(format!(
@@ -400,6 +405,12 @@ fn read_proto(bytes: &[u8], cursor: &mut usize, depth: usize) -> Result<Proto, S
         Some(read_string(bytes, cursor)?)
     } else {
         None
+    };
+    let source: Option<std::rc::Rc<str>> = match read_u8(bytes, cursor)? {
+        0 => None,
+        1 => Some(read_string(bytes, cursor)?.into()),
+        2 => parent_source,
+        tag => return Err(format!("invalid source tag {}", tag)),
     };
     let num_params = read_u8(bytes, cursor)?;
     let max_registers = read_u8(bytes, cursor)?;
@@ -438,7 +449,12 @@ fn read_proto(bytes: &[u8], cursor: &mut usize, depth: usize) -> Result<Proto, S
     }
     let mut protos = Vec::with_capacity(num_protos);
     for _ in 0..num_protos {
-        protos.push(std::rc::Rc::new(read_proto(bytes, cursor, depth + 1)?));
+        protos.push(std::rc::Rc::new(read_proto(
+            bytes,
+            cursor,
+            depth + 1,
+            source.clone(),
+        )?));
     }
 
     let num_upvalues = read_u32(bytes, cursor)? as usize;
@@ -499,6 +515,7 @@ fn read_proto(bytes: &[u8], cursor: &mut usize, depth: usize) -> Result<Proto, S
         upvalues,
         lines,
         local_names,
+        source,
         cache: Default::default(),
     })
 }

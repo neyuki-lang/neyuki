@@ -47,6 +47,8 @@ pub struct Proto {
     pub lines: Vec<u32>,
     // Local variable debug info for traceback
     pub local_names: Vec<LocalVarInfo>,
+    /// The chunk this function was compiled from, such as a file path.
+    pub source: Option<Rc<str>>,
     // Runtime-derived state the VM attaches on first execution.
     pub cache: ProtoCache,
 }
@@ -116,6 +118,7 @@ impl Proto {
             upvalues: Vec::new(),
             lines: Vec::new(),
             local_names: Vec::new(),
+            source: None,
             cache: ProtoCache::default(),
         }
     }
@@ -208,6 +211,15 @@ impl Proto {
         self.instructions.push(inst);
         self.lines.push(line);
         idx
+    }
+
+    /// Names the chunk this function and every function nested in it came
+    /// from.
+    pub fn set_source(&mut self, source: Rc<str>) {
+        for child in &mut self.protos {
+            Rc::make_mut(child).set_source(source.clone());
+        }
+        self.source = Some(source);
     }
 
     // Register a local variable in debug info

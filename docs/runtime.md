@@ -14,8 +14,6 @@ cargo run -- test
 
 `lint` prints tokens and checks parsing. `compile` compiles a file to `.nykb` bytecode. `run` compiles the file (or loads a `.nykb`) and executes it on the register VM. `disasm` prints the bytecode the compiler emits, and `dump-ir` the intermediate representation before and after optimization. `test` runs every `.nyk` file in `tests/`.
 
-Programs go through the optimizing IR pipeline by default. `compile --direct` and `disasm --direct` use the older single-pass bytecode compiler instead, for comparison and debugging.
-
 ## Builtins
 
 The base runtime provides `print`, `tostring`, `type`, `typeof`, `assert`, `int`, `float`, `try`, and `require`. `type` groups integers and floats as `number`; `typeof` reports `bigint` for arbitrary-precision integers and `float` for floating-point values.

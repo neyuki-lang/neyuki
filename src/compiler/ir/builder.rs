@@ -24,6 +24,13 @@ struct IrLoopContext {
 use crate::bytecode::proto::UpvalueDesc;
 
 pub struct IrBuilder {
+    /// Source line of each statement, by node id.
+    lines: Option<std::rc::Rc<HashMap<NodeId, u32>>>,
+    current_line: u32,
+    /// Keep locals alive until their scope ends, for the debugger.
+    keep_locals: bool,
+    /// The variables declared in each open scope, in declaration order.
+    scope_vars: Vec<Vec<IrVar>>,
     next_var: u32,
     next_label: usize,
     instructions: Vec<IrInst>,
@@ -45,6 +52,10 @@ impl Default for IrBuilder {
 impl IrBuilder {
     pub fn new() -> Self {
         Self {
+            lines: None,
+            current_line: 0,
+            keep_locals: false,
+            scope_vars: vec![Vec::new()],
             next_var: 0,
             next_label: 0,
             instructions: Vec::new(),
@@ -82,15 +93,44 @@ impl IrBuilder {
 
     pub fn enter_scope(&mut self) {
         self.scopes.push(HashMap::new());
+        self.scope_vars.push(Vec::new());
     }
 
     pub fn exit_scope(&mut self) {
         self.scopes.pop();
+        let vars = self.scope_vars.pop().unwrap_or_default();
+        let ended = self
+            .instructions
+            .last()
+            .is_some_and(|inst| inst.is_terminator());
+        if !vars.is_empty() && !ended {
+            self.emit(IrInst::DebugScopeEnd {
+                vars,
+                keep_alive: self.keep_locals,
+            });
+        }
     }
 
     pub fn add_local(&mut self, name: String, var: IrVar) {
         if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(name, var);
+            scope.insert(name.clone(), var);
+        }
+        if let Some(vars) = self.scope_vars.last_mut() {
+            vars.push(var);
+        }
+        self.emit(IrInst::DebugLocal { name, var });
+    }
+
+    /// Emits a line marker for `stmt` when it starts on a new line.
+    fn mark_line(&mut self, id: NodeId) {
+        let Some(lines) = &self.lines else {
+            return;
+        };
+        if let Some(&line) = lines.get(&id)
+            && line != self.current_line
+        {
+            self.current_line = line;
+            self.emit(IrInst::Line(line));
         }
     }
 
@@ -658,6 +698,12 @@ impl IrBuilder {
         let num_params = params.iter().filter(|p| !p.variadic).count() as u8;
 
         let mut sub_builder = IrBuilder::new();
+        sub_builder.lines = self.lines.clone();
+        sub_builder.keep_locals = self.keep_locals;
+        if self.current_line > 0 {
+            sub_builder.current_line = self.current_line;
+            sub_builder.emit(IrInst::Line(self.current_line));
+        }
         sub_builder.parent_scopes = self.parent_scopes.clone();
         sub_builder.parent_scopes.push(self.scopes.clone());
         sub_builder.enter_scope();
@@ -707,6 +753,7 @@ impl IrBuilder {
     }
 
     pub fn compile_stmt(&mut self, stmt: &Stmt) {
+        self.mark_line(stmt.node_id());
         match stmt {
             Stmt::Local {
                 name, initializer, ..
@@ -1196,7 +1243,19 @@ impl IrBuilder {
 }
 
 pub fn ast_to_ir(stmts: &[Stmt]) -> IrModule {
+    ast_to_ir_with(stmts, None, false)
+}
+
+/// Builds the IR with line markers from `lines` (statement id to line) and,
+/// with `keep_locals`, locals kept alive to the end of their scope.
+pub fn ast_to_ir_with(
+    stmts: &[Stmt],
+    lines: Option<std::rc::Rc<HashMap<NodeId, u32>>>,
+    keep_locals: bool,
+) -> IrModule {
     let mut builder = IrBuilder::new();
+    builder.lines = lines;
+    builder.keep_locals = keep_locals;
     for stmt in stmts {
         builder.compile_stmt(stmt);
     }

@@ -1,28 +1,67 @@
-// Bytecode compiler module.
+//! Source to bytecode: parse, check, fold constants, lower to SSA IR,
+//! optimize, allocate registers and emit a `Proto`.
 
 pub mod builtins_folding;
-pub mod codegen;
 pub mod constant_fold;
 pub mod cost_model;
 pub mod ir;
-pub mod table_shape;
 pub mod value_tracking;
 
+use crate::ast::node_id::NodeId;
 use crate::bytecode::proto::Proto;
 use crate::bytecode::serialize::serialize;
-use crate::parser::{Param, Parser, Stmt};
+use crate::parser::{Parser, Stmt};
+use std::collections::HashMap;
 use std::fs;
+use std::rc::Rc;
 
-pub use codegen::{CompileError, Compiler};
 pub use constant_fold::fold_program;
 pub use value_tracking::{TrackedValue, ValueTracker, value_tracking_cfg};
 
-// Parse Neyuki source code into AST statements
-pub fn compile_source(source: &str) -> Result<Vec<Stmt>, String> {
-    let mut stmts = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+/// A parsed program together with the line each statement starts on.
+pub struct Parsed {
+    pub stmts: Vec<Stmt>,
+    pub lines: Rc<HashMap<NodeId, u32>>,
+}
+
+/// How a program is compiled.
+#[derive(Clone, Copy)]
+pub struct Options {
+    /// Run the semantic checks first.
+    pub check: bool,
+    /// Inline small functions.
+    pub inline: bool,
+    /// Keep locals in their registers until their scope ends, so a debugger
+    /// can read them after their last use.
+    pub keep_locals: bool,
+}
+
+impl Options {
+    /// For running user code.
+    pub const RUN: Options = Options {
+        check: true,
+        inline: true,
+        keep_locals: false,
+    };
+    /// For the debugger: every call keeps its frame, every local its value.
+    pub const DEBUG: Options = Options {
+        check: true,
+        inline: false,
+        keep_locals: true,
+    };
+    /// For the bundled libraries and REPL chunks, which are not checked.
+    pub const UNCHECKED: Options = Options {
+        check: false,
+        inline: true,
+        keep_locals: false,
+    };
+}
+
+/// Parses source, keeping the line of each statement.
+pub fn parse(source: &str) -> Result<Parsed, String> {
+    let (mut stmts, pool) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut parser = Parser::new(source);
-        let (stmts, _pool) = parser.parse_program()?;
-        Ok::<Vec<Stmt>, String>(stmts)
+        parser.parse_program()
     }))
     .map_err(|payload| {
         if let Some(s) = payload.downcast_ref::<&str>() {
@@ -36,79 +75,78 @@ pub fn compile_source(source: &str) -> Result<Vec<Stmt>, String> {
 
     crate::ast::visitor::check_ast_sanity(&stmts)?;
     crate::ast::visitor_mut::normalize_ast(&mut stmts);
-    Ok(stmts)
+    Ok(Parsed {
+        stmts,
+        lines: Rc::new(pool.start_lines()),
+    })
 }
 
-// Read and parse source file into AST statements
+/// Parses Neyuki source into statements.
+pub fn compile_source(source: &str) -> Result<Vec<Stmt>, String> {
+    parse(source).map(|parsed| parsed.stmts)
+}
+
+/// Parses, checks and compiles a whole program with line information.
+/// `chunk` names it in error messages and tracebacks, usually a file path.
+pub fn compile_program(source: &str, chunk: &str, options: Options) -> Result<Proto, String> {
+    let parsed = parse(source)?;
+    if options.check {
+        check(&parsed.stmts, source)?;
+    }
+    let mut proto = lower(&parsed.stmts, Some(parsed.lines), options)?;
+    proto.set_source(Rc::from(chunk));
+    Ok(proto)
+}
+
+/// Reads and parses a source file.
 pub fn compile_file(path: &str) -> Result<Vec<Stmt>, String> {
     let source =
         fs::read_to_string(path).map_err(|err| format!("failed to read {}: {}", path, err))?;
     compile_source(&source)
 }
 
-// Compile AST statements into a register-based Proto with constant folding optimization,
-// returning detailed errors on compilation failure.
+/// Rejects programs with semantic errors (undefined names, const writes,
+/// type mismatches).
+fn check(statements: &[Stmt], source: &str) -> Result<(), String> {
+    let diags = crate::sema::analyze(statements, source);
+    match diags
+        .iter()
+        .find(|d| d.severity == crate::diagnostics::severity::Severity::Error)
+    {
+        Some(err) => Err(format!("semantic error: {}", err.message)),
+        None => Ok(()),
+    }
+}
+
+/// Checks and compiles statements (without line information).
 pub fn try_compile_to_proto(statements: &[Stmt]) -> Result<Proto, String> {
-    let diags = crate::sema::analyze(statements, "");
-    if let Some(err) = diags
-        .iter()
-        .find(|d| d.severity == crate::diagnostics::severity::Severity::Error)
-    {
-        return Err(format!("semantic error: {}", err.message));
-    }
-    codegen_proto(statements)
+    check(statements, "")?;
+    lower(statements, None, Options::RUN)
 }
 
-// Compile the statements of a bundled `lib/*.nyk` module. These are vetted by
-// the test suite, so they skip the type-checking pass user code goes through.
+/// Compiles statements without checking them.
 pub fn compile_bundled_to_proto(statements: &[Stmt]) -> Result<Proto, String> {
-    compile_to_proto_via_ir_unchecked(statements)
+    lower(statements, None, Options::UNCHECKED)
 }
 
-fn codegen_proto(statements: &[Stmt]) -> Result<Proto, String> {
-    let cost_model = crate::compiler::cost_model::CostModel::default();
-    let _ast_cost = cost_model.program_cost(statements);
+fn lower(
+    statements: &[Stmt],
+    lines: Option<Rc<HashMap<NodeId, u32>>>,
+    options: Options,
+) -> Result<Proto, String> {
     let optimized_stmts = fold_program(statements.to_vec());
-    let mut compiler = Compiler::new(Some("main".to_string()), 0, false);
-    compiler.compile_program(&optimized_stmts);
-    let proto = compiler.finish().map_err(|errors| {
-        errors
-            .iter()
-            .map(|e| e.to_string())
-            .collect::<Vec<_>>()
-            .join("\n")
-    })?;
-    let _proto_cost = cost_model.proto_cost(&proto);
-    let _ = cost_model.should_inline(&proto);
-    Ok(proto)
-}
-
-// Compile AST statements through full IR pipeline: AST -> IR -> CFG -> optimize_cfg -> bytecode Proto
-pub fn try_compile_to_proto_via_ir(statements: &[Stmt]) -> Result<Proto, String> {
-    let diags = crate::sema::analyze(statements, "");
-    if let Some(err) = diags
-        .iter()
-        .find(|d| d.severity == crate::diagnostics::severity::Severity::Error)
-    {
-        return Err(format!("semantic error: {}", err.message));
+    let mut ir_module = ir::ast_to_ir_with(&optimized_stmts, lines, options.keep_locals);
+    if options.inline {
+        ir::inline_functions(&mut ir_module);
     }
-    compile_to_proto_via_ir_unchecked(statements)
-}
-
-// The IR pipeline without the semantic-analysis gate, for sources that have
-// already been checked (or are trusted, like the bundled standard library).
-fn compile_to_proto_via_ir_unchecked(statements: &[Stmt]) -> Result<Proto, String> {
-    let optimized_stmts = fold_program(statements.to_vec());
-    let mut ir_module = ir::ast_to_ir(&optimized_stmts);
-    ir::inline_functions(&mut ir_module);
     optimize_ir_function(&mut ir_module.main);
     ir::verify_module(&ir_module)
         .map_err(|errs| format!("IR verification error: {}", errs.join(", ")))?;
     ir::ir_to_bytecode(&ir_module)
 }
 
-// The IR of a program before and after optimization, for debugging the
-// pipeline.
+/// The IR of a program before and after optimization, for debugging the
+/// pipeline.
 pub fn dump_ir(statements: &[Stmt]) -> String {
     let optimized_stmts = fold_program(statements.to_vec());
     let mut ir_module = ir::ast_to_ir(&optimized_stmts);
@@ -127,7 +165,7 @@ pub fn dump_ir(statements: &[Stmt]) -> String {
     out
 }
 
-// Runs the CFG optimizer over a function and every function nested in it.
+/// Runs the CFG optimizer over a function and every function nested in it.
 fn optimize_ir_function(func: &mut ir::IrFunction) {
     let mut cfg = ir::build_cfg(&func.instructions);
     ir::optimize_cfg(&mut cfg);
@@ -138,94 +176,22 @@ fn optimize_ir_function(func: &mut ir::IrFunction) {
     }
 }
 
-// Compile AST function (with parameters and body statements) into a register-based Proto
-pub fn try_compile_function_to_proto(
-    name: Option<String>,
-    params: &[Param],
-    statements: &[Stmt],
-) -> Result<Proto, String> {
-    let is_vararg = params.iter().any(|p| p.variadic);
-    let num_params = params.iter().filter(|p| !p.variadic).count() as u8;
-    let optimized_stmts = fold_program(statements.to_vec());
-    let mut compiler = Compiler::new(name, num_params, is_vararg);
-    for param in params {
-        if !param.variadic {
-            let reg = compiler.alloc_reg();
-            compiler.current_mut().add_local(param.name.clone(), reg);
-        }
-    }
-    compiler.compile_program(&optimized_stmts);
-    compiler.finish().map_err(|errors| {
-        errors
-            .iter()
-            .map(|e| e.to_string())
-            .collect::<Vec<_>>()
-            .join("\n")
-    })
-}
-
-// Compile AST statements into a register-based Proto with fallback on error
+/// Compiles statements, panicking on errors. For tests, benchmarks and
+/// fuzzing, where the source is known to be valid.
 pub fn compile_to_proto(statements: &[Stmt]) -> Proto {
-    match try_compile_to_proto(statements) {
-        Ok(proto) => proto,
-        Err(err) => {
-            eprintln!("{}", err);
-            // Return a minimal proto that immediately returns nil
-            let mut p = Proto::new(Some("error".to_string()), 0, false);
-            p.emit(
-                crate::bytecode::instruction::Instruction::LoadNil { dst: 0 },
-                0,
-            );
-            p.emit(
-                crate::bytecode::instruction::Instruction::Return { base: 0, count: 1 },
-                0,
-            );
-            p.max_registers = 1;
-            p
-        }
-    }
+    try_compile_to_proto(statements).unwrap_or_else(|err| panic!("{}", err))
 }
 
-// Compile source directly into binary bytecode with magic bytes 'neyuki!'
-pub fn compile_source_to_bytecode(source: &str) -> Result<Vec<u8>, String> {
-    let stmts = compile_source(source)?;
-    let diags = crate::sema::analyze(&stmts, source);
-    if let Some(err) = diags
-        .iter()
-        .find(|d| d.severity == crate::diagnostics::severity::Severity::Error)
-    {
-        return Err(format!("semantic error: {}", err.message));
-    }
-    let proto = try_compile_to_proto(&stmts)?;
-    Ok(serialize(&proto))
+/// Compiles source to serialized bytecode, which starts with `MAGIC`.
+pub fn compile_source_to_bytecode(source: &str, chunk: &str) -> Result<Vec<u8>, String> {
+    Ok(serialize(&compile_program(source, chunk, Options::RUN)?))
 }
 
-// Compile file to bytecode binary
+/// Compiles a source file to serialized bytecode.
 pub fn compile_file_to_bytecode(path: &str) -> Result<Vec<u8>, String> {
     let source =
         fs::read_to_string(path).map_err(|err| format!("failed to read {}: {}", path, err))?;
-    compile_source_to_bytecode(&source)
-}
-
-// Compile source directly into binary bytecode via IR pipeline
-pub fn compile_source_to_bytecode_via_ir(source: &str) -> Result<Vec<u8>, String> {
-    let stmts = compile_source(source)?;
-    let diags = crate::sema::analyze(&stmts, source);
-    if let Some(err) = diags
-        .iter()
-        .find(|d| d.severity == crate::diagnostics::severity::Severity::Error)
-    {
-        return Err(format!("semantic error: {}", err.message));
-    }
-    let proto = try_compile_to_proto_via_ir(&stmts)?;
-    Ok(serialize(&proto))
-}
-
-// Compile file to bytecode binary via IR pipeline
-pub fn compile_file_to_bytecode_via_ir(path: &str) -> Result<Vec<u8>, String> {
-    let source =
-        fs::read_to_string(path).map_err(|err| format!("failed to read {}: {}", path, err))?;
-    compile_source_to_bytecode_via_ir(&source)
+    compile_source_to_bytecode(&source, path)
 }
 
 #[cfg(test)]
@@ -236,7 +202,7 @@ mod tests {
     #[test]
     fn test_compile_source_to_bytecode_magic() {
         let code = "local a = 10\nlocal b = 20\nreturn a + b";
-        let bc = compile_source_to_bytecode(code).expect("compilation failed");
+        let bc = compile_source_to_bytecode(code, "test").expect("compilation failed");
         assert!(bc.starts_with(MAGIC));
     }
 
@@ -265,26 +231,10 @@ mod tests {
     }
 
     #[test]
-    fn test_compile_via_ir_parity_with_direct_compiler() {
-        let code = "local a = 10\nlocal b = 20\nreturn a + b";
-        let stmts = compile_source(code).expect("syntax error");
-        let direct_proto = try_compile_to_proto(&stmts).expect("direct compilation failed");
-        let ir_proto = try_compile_to_proto_via_ir(&stmts).expect("IR compilation failed");
-
-        let mut vm_direct = crate::vm::machine::VM::new();
-        let res_direct = vm_direct.execute(direct_proto).expect("direct exec failed");
-
-        let mut vm_ir = crate::vm::machine::VM::new();
-        let res_ir = vm_ir.execute(ir_proto).expect("IR exec failed");
-
-        assert_eq!(res_direct.to_string(), res_ir.to_string());
-    }
-
-    #[test]
     fn test_ir_pipeline_inlines_small_leaf_call() {
         let code = "local function add(x, y) return x + y end\nlocal s = 0\nfor i = 1, 5 do s = s + add(i, i) end\nreturn s";
         let stmts = compile_source(code).expect("syntax error");
-        let proto = try_compile_to_proto_via_ir(&stmts).expect("IR compilation failed");
+        let proto = try_compile_to_proto(&stmts).expect("IR compilation failed");
         // The two-instruction leaf must be inlined: no Call left in main.
         assert!(
             !proto
@@ -310,16 +260,17 @@ mod tests {
                     for i, v in each({10, 20}) do sum = sum + i * v end
                     return x * 100 + y * 10 + z + sum";
         let stmts = compile_source(code).expect("syntax error");
-        let proto = try_compile_to_proto_via_ir(&stmts).expect("IR compilation failed");
-        let res = crate::vm::machine::VM::new().execute(proto).expect("exec failed");
+        let proto = try_compile_to_proto(&stmts).expect("IR compilation failed");
+        let res = crate::vm::machine::VM::new()
+            .execute(proto)
+            .expect("exec failed");
         assert_eq!(res.to_string(), "281");
     }
 
     /// The parser's nesting limit has to keep every later pass inside an
     /// ordinary thread's stack: library users and `cargo test` do not get the
     /// CLI's large one. The deepest programs it accepts, in each shape that
-    /// recurses, must compile through both pipelines and run on a 2 MiB
-    /// thread in a debug build.
+    /// recurses, must compile and run on a 2 MiB thread in a debug build.
     #[test]
     fn test_deepest_accepted_programs_fit_a_default_stack() {
         type Shape = fn(usize) -> String;
@@ -356,8 +307,7 @@ mod tests {
                     assert!(deepest >= 60, "{} only nest {} deep", name, deepest);
                     let source = format!("local x\n{}", shape(deepest));
                     let stmts = compile_source(&source).expect(name);
-                    try_compile_to_proto(&stmts).expect(name);
-                    let proto = try_compile_to_proto_via_ir(&stmts).expect(name);
+                    let proto = try_compile_to_proto(&stmts).expect(name);
                     crate::vm::machine::VM::new().execute(proto).expect(name);
                 }
             })

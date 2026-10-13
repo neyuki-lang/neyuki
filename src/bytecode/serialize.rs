@@ -10,7 +10,7 @@ pub use crate::bytecode::format::{BYTECODE_VERSION, MAGIC};
 
 pub fn serialize(proto: &Proto) -> Vec<u8> {
     let mut payload = Vec::new();
-    write_proto(&mut payload, proto);
+    write_proto(&mut payload, proto, None);
     let checksum = crate::bytecode::format::compute_crc32(&payload);
     let mut buf = Vec::with_capacity(BytecodeHeader::HEADER_SIZE + payload.len());
     let header = BytecodeHeader::new(checksum);
@@ -408,12 +408,21 @@ fn write_instruction(buf: &mut Vec<u8>, inst: &Instruction) {
     }
 }
 
-fn write_proto(buf: &mut Vec<u8>, proto: &Proto) {
+fn write_proto(buf: &mut Vec<u8>, proto: &Proto, parent_source: Option<&str>) {
     if let Some(name) = &proto.name {
         write_u8(buf, 1);
         write_string(buf, name);
     } else {
         write_u8(buf, 0);
+    }
+    // 0: no source, 1: a source follows, 2: the same source as the parent.
+    match proto.source.as_deref() {
+        None => write_u8(buf, 0),
+        Some(source) if Some(source) == parent_source => write_u8(buf, 2),
+        Some(source) => {
+            write_u8(buf, 1);
+            write_string(buf, source);
+        }
     }
     write_u8(buf, proto.num_params);
     write_u8(buf, proto.max_registers);
@@ -431,7 +440,7 @@ fn write_proto(buf: &mut Vec<u8>, proto: &Proto) {
 
     write_u32(buf, proto.protos.len() as u32);
     for child in &proto.protos {
-        write_proto(buf, child);
+        write_proto(buf, child, proto.source.as_deref());
     }
 
     write_u32(buf, proto.upvalues.len() as u32);

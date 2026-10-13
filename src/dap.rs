@@ -489,11 +489,9 @@ fn run_program(vm: &mut VM, path: &str) -> Result<(), String> {
     }
     let source = String::from_utf8(bytes)
         .map_err(|_| format!("failed to read {}: file is not valid UTF-8", path))?;
-    // Deliberately the direct compiler, not the IR pipeline: optimization
-    // passes such as inlining remove the very call sites breakpoints trap
-    // on. Debug sessions trade speed for faithful execution.
-    let stmts = crate::compiler::compile_source(&source)?;
-    let proto = crate::compiler::try_compile_to_proto(&stmts)?;
+    // Inlining would remove the very call sites breakpoints trap on, so
+    // debug sessions compile without it.
+    let proto = crate::compiler::compile_program(&source, path, crate::compiler::Options::DEBUG)?;
     // Fresh frames/stack like a new run, but keep globals, hook and
     // session state on this VM.
     vm.execute(proto).map(|_| ())

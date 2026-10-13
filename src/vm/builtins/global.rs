@@ -212,7 +212,10 @@ pub fn builtin_pcall(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> 
             res.insert(0, Value::Bool(true));
             Ok(res)
         }
-        Err(err) => Ok(vec![Value::Bool(false), Value::string(err)]),
+        Err(err) => {
+            vm.error_trace = None;
+            Ok(vec![Value::Bool(false), Value::string(err)])
+        }
     }
 }
 
@@ -227,7 +230,10 @@ pub fn builtin_try(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
             res.insert(0, Value::Bool(true));
             Ok(res)
         }
-        Err(err) => Ok(vec![Value::Bool(false), Value::string(err)]),
+        Err(err) => {
+            vm.error_trace = None;
+            Ok(vec![Value::Bool(false), Value::string(err)])
+        }
     }
 }
 
@@ -245,6 +251,7 @@ pub fn builtin_xpcall(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String>
             Ok(res)
         }
         Err(err) => {
+            vm.error_trace = None;
             let err_val = Value::string(err);
             match vm.call_function(err_handler.clone(), std::slice::from_ref(&err_val)) {
                 Ok(h_res) => {
@@ -274,9 +281,7 @@ fn load_bundled_module(vm: &mut VM, name: &str) -> Result<Option<Value>, String>
     else {
         return Ok(None);
     };
-    let stmts = crate::compiler::compile_source(source)
-        .map_err(|err| format!("error in module '{}': {}", name, err))?;
-    let proto = crate::compiler::compile_bundled_to_proto(&stmts)
+    let proto = crate::compiler::compile_program(source, name, crate::compiler::Options::UNCHECKED)
         .map_err(|err| format!("error in module '{}': {}", name, err))?;
     let value = vm.execute_module(proto)?;
     vm.modules.insert(bare.to_string(), value.clone());

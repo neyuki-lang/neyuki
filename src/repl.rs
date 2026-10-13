@@ -38,8 +38,8 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 /// interactive loop must never die on input.
 pub fn eval_chunk(vm: &mut VM, source: &str) -> Result<Option<String>, String> {
     let run = || -> Result<Option<String>, String> {
-        let stmts = crate::compiler::compile_source(source).map_err(|e| e.to_string())?;
-        let proto = crate::compiler::compile_bundled_to_proto(&stmts)?;
+        let proto =
+            crate::compiler::compile_program(source, "repl", crate::compiler::Options::UNCHECKED)?;
         let val = vm.execute(proto)?;
         Ok(match val {
             Value::Nil => None,

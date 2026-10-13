@@ -47,41 +47,21 @@ fn run_cli() {
             process::exit(1);
         }
     } else if action == "compile" {
-        // The optimizing IR pipeline is the default; `--direct` keeps the
-        // older single-pass compiler reachable for comparison.
-        let use_direct = args.iter().any(|a| a == "--direct");
-        let non_flag_args: Vec<&String> = args
-            .iter()
-            .skip(2)
-            .filter(|a| !a.starts_with('-'))
-            .collect();
-        let Some(path) = non_flag_args.first() else {
-            eprintln!("Usage: {} compile <path> [output] [--direct]", args[0]);
+        let Some(path) = args.get(2) else {
+            eprintln!("Usage: {} compile <path> [output]", args[0]);
             process::exit(1);
         };
-        let compile_res = if use_direct {
-            compiler::compile_file_to_bytecode(path)
-        } else {
-            compiler::compile_file_to_bytecode_via_ir(path)
-        };
-        match compile_res {
+        match compiler::compile_file_to_bytecode(path) {
             Ok(bytecode) => {
-                let out_path = non_flag_args
-                    .get(1)
-                    .map(|s| (*s).clone())
-                    .unwrap_or_else(|| format!("{}b", path));
+                let out_path = args.get(3).cloned().unwrap_or_else(|| format!("{}b", path));
                 if let Err(err) = std::fs::write(&out_path, &bytecode) {
                     eprintln!("failed to write bytecode to {}: {}", out_path, err);
                     process::exit(1);
                 }
                 println!(
-                    "compiled to bytecode ({}) via {} with magic 'neyuki!' ({} bytes)",
+                    "compiled {} -> {} ({} bytes)",
+                    path,
                     out_path,
-                    if use_direct {
-                        "direct compiler"
-                    } else {
-                        "IR CFG pipeline"
-                    },
                     bytecode.len()
                 );
             }
@@ -113,26 +93,18 @@ fn run_cli() {
             }
         }
     } else if action == "disasm" {
-        let use_direct = args.iter().any(|a| a == "--direct");
-        let non_flag_args: Vec<&String> = args
-            .iter()
-            .skip(2)
-            .filter(|a| !a.starts_with('-'))
-            .collect();
-        let Some(path) = non_flag_args.first() else {
-            eprintln!("Usage: {} disasm <path> [--direct]", args[0]);
+        let Some(path) = args.get(2) else {
+            eprintln!("Usage: {} disasm <path>", args[0]);
             process::exit(1);
         };
         // A debugging aid: shows what the compiler emits even for sources
         // the type checker would reject.
-        let proto_res = compiler::compile_file(path).and_then(|stmts| {
-            if use_direct {
-                compiler::try_compile_to_proto(&stmts)
-            } else {
-                compiler::compile_bundled_to_proto(&stmts)
-            }
-        });
-        match proto_res {
+        let compiled = std::fs::read_to_string(path)
+            .map_err(|err| format!("failed to read {}: {}", path, err))
+            .and_then(|source| {
+                compiler::compile_program(&source, path, compiler::Options::UNCHECKED)
+            });
+        match compiled {
             Ok(proto) => print!("{}", bytecode::disasm::disassemble_proto(&proto, 0)),
             Err(err) => {
                 eprintln!("{}: {}", path, err);

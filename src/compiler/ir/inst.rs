@@ -182,6 +182,20 @@ pub enum IrInst {
         sink: SpreadSink,
     },
     Label(IrLabel),
+    /// The source line of the instructions that follow. Emits no code.
+    Line(u32),
+    /// From here on the local variable `name` lives in `var`. Debug info only.
+    DebugLocal {
+        name: String,
+        var: IrVar,
+    },
+    /// The locals declared since the matching scope began go out of scope.
+    /// With `keep_alive` the variables count as used here, so a debugger can
+    /// read them until the end of their scope.
+    DebugScopeEnd {
+        vars: Vec<IrVar>,
+        keep_alive: bool,
+    },
     // SSA Phi node: chooses incoming variable based on predecessor block label
     Phi {
         dst: IrVar,
@@ -281,8 +295,20 @@ impl IrInst {
                 uses
             }
             Self::Phi { incoming, .. } => incoming.iter().map(|(_, v)| *v).collect(),
+            Self::DebugScopeEnd {
+                vars,
+                keep_alive: true,
+            } => vars.clone(),
             _ => Vec::new(),
         }
+    }
+
+    /// Line and local-variable markers, which produce no code.
+    pub fn is_debug_marker(&self) -> bool {
+        matches!(
+            self,
+            Self::Line(_) | Self::DebugLocal { .. } | Self::DebugScopeEnd { .. }
+        )
     }
 
     pub fn is_terminator(&self) -> bool {

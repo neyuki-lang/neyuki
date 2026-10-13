@@ -207,7 +207,13 @@ fn splice_call(
     for (i, &arg) in call_args.iter().enumerate() {
         var_map.insert(IrVar(i as u32), arg);
     }
-    for body_inst in &target_func.instructions {
+    // The callee's line and local markers would misattribute the rest of
+    // the caller's statement, so they are left behind.
+    for body_inst in target_func
+        .instructions
+        .iter()
+        .filter(|inst| !inst.is_debug_marker())
+    {
         if let IrInst::Return(ret_vars) = body_inst {
             match ret_vars.first() {
                 Some(&ret_v) => {
@@ -234,7 +240,12 @@ fn splice_call(
 }
 
 fn is_inline_candidate(func: &IrFunction) -> bool {
-    if func.instructions.len() > MAX_INLINE_INSTRUCTIONS {
+    let body: Vec<&IrInst> = func
+        .instructions
+        .iter()
+        .filter(|inst| !inst.is_debug_marker())
+        .collect();
+    if body.len() > MAX_INLINE_INSTRUCTIONS {
         return false;
     }
     if !crate::compiler::cost_model::CostModel::default().should_inline_ir(func) {
@@ -243,10 +254,10 @@ fn is_inline_candidate(func: &IrFunction) -> bool {
     // Straight-line frame-independent body plus one trailing Return of
     // exactly one value. Anything else is rejected.
     let mut returns = 0;
-    for (i, inst) in func.instructions.iter().enumerate() {
+    for (i, inst) in body.iter().enumerate() {
         match inst {
             IrInst::Return(vars) => {
-                if vars.len() != 1 || i + 1 != func.instructions.len() {
+                if vars.len() != 1 || i + 1 != body.len() {
                     return false;
                 }
                 returns += 1;

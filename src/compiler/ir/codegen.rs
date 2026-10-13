@@ -75,6 +75,11 @@ impl RegAlloc {
         base
     }
 
+    /// The register of a variable that has one, without allocating.
+    fn lookup(&self, var: IrVar) -> Option<u8> {
+        self.var_to_reg.get(&var).copied()
+    }
+
     fn bind(&mut self, var: IrVar, reg: u8, proto: &mut Proto) {
         self.var_to_reg.insert(var, reg);
         let needed = reg.saturating_add(1);
@@ -355,11 +360,15 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
     }
 
     let mut skip_next = false;
+    let mut line = 1u32;
+    // Locals whose scope is still open: their variable and debug-info entry.
+    let mut open_locals: Vec<(IrVar, usize)> = Vec::new();
     for (index, inst) in func.instructions.iter().enumerate() {
         if skip_next {
             skip_next = false;
             continue;
         }
+        let first_new = proto.instructions.len();
         let next = func.instructions.get(index + 1);
 
         // `t = <expr>; v = t` with `t` used nowhere else writes `v` directly.
@@ -989,7 +998,31 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
                     }
                 }
             }
+            IrInst::Line(n) => line = *n,
+            IrInst::DebugLocal { name, var } => {
+                // A local optimized away entirely has no register to show.
+                if let Some(reg) = regs.lookup(*var) {
+                    open_locals.push((*var, proto.local_names.len()));
+                    proto.push_local(name.clone(), reg, proto.instructions.len() as u32);
+                }
+            }
+            IrInst::DebugScopeEnd { vars, .. } => {
+                let pc = proto.instructions.len() as u32;
+                for var in vars {
+                    if let Some(pos) = open_locals.iter().rposition(|(v, _)| v == var) {
+                        let (_, entry) = open_locals.remove(pos);
+                        proto.local_names[entry].to_pc = pc;
+                    }
+                }
+            }
         }
+        for slot in &mut proto.lines[first_new..] {
+            *slot = line;
+        }
+    }
+    let end_pc = proto.instructions.len() as u32;
+    for (_, entry) in open_locals {
+        proto.local_names[entry].to_pc = end_pc;
     }
 
     for (jump_ip, label) in jump_patches {

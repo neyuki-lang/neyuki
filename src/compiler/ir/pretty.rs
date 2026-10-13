@@ -93,6 +93,15 @@ pub fn format_inst(inst: &IrInst) -> String {
             format!("v{} = {}v{}", dst.0, format_unop(*op), src.0)
         }
         IrInst::NewTable { dst } => format!("v{} = new_table()", dst.0),
+        IrInst::Line(n) => format!("; line {}", n),
+        IrInst::DebugLocal { name, var } => format!("; local {} = v{}", name, var.0),
+        IrInst::DebugScopeEnd { vars, .. } => format!(
+            "; end of scope {}",
+            vars.iter()
+                .map(|v| format!("v{}", v.0))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         IrInst::GetTable { dst, table, key } => {
             format!("v{} = v{}[v{}]", dst.0, table.0, key.0)
         }

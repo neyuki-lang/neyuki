@@ -16,7 +16,7 @@ pub mod types;
 pub mod verify;
 
 pub use block::{BasicBlock, ControlFlowGraph, IrFunction, IrModule, UpvalSource};
-pub use builder::{IrBuilder, ast_to_ir};
+pub use builder::{IrBuilder, ast_to_ir, ast_to_ir_with};
 pub use cfg_builder::build_cfg;
 pub use codegen::ir_to_bytecode;
 pub use dom::DominatorTree;
@@ -44,8 +44,7 @@ mod tests {
     /// `--opt-ir` does.
     fn run_via_ir(code: &str) -> String {
         let stmts = compile_source(code).expect("syntax error");
-        let proto =
-            crate::compiler::try_compile_to_proto_via_ir(&stmts).expect("ir lowering failed");
+        let proto = crate::compiler::try_compile_to_proto(&stmts).expect("ir lowering failed");
         let mut vm = VM::new();
         vm.execute(proto).expect("execution failed").to_string()
     }
@@ -548,12 +547,12 @@ return #collected * 100 + total(table.unpack(collected))";
         let stmts = compile_source(code).expect("syntax error");
         let first = format!(
             "{:?}",
-            crate::compiler::try_compile_to_proto_via_ir(&stmts).expect("ir lowering failed")
+            crate::compiler::try_compile_to_proto(&stmts).expect("ir lowering failed")
         );
         for _ in 0..8 {
             let again = format!(
                 "{:?}",
-                crate::compiler::try_compile_to_proto_via_ir(&stmts).expect("ir lowering failed")
+                crate::compiler::try_compile_to_proto(&stmts).expect("ir lowering failed")
             );
             assert_eq!(first, again, "codegen differs between runs");
         }

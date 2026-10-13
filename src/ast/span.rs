@@ -119,6 +119,14 @@ impl SpanPool {
     pub fn get_or_dummy(&self, id: NodeId) -> Span {
         self.map.get(&id).copied().unwrap_or_default()
     }
+
+    /// The line each node starts on.
+    pub fn start_lines(&self) -> HashMap<NodeId, u32> {
+        self.map
+            .iter()
+            .map(|(id, span)| (*id, span.start.line))
+            .collect()
+    }
 }
 
 impl Default for SpanPool {
