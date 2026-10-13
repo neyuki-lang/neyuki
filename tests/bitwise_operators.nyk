@@ -33,4 +33,11 @@ assert((~1 & 1) == 0, "precedence: (~1) & 1 == 0")
 assert((12.7 & 10.2) == 8, "float truncation in bitwise and")
 assert(~1.9 == -2, "float truncation in bitwise not")
 
+-- the bit library wraps negative and oversized numbers modulo 2^32
+local minusEight = -8
+assert(bit.rshift(minusEight, 1) == 0x7ffffffc, "rshift treats negatives as unsigned words")
+assert(bit.rshift(-8, 1) == 0x7ffffffc, "constant folding agrees")
+assert(bit.band(-1, 0xff) == 0xff, "band wraps negatives")
+assert(bit.tobit(2 ^ 32 + 5) == 5 and bit.tobit(0xffffffff) == -1, "tobit keeps the low 32 bits, signed")
+
 print("[pass] bitwise operators (and, or, xor, not, shifts) verified")

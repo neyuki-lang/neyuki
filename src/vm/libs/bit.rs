@@ -8,11 +8,18 @@ use std::rc::Rc;
 use crate::vm::machine::VM;
 use crate::vm::value::{Value, VmTable};
 
+/// The low 32 bits of an integer, so negative and oversized values wrap
+/// modulo 2^32 as in Lua's bit32.
+fn low_bits(value: &BigInt) -> u32 {
+    (value & BigInt::from(u32::MAX)).to_u32().unwrap_or(0)
+}
+
 fn to_u32(val: &Value) -> Result<u32, String> {
     match val {
-        Value::Int(i) => Ok(i.to_u32().unwrap_or(0)),
-        Value::Float(f) => Ok(*f as i64 as u32),
-        _ => Err("bit library expects number".to_string()),
+        Value::Int(i) => Ok(*i as u32),
+        Value::BigInt(b) => Ok(low_bits(b)),
+        Value::Float(f) if f.is_finite() => Ok(*f as i64 as u32),
+        _ => Err("bit library expects a finite number".to_string()),
     }
 }
 
@@ -20,12 +27,7 @@ fn to_u32(val: &Value) -> Result<u32, String> {
 /// natives below would, for the constant folder. `None` when the native would
 /// raise an error, or for functions the folder leaves to runtime.
 pub(crate) fn fold_call(name: &str, args: &[BigInt]) -> Option<BigInt> {
-    // `to_u32` on an integer `Value`: anything past i64 is a `BigInt`, which
-    // the natives reject, and an i64 outside u32 becomes 0.
-    let words = args
-        .iter()
-        .map(|a| Some(a.to_i64()?.to_u32().unwrap_or(0)))
-        .collect::<Option<Vec<u32>>>()?;
+    let words: Vec<u32> = args.iter().map(low_bits).collect();
     let arg = |i: usize| words.get(i).copied();
     let res = match name {
         "band" => words.iter().fold(u32::MAX, |acc, w| acc & w),
@@ -40,11 +42,7 @@ pub(crate) fn fold_call(name: &str, args: &[BigInt]) -> Option<BigInt> {
 }
 
 fn to_i32(val: &Value) -> Result<i32, String> {
-    match val {
-        Value::Int(i) => Ok(i.to_i32().unwrap_or(0)),
-        Value::Float(f) => Ok(*f as i64 as i32),
-        _ => Err("bit library expects number".to_string()),
-    }
+    to_u32(val).map(|u| u as i32)
 }
 
 fn bit_band(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
@@ -162,7 +160,7 @@ fn bit_extract(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let u = to_u32(val)?;
     let f = to_u32(field)?;
     let w = if let Some(wv) = width { to_u32(wv)? } else { 1 };
-    if f + w > 32 || w == 0 {
+    if f.saturating_add(w) > 32 || w == 0 {
         return Err("invalid bit field or width".to_string());
     }
     let mask = (1u64 << w) - 1;
@@ -185,7 +183,7 @@ fn bit_replace(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let v = to_u32(rep)?;
     let f = to_u32(field)?;
     let w = if let Some(wv) = width { to_u32(wv)? } else { 1 };
-    if f + w > 32 || w == 0 {
+    if f.saturating_add(w) > 32 || w == 0 {
         return Err("invalid bit field or width".to_string());
     }
     let mask = (((1u64 << w) - 1) << f) as u32;
