@@ -152,7 +152,7 @@ end)
 db:close()
 ```
 
-`@neyuki/ui` opens windows and draws into them, on X11, Wayland, macOS and Windows from one code path: `winit` provides the windows, `tiny-skia` and `fontdue` render each frame on the CPU and `softbuffer` shows it, all pure Rust with no GPU or GL involved. Like the HTTP server it is pull-based, because natives cannot call back into Neyuki: the script owns the loop, `poll` returns what happened and drawing calls paint a back buffer that `present` shows. Coordinates are logical pixels (HiDPI scaling is handled underneath) and colors are `"#rgb"`, `"#rrggbb"` or `"#rrggbbaa"` strings or `{ r, g, b, a? }` tables with channels from 0 to 255.
+`@neyuki/ui` opens windows and draws into them, on X11, Wayland, macOS and Windows from one code path: `winit` provides the windows, `tiny-skia` and `fontdue` render each frame on the CPU and `softbuffer` shows it, all pure Rust with no GPU or GL involved. Like the HTTP server it is pull-based, because natives cannot call back into Neyuki: the script owns the loop, `poll` returns what happened and drawing calls paint a back buffer that `present` shows. Coordinates are logical pixels (HiDPI scaling is handled underneath) and colors are `"#rgb"`, `"#rrggbb"` or `"#rrggbbaa"` strings, `{ r, g, b, a? }` tables with channels from 0 to 255 or packed `0xRRGGBBAA` integers such as `ui.color` returns.
 
 - `open(options?)` returns a `Window`; `options` may hold `title`, `width` and `height` (default 800 × 600), `resizable` and `visible`. The canvas starts white. A window has `id`, `isOpen()`, `close()`, `title()`, `setTitle(title)`, `size()` (width, height), `setSize(width, height)` and `scale()` (physical pixels per logical pixel).
 - Drawing: `clear(color?)`, `fillRect(x, y, w, h, color, { radius? })`, `strokeRect(x, y, w, h, color, { width?, radius? })`, `line(x1, y1, x2, y2, color, { width? })`, `circle(cx, cy, r, color, { fill?, width? })`, `polygon({ x1, y1, x2, y2, ... }, color, { fill?, width? })`, `text(x, y, s, { size?, color?, font? })` (top-left of the line box at `(x, y)`, `"\n"` starts a new line, returns the width drawn), `drawImage(image, x, y, { width?, height? })` and `present()`, which shows everything drawn since the last call. Shapes are filled unless `fill` is false; `width` is then the line width (default 1).
@@ -178,6 +178,14 @@ ui.run(function(events: {Event}, dt: number)
     win:text(20, 100, "Hello, world!", { size = 24, color = "#ffffff" })
     win:present()
 end)
+```
+
+Animations are tweens: `ui.tween(target, goal, duration, options?)` moves the fields of `target` toward the values in `goal` over `duration` seconds. Number fields move numerically and color fields (any color form) end up as packed colors the drawing calls accept. `options` may set `easing` (a function or the name of a `ui.easing` curve: `linear`, `inQuad`, `outQuad` (the default), `inOutQuad`, `inCubic`, `outCubic`, `inOutCubic`, `inSine`, `outSine`, `inOutSine`, `inExpo`, `outExpo`, `inBack`, `outBack`, `outElastic`, `outBounce`), `delay`, `repeat` (extra runs, or `true` for forever), `yoyo` (alternate runs play backwards), `onUpdate(target)` and `onComplete(target)`. Starting values are read when the tween starts, so a tween chained from `onComplete` continues where the last one ended. A tween has `update(dt)` (returns whether it has ended), `pause`, `resume`, `cancel` (stop in place), `finish` (jump to the goal), `isDone`, `isPaused` and `progress`. `ui.animate` takes the same arguments and registers the tween so `ui.run` steps it before each frame; a hand-written `poll` loop calls `ui.update(dt)` instead. `ui.lerp(a, b, t)` and `ui.mixColor(from, to, t)` interpolate single values.
+
+```lua
+local card = { x = -200, alpha = 0, fill = "#334455" }
+ui.animate(card, { x = 40, alpha = 1 }, 0.6, { easing = "outBack" })
+ui.animate(card, { fill = "#5577aa" }, 1.2, { ["repeat"] = true, yoyo = true })
 ```
 
 `@neyuki/hid` sends keyboard and mouse input to whichever window has focus, exactly as if a person typed or clicked, and reads the screen size and clipboard. It drives SendInput on Windows, CoreGraphics on macOS and XTest on X11 (Wayland sessions need XWayland). Keys are single characters (`"a"`, `"7"`, `"/"`) or case-insensitive names: `enter`, `tab`, `space`, `backspace`, `delete`, `escape`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`, `shift`, `ctrl`, `alt`, `meta` (also `win`, `cmd`, `super`), `capslock`, `f1` to `f20`, `numpad0` to `numpad9`, `volumeup`, `volumedown`, `mute`, `playpause`, `nexttrack` and `prevtrack`. Mouse buttons are `"left"` (the default), `"right"`, `"middle"`, `"back"` and `"forward"`; coordinates are pixels from the top-left of the main display.

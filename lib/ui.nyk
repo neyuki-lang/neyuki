@@ -16,8 +16,8 @@ local ui = {}
 -- wraps that loop for the common case.
 --
 -- Coordinates are logical pixels (DPI scaling is handled underneath), colors
--- are "#rgb", "#rrggbb", "#rrggbbaa" strings or { r, g, b, a? } tables with
--- channels 0-255.
+-- are "#rgb", "#rrggbb", "#rrggbbaa" strings, { r, g, b, a? } tables with
+-- channels 0-255 or packed 0xRRGGBBAA integers from `ui.color`.
 
 function checkString(s: string, name: string)
     if (s == nil) then error(name .. " must be provided") end
@@ -59,7 +59,12 @@ end
 
 -- Turns a color into the 0xRRGGBBAA integer the natives take.
 function packColor(color: any, name: string): number
-    if (type(color) == "string") then
+    if (type(color) == "number") then
+        if (color < 0 or color > 4294967295 or color != math.floor(color)) then
+            error(name .. " must be a packed 0xRRGGBBAA integer")
+        end
+        return color
+    elseif (type(color) == "string") then
         if (string.sub(color, 1, 1) != "#") then
             error(name .. " must be a #rgb, #rrggbb or #rrggbbaa string")
         end
@@ -402,7 +407,8 @@ function ui.poll(timeout: number?): {Event}
 end
 
 -- Runs `handler(events, dt)` about 60 times a second until every window is
--- closed, where `dt` is the seconds since the previous call. `close` events
+-- closed, where `dt` is the seconds since the previous call. Tweens from
+-- `ui.animate` are stepped just before each call. `close` events
 -- are honoured before the handler sees them unless `options.autoClose` is
 -- false. An error inside the handler closes the windows and is re-raised.
 function ui.run(handler: ({Event}, number) -> any, options: RunOptions?): ()
@@ -424,7 +430,11 @@ function ui.run(handler: ({Event}, number) -> any, options: RunOptions?): ()
             end
         end
         local now = os.clock()
-        local ok, err = try(handler, events, now - last)
+        local dt = now - last
+        local ok, err = try(function(): any
+            ui.update(dt)
+            return handler(events, dt)
+        end)
         last = now
         if (not ok) then
             -- Closed windows linger as nil entries until the table is rebuilt.
@@ -434,6 +444,273 @@ function ui.run(handler: ({Event}, number) -> any, options: RunOptions?): ()
             error(err)
         end
     end
+end
+
+-- ANIMATION ----------------------------------------------------------------
+
+-- Easing curves map linear progress (0 to 1) to eased progress. The names
+-- follow easings.net: `in` starts slow, `out` ends slow, `inOut` does both.
+local easing = {}
+
+function easing.linear(t: number): number return t end
+function easing.inQuad(t: number): number return t * t end
+function easing.outQuad(t: number): number return t * (2 - t) end
+function easing.inOutQuad(t: number): number
+    if (t < 0.5) then return 2 * t * t end
+    return 1 - (-2 * t + 2) ^ 2 / 2
+end
+function easing.inCubic(t: number): number return t * t * t end
+function easing.outCubic(t: number): number return 1 - (1 - t) ^ 3 end
+function easing.inOutCubic(t: number): number
+    if (t < 0.5) then return 4 * t * t * t end
+    return 1 - (-2 * t + 2) ^ 3 / 2
+end
+function easing.inSine(t: number): number return 1 - math.cos(t * math.pi / 2) end
+function easing.outSine(t: number): number return math.sin(t * math.pi / 2) end
+function easing.inOutSine(t: number): number return -(math.cos(math.pi * t) - 1) / 2 end
+function easing.inExpo(t: number): number
+    if (t == 0) then return 0 end
+    return 2 ^ (10 * t - 10)
+end
+function easing.outExpo(t: number): number
+    if (t == 1) then return 1 end
+    return 1 - 2 ^ (-10 * t)
+end
+function easing.inBack(t: number): number
+    local c = 1.70158
+    return (c + 1) * t * t * t - c * t * t
+end
+function easing.outBack(t: number): number
+    local c = 1.70158
+    local u = t - 1
+    return 1 + (c + 1) * u * u * u + c * u * u
+end
+function easing.outElastic(t: number): number
+    if (t == 0 or t == 1) then return t end
+    return 2 ^ (-10 * t) * math.sin((t * 10 - 0.75) * (2 * math.pi / 3)) + 1
+end
+function easing.outBounce(t: number): number
+    local n = 7.5625
+    local d = 2.75
+    if (t < 1 / d) then return n * t * t end
+    if (t < 2 / d) then
+        t = t - 1.5 / d
+        return n * t * t + 0.75
+    end
+    if (t < 2.5 / d) then
+        t = t - 2.25 / d
+        return n * t * t + 0.9375
+    end
+    t = t - 2.625 / d
+    return n * t * t + 0.984375
+end
+
+ui.easing = table.freeze(easing)
+
+-- The value `t` of the way from `a` to `b`.
+function ui.lerp(a: number, b: number, t: number): number
+    return a + (b - a) * t
+end
+
+-- Splits a packed 0xRRGGBBAA color into its four channels.
+function channels(color: number): (number, number, number, number)
+    return math.floor(color / 16777216) % 256, math.floor(color / 65536) % 256,
+        math.floor(color / 256) % 256, color % 256
+end
+
+-- Mixes two colors channel by channel, alpha included, and returns the
+-- packed result: `t` = 0 gives `from` and 1 gives `to`.
+function ui.mixColor(from: any, to: any, t: number): number
+    checkNumber(t, "t")
+    local r1, g1, b1, a1 = channels(packColor(from, "from"))
+    local r2, g2, b2, a2 = channels(packColor(to, "to"))
+    local function mix(x: number, y: number): number
+        return math.max(0, math.min(255, math.floor(x + (y - x) * t + 0.5)))
+    end
+    return ((mix(r1, r2) * 256 + mix(g1, g2)) * 256 + mix(b1, b2)) * 256 + mix(a1, a2)
+end
+
+function resolveEasing(value: any): (number) -> number
+    if (value == nil) then return easing.outQuad end
+    if (type(value) == "function") then return value end
+    if (type(value) == "string" and easing[value] != nil) then return easing[value] end
+    error("easing must be a function or the name of a ui.easing curve")
+end
+
+-- Animates the fields of `target` toward the values in `goal` over
+-- `duration` seconds. Number fields move numerically; any other goal is a
+-- color, and the field ends up a packed color the drawing calls accept.
+-- Starting values are read when the tween starts (after its delay), so
+-- tweens chained through onComplete continue from where the last ended.
+--
+-- options:
+--   easing      a ui.easing name or a function (default "outQuad")
+--   delay       seconds to wait before starting
+--   repeat      extra runs after the first, or true to repeat forever
+--   yoyo        every other run plays backwards
+--   onUpdate    called with the target after each step
+--   onComplete  called with the target once the tween ends
+--
+-- A tween does nothing until `tween:update(dt)` is called; `ui.animate`
+-- creates one that `ui.run` (or `ui.update`) steps automatically.
+function ui.tween(target: {any}, goal: {any}, duration: number, options: TweenOptions?): Tween
+    if (type(target) != "table") then error("target must be a table") end
+    if (type(goal) != "table") then error("goal must be a table") end
+    checkNumber(duration, "duration")
+    if (duration < 0) then error("duration must be non-negative") end
+    checkOptionalTable(options, "options")
+    local opts = options ?? {}
+    local ease = resolveEasing(opts.easing)
+    local delay = opts.delay ?? 0
+    checkNumber(delay, "delay")
+    if (delay < 0) then error("delay must be non-negative") end
+    local repeats = opts["repeat"] ?? 0
+    if (repeats != true and (type(repeats) != "number" or repeats < 0)) then
+        error("repeat must be a non-negative number or true")
+    end
+    checkOptionalBoolean(opts.yoyo, "yoyo")
+    local yoyo = opts.yoyo ?? false
+    local onUpdate = opts.onUpdate
+    local onComplete = opts.onComplete
+    if (onUpdate != nil) then checkFunction(onUpdate, "onUpdate") end
+    if (onComplete != nil) then checkFunction(onComplete, "onComplete") end
+
+    local keys = {}
+    local isColor = {}
+    for key, value in goal do
+        keys[#keys + 1] = key
+        if (type(value) == "number") then
+            isColor[key] = false
+        else
+            packColor(value, "goal." .. tostring(key))
+            isColor[key] = true
+        end
+    end
+    if (#keys == 0) then error("goal must name at least one field") end
+
+    local from = nil
+    local elapsed = -delay
+    local runs = 0
+    local backwards = false
+    local paused = false
+    local done = false
+
+    local function apply(progress: number)
+        local t = ease(backwards and 1 - progress or progress)
+        for _, key in keys do
+            if (isColor[key]) then
+                target[key] = ui.mixColor(from[key], goal[key], t)
+            else
+                target[key] = from[key] + (goal[key] - from[key]) * t
+            end
+        end
+    end
+
+    local function begin()
+        from = {}
+        for _, key in keys do
+            local current = target[key]
+            if (isColor[key]) then
+                from[key] = packColor(current ?? goal[key], "target." .. tostring(key))
+            elseif (type(current) == "number") then
+                from[key] = current
+            else
+                error("target." .. tostring(key) .. " must be a number to animate")
+            end
+        end
+    end
+
+    local function complete()
+        done = true
+        if (onComplete != nil) then onComplete(target) end
+    end
+
+    local tween = {}
+
+    -- Advances the tween by `dt` seconds and reports whether it has ended.
+    function tween.update(self: Tween, dt: number): boolean
+        checkNumber(dt, "dt")
+        if (done or paused) then return done end
+        elapsed = elapsed + dt
+        if (elapsed < 0) then return false end
+        if (from == nil) then begin() end
+        while (elapsed >= duration) do
+            if (repeats == true or runs < repeats) then
+                runs = runs + 1
+                elapsed = elapsed - duration
+                if (yoyo) then backwards = not backwards end
+                -- A zero-length tween that repeats forever would never leave.
+                if (duration == 0) then break end
+            else
+                apply(1)
+                if (onUpdate != nil) then onUpdate(target) end
+                complete()
+                return true
+            end
+        end
+        apply(duration == 0 and 1 or elapsed / duration)
+        if (onUpdate != nil) then onUpdate(target) end
+        return false
+    end
+
+    function tween.pause(self: Tween): ()
+        paused = true
+    end
+    function tween.resume(self: Tween): ()
+        paused = false
+    end
+
+    -- Stops where it is, without calling onComplete.
+    function tween.cancel(self: Tween): ()
+        done = true
+    end
+
+    -- Jumps to the end of the current run and calls onComplete.
+    function tween.finish(self: Tween): ()
+        if (done) then return end
+        if (from == nil) then begin() end
+        apply(1)
+        complete()
+    end
+
+    function tween.isDone(self: Tween): boolean return done end
+    function tween.isPaused(self: Tween): boolean return paused end
+
+    -- How far through the current run the tween is, from 0 to 1.
+    function tween.progress(self: Tween): number
+        if (done) then return 1 end
+        if (elapsed <= 0) then return 0 end
+        if (duration == 0) then return 1 end
+        return math.min(1, elapsed / duration)
+    end
+
+    return table.freeze(tween)
+end
+
+local running = {}
+
+-- Like `ui.tween`, but the tween is stepped by `ui.run` before each call to
+-- the handler (or by `ui.update` in a hand-written loop) until it ends.
+function ui.animate(target: {any}, goal: {any}, duration: number, options: TweenOptions?): Tween
+    local tween = ui.tween(target, goal, duration, options)
+    running[#running + 1] = tween
+    return tween
+end
+
+-- Steps every tween started with `ui.animate` by `dt` seconds, drops the
+-- ones that ended and returns how many are still running.
+function ui.update(dt: number): number
+    checkNumber(dt, "dt")
+    -- Tweens started from callbacks during this step join the next one.
+    local current = running
+    running = {}
+    local still = {}
+    for _, tween in current do
+        if (not tween:update(dt)) then still[#still + 1] = tween end
+    end
+    for _, tween in running do still[#still + 1] = tween end
+    running = still
+    return #running
 end
 
 return table.freeze(ui)

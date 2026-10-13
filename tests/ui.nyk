@@ -3,10 +3,7 @@ local fs = require("@neyuki/fs")
 local string = require("@neyuki/string")
 
 function expectError(f: any, needle: string, message: string, ...: any)
-    -- Collected into a table: the VM forwards only the first vararg when
-    -- the call sits in a multi-target `local ok, err = try(f, ...)`.
-    local results = { try(f, ...) }
-    local ok, err = results[1], results[2]
+    local ok, err = try(f, ...)
     assert(not ok and string.find(tostring(err), needle, 1, true) != nil, message .. ": " .. tostring(err))
 end
 
@@ -24,7 +21,75 @@ expectError(ui.color, "#rgb", "colors need 3, 4, 6 or 8 digits", "#12345")
 expectError(ui.color, "#rgb", "colors need hex digits", "#gg0000")
 expectError(ui.color, "0 to 255", "channels are clamped", { 256, 0, 0 })
 expectError(ui.color, "0 to 255", "channels must be numbers", { "1", 0, 0 })
-expectError(ui.color, "color string", "colors must be strings or tables", 42)
+assert(ui.color(0x11223344) == 0x11223344, "packed colors pass through")
+expectError(ui.color, "packed 0xRRGGBBAA", "packed colors fit in 32 bits", 0x100000000)
+expectError(ui.color, "packed 0xRRGGBBAA", "packed colors are integers", 1.5)
+expectError(ui.color, "color string", "colors must be strings, tables or numbers", true)
+
+-- ANIMATION (no display needed) --------------------------------------------
+
+assert(ui.lerp(10, 20, 0.25) == 12.5, "lerp")
+assert(ui.mixColor("#000000", "#ffffff", 0.5) == 0x808080ff, "mixColor mixes each channel")
+assert(ui.mixColor("#ff000000", "#ff0000ff", 1) == 0xff0000ff, "mixColor mixes alpha")
+for name, curve in ui.easing do
+    assert(math.abs(curve(0)) < 1e-9 and math.abs(curve(1) - 1) < 1e-9, name .. " runs from 0 to 1")
+end
+
+local box = { x = 0, fill = "#000000" }
+local tween = ui.tween(box, { x = 100, fill = "#ffffff" }, 2, { easing = "linear" })
+assert(box.x == 0, "a tween waits for update")
+assert(not tween:update(1), "a tween runs for its duration")
+assert(box.x == 50 and box.fill == 0x808080ff and tween:progress() == 0.5, "halfway")
+tween:pause()
+tween:update(5)
+assert(box.x == 50 and tween:isPaused(), "a paused tween holds still")
+tween:resume()
+assert(tween:update(1.5) and box.x == 100 and box.fill == 0xffffffff, "a tween ends on its goal")
+assert(tween:isDone() and tween:progress() == 1, "an ended tween reports it")
+
+local delayed = { v = 1 }
+local starts = ui.tween(delayed, { v = 3 }, 1, { delay = 0.5, easing = "linear" })
+starts:update(0.25)
+delayed.v = 2
+starts:update(0.75)
+assert(delayed.v == 2.5, "the start value is read once the delay ends: " .. tostring(delayed.v))
+
+local bounce = { y = 0 }
+local completed = 0
+ui.animate(bounce, { y = 10 }, 1, {
+    easing = "linear",
+    ["repeat"] = 1,
+    yoyo = true,
+    onComplete = function() completed = completed + 1 end,
+})
+assert(ui.update(0.5) == 1 and bounce.y == 5, "ui.update steps animations")
+assert(ui.update(1) == 1 and bounce.y == 5, "a yoyo plays the next run backwards")
+assert(ui.update(1) == 0 and bounce.y == 0 and completed == 1, "repeats end with onComplete")
+
+local chained = { x = 0 }
+ui.animate(chained, { x = 1 }, 0, {
+    onComplete = function(t: any) ui.animate(t, { x = 5 }, 1, { easing = "linear" }) end,
+})
+assert(ui.update(0) == 1 and chained.x == 1, "tweens started in callbacks join the next step")
+ui.update(1)
+assert(chained.x == 5, "a chained tween continues from where the last ended")
+
+local cancelled = { x = 0 }
+local stop = ui.tween(cancelled, { x = 10 }, 1, { easing = "linear" })
+stop:update(0.5)
+stop:cancel()
+stop:update(1)
+assert(cancelled.x == 5 and stop:isDone(), "cancel stops in place")
+local skipped = { x = 0 }
+ui.tween(skipped, { x = 10 }, 1):finish()
+assert(skipped.x == 10, "finish jumps to the goal")
+
+expectError(ui.tween, "target must be a table", "tween needs a target", 1, {}, 1)
+expectError(ui.tween, "at least one field", "tween needs a goal", {}, {}, 1)
+expectError(ui.tween, "non-negative", "tween checks the duration", { x = 0 }, { x = 1 }, -1)
+expectError(ui.tween, "easing must be", "tween checks the easing", { x = 0 }, { x = 1 }, 1, { easing = "wobble" })
+expectError(ui.tween, "repeat must be", "tween checks repeat", { x = 0 }, { x = 1 }, 1, { ["repeat"] = "x" })
+expectError(function() ui.tween({}, { x = 1 }, 1):update(1) end, "must be a number to animate", "targets need numbers")
 
 -- TEXT MEASUREMENT (no display needed) -------------------------------------
 
