@@ -240,11 +240,35 @@ pub fn parse_function(parser: &mut Parser, is_const: bool) -> Result<Stmt, Strin
         None
     };
 
-    let params = if parser.match_symbol("(") {
+    // `function T:m(...)` is `function T.m(self, ...)`. A `:` here is a
+    // method only when a name and `(` follow; otherwise it starts the
+    // return type of a function written without parentheses.
+    let is_method = name.is_some()
+        && parser.check_symbol(":")
+        && parser
+            .tokens
+            .get(parser.pos + 1)
+            .is_some_and(|t| t.kind == "name")
+        && parser
+            .tokens
+            .get(parser.pos + 2)
+            .is_some_and(|t| t.kind == "symbol" && t.value == "(");
+    let name = if is_method {
+        parser.expect_symbol(":")?;
+        let method = parser.expect_name()?;
+        name.map(|n| format!("{}.{}", n, method))
+    } else {
+        name
+    };
+
+    let mut params = if parser.match_symbol("(") {
         parse_param_list(parser)?
     } else {
         Vec::new()
     };
+    if is_method {
+        params.insert(0, Param::new("self".to_string(), None, false));
+    }
 
     let return_type = if parser.match_symbol(":") {
         Some(read_type_annotation(parser))

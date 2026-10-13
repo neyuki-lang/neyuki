@@ -1,0 +1,30 @@
+-- `function T:m()` defines a method with an implicit `self`.
+
+local Counter = {}
+Counter.__index = Counter
+
+function Counter.new(start: number)
+    return setmetatable({ count = start }, Counter)
+end
+
+function Counter:add(n: number): number
+    self.count = self.count + n
+    return self.count
+end
+
+local c = Counter.new(1)
+assert(c:add(2) == 3, "a method call passes the receiver as self")
+assert(Counter.add(c, 4) == 7, "a method is a function whose first parameter is self")
+
+local outer = { inner = {} }
+function outer.inner:name()
+    return self == outer.inner
+end
+assert(outer.inner:name(), "methods on nested tables")
+
+local function typed(): number
+    return 5
+end
+assert(typed() == 5, "a return type still follows the parameter list")
+
+print("[pass] methods")
