@@ -1,11 +1,7 @@
 # Neyuki documentation
 
-Neyuki is a small, Lua-like scripting language implemented in Rust. The language reference is in [language.md](language.md), and the current runtime and command-line behavior is in [runtime.md](runtime.md).
+- [The language](language.md): a tour of the syntax and semantics, from variables to objects and modules.
+- [Library reference](reference/README.md): every built-in function and bundled module, one section per function.
+- [Tools and runtime](runtime.md): the `neyuki` command, linting, bytecode, packages, memory and limits.
 
-The examples in these documents are `.nyk` files. Run them from the `neyuki/` project directory with:
-
-```text
-cargo run -- run path/to/file.nyk
-```
-
-The executable is intentionally compact. Syntax parsing is shared by `compile`, `lint`, `run`, and the test command, while runtime behavior is exercised by `run`.
+Every example is a `.nyk` file you can run with `neyuki file.nyk`.

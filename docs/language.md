@@ -1,123 +1,236 @@
-# Neyuki language reference
+# The Neyuki language
 
-## Declarations
+Neyuki is a small scripting language in the Lua family: tables are the one data structure, functions are values, and a script is a list of statements run top to bottom. It adds exact integers of any size, optional type annotations that are checked before a script runs, string interpolation, `??`, compound assignment and `continue`.
 
-Use `local`, `const`, or `global` to introduce a binding. Type annotations are optional and are currently retained as syntax metadata.
+This page describes the language. The functions you can call are listed in the [reference](reference/README.md).
 
-```lua
-local count: int = 0
-const greeting = "hello"
-global shared = nil
-```
-
-Const bindings cannot be reassigned. A `const function` also protects the
-declared function field, while the containing table remains mutable:
+## A first script
 
 ```lua
-local math = {}
-const function math.exp(n: number): number
-    return n
-end
+local name = os.args()[1] ?? "world"
+print(`Hello, {name}!`)
 
-math.exp = 2 -- runtime error
-```
-
-Multiple local bindings are supported:
-
-```lua
-local ok, value = try(int, "12")
-```
-
-## Values and tables
-
-Neyuki supports `nil`, booleans, arbitrary-precision integers, floating-point numbers, strings, functions, and tables. Array entries are one-based; named entries use `key = value`, or `["key"] = value` when the key is not a valid name (such as `content-type`).
-
-Integer literals may be decimal, hexadecimal (`0x...`), or binary (`0b...`), and may contain `_` separators. Integer arithmetic remains exact; `/` produces a floating-point result, while `//`, `%`, and bitwise operators preserve integer values. Exact integers are capped at 2^20 bits (about 315,000 decimal digits): an operation whose result would be larger raises an error, which `try` can catch.
-
-```lua
-local values = {10, 20, 30}
-local config = {name = "neyuki", enabled = true}
-local headers = {["content-type"] = "text/plain"}
-values[2] = 25
-print(config.name)
-```
-
-## Functions and varargs
-
-Functions may have typed parameters and return annotations. A final `...` parameter collects every argument after the required parameters. Its optional type annotation describes each collected value.
-
-```lua
-function maximum(first: number, ...: number): number
-    local values = {first, ...}
-    local result = values[1]
-    for _, value in values do
-        if value > result then
-            result = value
-        end
+local scores = { ada = 92, yuki = 87, lin = 95 }
+local best, bestScore = nil, 0
+for player, score in scores do
+    if score > bestScore then
+        best, bestScore = player, score
     end
-    return result
 end
-
-print(maximum(3, 8, 5))
+print(`{best} wins with {bestScore}`)
 ```
 
-Inside a variadic function, `...` can be used as a table entry or as a call argument list. It is an error to evaluate it outside a variadic function.
+Run it with `neyuki hello.nyk Yuki`.
 
-`object:name(args)` calls the function stored in `object.name` with `object` passed as the first argument. It is shorthand for `object.name(object, args)` and is how the file objects from `@neyuki/fs` are used.
+## Comments
 
 ```lua
-local file = fs.open("notes.txt")
-print(file:read())
+-- a line comment
+--[[ a block comment
+     over several lines ]]
+--[==[ a block comment that may contain ]] ]==]
 ```
 
-## Operators
+## Variables
 
-Arithmetic operators are `+`, `-`, `*`, `/`, `//`, `%`, and `^`. Comparisons are `==`, `!=`, `<`, `<=`, `>`, and `>=`; tables and functions compare by identity, so a table is equal only to itself. Boolean operators are `and`, `or`, and `not`; `??` selects its right side only when the left side is `nil`. `..` concatenates strings and `#` returns string or array length.
-
-Bitwise operators include `&`, `|`, `~`, `<<`, and `>>`. `>>` is an arithmetic shift, so it keeps the sign of negative numbers. The logical shifts `<<<` and `>>>` treat the left operand as an unsigned 64-bit word: bits shifted past the 64th are dropped, zeros are shifted in, and the result is never negative.
+`local` declares a variable visible until the end of the enclosing block. `const` declares one that cannot be reassigned. `global` sets a variable visible to every module. Using a name that was never declared is an error the checker reports before the script runs.
 
 ```lua
-print(-8 >> 1)      -- -4
-print(-1 >>> 60)    -- 15
-print(1 <<< 63)     -- 9223372036854775808
-print(1 <<< 64)     -- 0
+local count = 0
+const limit = 10
+global appName = "demo"
+
+local a, b = 1, 2
+a, b = b, a -- swap
 ```
 
-Increment and decrement are statement operators for assignable targets:
+Annotations are optional and checked before running: `local count: number = "x"` is rejected. The types are `nil`, `boolean`, `number` (with `int` and `float`), `string`, `table`, `function`, `buffer`, `thread` and `any`, plus `T?` (T or nil), `A | B`, `{T}` (array of T), `{[K]: V}` (map), `{ name: T }` (record), `(A, B) -> R` (function) and `(A, B)` for several return values.
 
 ```lua
-count++
-values[1]--
-```
-
-They add or subtract one and do not produce an expression value. `--` at the start of a line or after whitespace remains a line comment.
-
-Compound assignment rewrites `target op= value` as `target = target op value` for `+=`, `-=`, `*=`, `/=`, `//=`, `%=`, `^=`, `..=`, `<<=`, `>>=`, `&=`, `|=` and `??=`. Several targets can be assigned at once; the right-hand side is evaluated before any target changes, and a call's extra results spread across the remaining targets:
-
-```lua
-total += price
-a, b = b, a
-x, y, z = pair()
-```
-
-## Control flow
-
-Neyuki supports `if` / `elseif` / `else`, `while`, `repeat ... until`, and table iteration with `for`:
-
-```lua
-for index, value in values do
-    print(index, value)
+local function area(w: number, h: number?): number
+    h = h ?? w          -- after this, h is a number
+    return w * h
 end
 ```
 
-Conditions must evaluate to booleans. `break` and `continue` control loops.
+## Values
 
-Statements and expressions may nest at most 120 levels deep. Each binary operator in a chain such as `a + b + c` counts as one level, so a single expression may chain at most about 120 operators of the same precedence; split longer ones across several statements.
+- `nil`: the absence of a value. Reading a missing variable field gives `nil`.
+- `true` and `false`.
+- Numbers: integers are exact at any size (`2 ^ 100` is exact), floats are 64-bit. Integers may be written in decimal, hex (`0xff`) or binary (`0b1010`), with `_` separators (`1_000_000`). `/` always gives a float; `//` (floor division), `%`, `^` with integer operands and the bitwise operators keep integers exact. Integers are capped at about 315,000 digits.
+- Strings: immutable UTF-8 text. `#s` is the length in bytes.
+- Tables: arrays and maps in one, compared by identity.
+- Functions, buffers (`buffer` library) and threads (`coroutine` library).
+
+Only `nil` and `false` count as false in conditions; `0` and `""` are true.
 
 ## Strings
 
-Single-quoted, double-quoted, and long-bracket strings are supported. Backtick-style interpolation evaluates expressions inside braces:
+```lua
+local single = 'it\'s'
+local double = "tab\tnewline\n"
+local long = [[
+raw text, no escapes, may span lines
+]]
+local message = `{count} items, {count * 2} halves`
+```
+
+Escapes in quoted and backtick strings: `\n`, `\t`, `\r`, `\a`, `\b`, `\f`, `\v`, `\\`, `\"`, `\'`, `\ddd` (a decimal character code up to 255), `\xHH`, `\u{1F600}`, `\z` (skips the following whitespace and line breaks) and a backslash at the end of a line (keeps the line break).
+
+Backtick strings interpolate: each `{expression}` is evaluated and converted to text. Write `\{` for a literal brace and `` \` `` for a backtick.
+
+Every string has the `string` library as methods: `("hello"):upper()`, `name:sub(1, 3)`, `line:split(",")`.
+
+## Tables
 
 ```lua
-print(`value: {count}`)
+local list = { "a", "b", "c" }            -- list[1] == "a"
+local point = { x = 3, y = 4 }            -- point.x == 3
+local mixed = { 10, 20, label = "pair" }
+local headers = { ["content-type"] = "text/plain" }
+local byKey = { [true] = "yes", [1.5] = "float key" }
+
+list[#list + 1] = "d"   -- append
+point.z = 0             -- add a field
+point.x = nil           -- remove a field
 ```
+
+Arrays start at 1 and `#t` is the length of the array part. Entries may be separated by `,` or `;`, and a trailing separator is allowed.
+
+## Operators
+
+| Kind | Operators |
+| --- | --- |
+| Arithmetic | `+` `-` `*` `/` `//` `%` `^` and unary `-` |
+| Comparison | `==` `!=` `<` `<=` `>` `>=` |
+| Logic | `and` `or` `not` |
+| Nil fallback | `??` (the right side only when the left is `nil`) |
+| Text | `..` (concatenation) `#` (length) |
+| Bitwise | `&` `|` `~` (xor, or not when unary) `<<` `>>` (arithmetic) `<<<` `>>>` (logical, 64-bit) |
+
+`and` and `or` return one of their operands, so `x and y or z` works as a conditional expression.
+
+Compound assignment works for every binary operator: `+=`, `-=`, `*=`, `/=`, `//=`, `%=`, `^=`, `..=`, `&=`, `|=`, `<<=`, `>>=` and `??=` (assign only if the target is `nil`). `count++` and `count--` add or subtract one as statements; `--` after an expression is a decrement, while `--` at the start of a line or after whitespace begins a comment.
+
+## Control flow
+
+```lua
+if temperature > 30 then
+    print("hot")
+elseif temperature < 5 then
+    print("cold")
+else
+    print("mild")
+end
+
+while queue:hasWork() do queue:step() end
+
+repeat
+    line = io.read()
+until line == nil or line == "quit"
+
+for i = 1, 10 do print(i) end         -- 1 to 10
+for i = 10, 1, -2 do print(i) end     -- 10, 8, 6, 4, 2
+
+for index, value in { "a", "b" } do print(index, value) end
+for key, value in config do print(key, value) end
+for word in ("a b c"):gmatch("%a+") do print(word) end
+```
+
+`for k, v in t` walks any table: the array part in order, then the other keys. It also accepts an iterator function such as the ones `gmatch`, `fs.lines` and `utf8.codes` return, and `pairs(t)` or `ipairs(t)` as in Lua. `break` leaves a loop and `continue` skips to its next iteration.
+
+## Functions
+
+```lua
+local function greet(name: string, greeting: string?): string
+    return `{greeting ?? "Hello"}, {name}!`
+end
+
+local square = function(x) return x * x end
+
+local function divide(a, b)
+    if b == 0 then return nil, "division by zero" end
+    return a / b
+end
+local result, err = divide(1, 0)
+```
+
+Functions are values: pass them around, store them in tables and return them. They capture the local variables around them (closures).
+
+```lua
+local function counter()
+    local n = 0
+    return function() n += 1; return n end
+end
+local next = counter()
+print(next(), next()) --> 1	2
+```
+
+A final `...` parameter collects any extra arguments. `{...}` packs them into a table, `select("#", ...)` counts them, and `f(...)` passes them on.
+
+```lua
+local function sum(...: number): number
+    local total = 0
+    for _, n in { ... } do total += n end
+    return total
+end
+```
+
+## Methods and objects
+
+`object:method(args)` calls `object.method(object, args)`, and `function T:method()` defines a function whose first parameter is `self`. With metatables this gives classes:
+
+```lua
+local Vector = {}
+Vector.__index = Vector
+
+function Vector.new(x: number, y: number)
+    return setmetatable({ x = x, y = y }, Vector)
+end
+
+function Vector:length(): number
+    return math.sqrt(self.x ^ 2 + self.y ^ 2)
+end
+
+Vector.__add = function(a, b) return Vector.new(a.x + b.x, a.y + b.y) end
+Vector.__tostring = function(v) return `({v.x}, {v.y})` end
+
+local v = Vector.new(3, 4) + Vector.new(0, 1)
+print(tostring(v), v:length()) --> (3, 5)	5.830951894845301
+```
+
+Metatables also provide `__index` and `__newindex` for missing keys, the arithmetic and comparison operators, `__call`, `__len`, `__concat`, `__pairs`, `__tojson`, `__mode` for weak tables and `__gc` for finalizers. `table.freeze(t)` makes a table read-only; a `const function` field cannot be replaced.
+
+## Errors
+
+`error(message)` raises an error; `try(f, ...)` (or `pcall`) runs a function and catches one. An uncaught error stops the script and prints the message with a stack trace.
+
+```lua
+local ok, value = try(json.decode, input)
+if not ok then
+    print("bad input: " .. value)
+end
+```
+
+`assert(condition, message)` raises `message` when the condition is false or nil.
+
+## Modules
+
+A module is a file that returns a value, usually a table. `require` runs it once and caches the result.
+
+```lua
+-- geometry.nyk
+local geometry = {}
+function geometry.area(w, h) return w * h end
+return geometry
+
+-- main.nyk
+local geometry = require("geometry")
+print(geometry.area(2, 3))
+```
+
+The standard libraries (`math`, `string`, `table`, `bit`, `buffer`, `coroutine`, `utf8`, `debug`, `json`, `os`) are always available as globals. The bundled modules are loaded with `require("@neyuki/name")`: `fs`, `io`, `http`, `sql`, `crypto`, `ui`, `hid` and `profile`.
+
+## Limits
+
+Statements and expressions may nest at most 120 levels deep, and each binary operator in a chain such as `a + b + c` counts as a level. A coroutine can only yield from its own frames, not from inside a function a native library called back (a `try` body, a `table.sort` comparator, a metamethod).
