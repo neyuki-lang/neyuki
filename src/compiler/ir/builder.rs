@@ -393,6 +393,15 @@ impl IrBuilder {
                     });
                 } else {
                     let mut prev_var: Option<IrVar> = None;
+                    // Concatenating onto "" makes `{n}` alone a string too.
+                    if matches!(parts.first(), Some(InterpPart::Expr(_))) {
+                        let empty = self.alloc_var();
+                        self.emit(IrInst::LoadConst {
+                            dst: empty,
+                            val: IrConstant::String(String::new()),
+                        });
+                        prev_var = Some(empty);
+                    }
                     for part in parts {
                         let part_var = match part {
                             InterpPart::Literal(lit) => {
