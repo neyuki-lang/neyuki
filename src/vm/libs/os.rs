@@ -321,10 +321,22 @@ fn os_run(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     if let Some(text) = input
         && let Some(mut stdin) = child.stdin.take()
     {
+        // On Windows, command-line utilities (such as sort.exe) expect CRLF
+        // line endings. Normalize standalone LF to CRLF so scripts can feed
+        // piped programs portably.
+        #[cfg(windows)]
+        let text_bytes = if !text.contains("\r\n") {
+            text.replace('\n', "\r\n").into_bytes()
+        } else {
+            text.as_bytes().to_vec()
+        };
+        #[cfg(not(windows))]
+        let text_bytes = text.as_bytes().to_vec();
+
         // Fed from a thread so a program that writes before reading all of
         // its input cannot deadlock against us.
         std::thread::spawn(move || {
-            let _ = stdin.write_all(text.as_bytes());
+            let _ = stdin.write_all(&text_bytes);
         });
     }
     let output = child
