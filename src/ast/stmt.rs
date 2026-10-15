@@ -9,6 +9,7 @@ pub enum Stmt {
     Local {
         name: String,
         is_const: bool,
+        is_global: bool,
         type_name: Option<String>,
         initializer: Option<Expr>,
         id: NodeId,
@@ -16,6 +17,7 @@ pub enum Stmt {
     LocalMany {
         names: Vec<String>,
         is_const: bool,
+        is_global: bool,
         initializers: Vec<Expr>,
         id: NodeId,
     },
@@ -105,6 +107,7 @@ impl PartialEq for Stmt {
                 Stmt::Local {
                     name: na,
                     is_const: ca,
+                    is_global: ga,
                     type_name: ta,
                     initializer: ia,
                     ..
@@ -112,25 +115,28 @@ impl PartialEq for Stmt {
                 Stmt::Local {
                     name: nb,
                     is_const: cb,
+                    is_global: gb,
                     type_name: tb,
                     initializer: ib,
                     ..
                 },
-            ) => na == nb && ca == cb && ta == tb && ia == ib,
+            ) => na == nb && ca == cb && ga == gb && ta == tb && ia == ib,
             (
                 Stmt::LocalMany {
                     names: na,
                     is_const: ca,
+                    is_global: ga,
                     initializers: ia,
                     ..
                 },
                 Stmt::LocalMany {
                     names: nb,
                     is_const: cb,
+                    is_global: gb,
                     initializers: ib,
                     ..
                 },
-            ) => na == nb && ca == cb && ia == ib,
+            ) => na == nb && ca == cb && ga == gb && ia == ib,
             (
                 Stmt::Assign {
                     target: ta,

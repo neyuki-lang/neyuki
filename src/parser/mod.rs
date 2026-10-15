@@ -264,9 +264,35 @@ impl Parser {
         self.peek().kind == "keyword" && self.peek().value == value
     }
 
+    pub fn check_word(&self, value: &str) -> bool {
+        (self.peek().kind == "keyword" || self.peek().kind == "name") && self.peek().value == value
+    }
+
+    pub fn match_word(&mut self, value: &str) -> bool {
+        if self.check_word(value) {
+            self.pos += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn expect_word(&mut self, value: &str) -> Result<(), String> {
+        if !self.match_word(value) {
+            Err(format!(
+                "[line {}] expected '{}', got {:?}",
+                self.peek().line,
+                value,
+                self.peek().value
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn expect_name(&mut self) -> Result<String, String> {
         let token = self.peek().clone();
-        if token.kind == "name" {
+        if token.kind == "name" || token.kind == "keyword" {
             self.pos += 1;
             Ok(token.value)
         } else {
@@ -306,6 +332,7 @@ mod tests {
                     id: NodeId::next(),
                     name: "msg".to_string(),
                     is_const: false,
+                    is_global: false,
                     type_name: None,
                     initializer: Some(Expr::string("hello")),
                 },
@@ -340,6 +367,7 @@ mod tests {
                 id: NodeId::next(),
                 name: "small".to_string(),
                 is_const: false,
+                is_global: false,
                 type_name: Some("int".to_string()),
                 initializer: Some(Expr::int(2)),
             }

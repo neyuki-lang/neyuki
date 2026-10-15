@@ -33,8 +33,10 @@ const USAGE: &str = "Usage: neyuki <command> [arguments]
 Commands:
   run <file> [args...]    Run a .nyk script or .nykb bytecode file
   <file> [args...]        Same as run
+  fmt [--check] <path>    Format .nyk source files
   lint [--json] [--stdin] <file>
                           Report errors and warnings without running
+  lsp                     Serve the Language Server Protocol on stdio
   compile <file> [out]    Compile to .nykb bytecode
   test                    Run every script in tests/
   repl                    Start an interactive session
@@ -63,9 +65,19 @@ fn run_cli() {
         println!("{}", USAGE);
     } else if matches!(action.as_str(), "version" | "--version" | "-V") {
         println!("neyuki {}", env!("CARGO_PKG_VERSION"));
+    } else if action == "fmt" {
+        if let Err(err) = fmt::run_cli(&args[2..]) {
+            eprintln!("{}", err);
+            process::exit(1);
+        }
     } else if action == "lint" {
         if let Err(err) = lint::run_cli(&args[2..]) {
             eprintln!("{}", err);
+            process::exit(1);
+        }
+    } else if action == "lsp" {
+        if let Err(err) = lsp::run_lsp_server() {
+            eprintln!("lsp error: {}", err);
             process::exit(1);
         }
     } else if action == "compile" {
@@ -88,7 +100,14 @@ fn run_cli() {
                 );
             }
             Err(err) => {
-                eprintln!("{}: {}", path, err);
+                if err.starts_with("error[") || err.starts_with("runtime error") {
+                    eprint!("{}", err);
+                    if !err.ends_with('\n') {
+                        eprintln!();
+                    }
+                } else {
+                    eprintln!("{}: {}", path, err);
+                }
                 process::exit(1);
             }
         }
@@ -99,7 +118,14 @@ fn run_cli() {
         };
         vm::libs::os::set_script_args(args[3..].to_vec());
         if let Err(err) = vm::run_file(path) {
-            eprintln!("error: {}", err);
+            if err.starts_with("error[") || err.starts_with("runtime error") {
+                eprint!("{}", err);
+                if !err.ends_with('\n') {
+                    eprintln!();
+                }
+            } else {
+                eprintln!("error: {}", err);
+            }
             process::exit(1);
         }
     } else if action == "dump-ir" {

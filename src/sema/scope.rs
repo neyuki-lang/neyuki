@@ -68,6 +68,20 @@ impl ScopeManager {
         Ok(())
     }
 
+    pub fn define_global(&mut self, symbol: Symbol) -> Result<(), Span> {
+        let global_scope = self
+            .scopes
+            .first_mut()
+            .expect("scope stack cannot be empty");
+        if let Some(existing) = global_scope.symbols.get(&symbol.name)
+            && existing.is_const
+        {
+            return Err(existing.span);
+        }
+        global_scope.symbols.insert(symbol.name.clone(), symbol);
+        Ok(())
+    }
+
     pub fn lookup(&self, name: &str) -> Option<&Symbol> {
         for scope in self.scopes.iter().rev() {
             if let Some(sym) = scope.symbols.get(name) {

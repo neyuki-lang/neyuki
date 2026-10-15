@@ -22,7 +22,7 @@ pub fn render_report(source_name: &str, source: &str, diagnostics: &[Diagnostic]
         if let Some(label) = &diag.primary_label {
             let line_idx = label.span.start.line as usize;
             let col_idx = label.span.start.column.max(1) as usize;
-            let pad = line_idx.to_string().len();
+            let pad = line_idx.to_string().len().max(2);
 
             out.push_str(&format!(
                 "{:pad$}--> {}:{}:{}\n",
@@ -98,13 +98,18 @@ pub fn render_report(source_name: &str, source: &str, diagnostics: &[Diagnostic]
         }
 
         // 4. Notes
+        let pad = diag
+            .primary_label
+            .as_ref()
+            .map(|l| (l.span.start.line as usize).to_string().len().max(2))
+            .unwrap_or(2);
         for note in &diag.notes {
-            out.push_str(&format!("  = note: {}\n", note));
+            out.push_str(&format!("{:pad$} = note: {}\n", "", note, pad = pad));
         }
 
         // 5. Help suggestions
         if let Some(help) = &diag.help {
-            out.push_str(&format!("  = help: {}\n", help));
+            out.push_str(&format!("{:pad$} = help: {}\n", "", help, pad = pad));
         }
     }
 

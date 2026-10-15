@@ -19,12 +19,14 @@ pub fn walk_fold_stmt<F: AstFolder + ?Sized>(folder: &mut F, stmt: Stmt) -> Stmt
         Stmt::Local {
             name,
             is_const,
+            is_global,
             type_name,
             initializer,
             id,
         } => Stmt::Local {
             name,
             is_const,
+            is_global,
             type_name,
             initializer: initializer.map(|e| folder.fold_expr(e)),
             id,
@@ -32,11 +34,13 @@ pub fn walk_fold_stmt<F: AstFolder + ?Sized>(folder: &mut F, stmt: Stmt) -> Stmt
         Stmt::LocalMany {
             names,
             is_const,
+            is_global,
             initializers,
             id,
         } => Stmt::LocalMany {
             names,
             is_const,
+            is_global,
             initializers: initializers
                 .into_iter()
                 .map(|e| folder.fold_expr(e))

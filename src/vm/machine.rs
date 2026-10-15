@@ -17,7 +17,7 @@ use crate::vm::libs::{
 use crate::vm::ops;
 use crate::vm::value::{NativeDef, StrRef, Upvalue, Value, VmClosure, VmTable};
 
-const MAX_CALL_DEPTH: usize = 512;
+pub const DEFAULT_MAX_CALL_DEPTH: usize = 16_384;
 
 /// A register of the running frame. The interpreter loop only calls this
 /// with indices below `base + max_registers` of a verified prototype, and
@@ -170,6 +170,8 @@ pub struct VM {
     /// The call stack where the error now unwinding was raised, innermost
     /// frame first. Cleared when `try`, `pcall` or `xpcall` catches it.
     pub error_trace: Option<Vec<TraceFrame>>,
+    /// Maximum call depth allowed before raising call stack overflow.
+    pub max_call_depth: usize,
 }
 
 impl Default for VM {
@@ -205,9 +207,21 @@ impl VM {
             string_lib: Value::Nil,
             returned: Vec::new(),
             error_trace: None,
+            max_call_depth: std::env::var("NEYUKI_MAX_CALL_DEPTH")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(DEFAULT_MAX_CALL_DEPTH),
         };
         vm.register_builtins();
         vm
+    }
+
+    pub fn max_call_depth(&self) -> usize {
+        self.max_call_depth
+    }
+
+    pub fn set_max_call_depth(&mut self, depth: usize) {
+        self.max_call_depth = depth;
     }
 
     fn register_builtins(&mut self) {
@@ -421,10 +435,10 @@ impl VM {
     }
 
     fn call_function_inner(&mut self, func: Value, args: &[Value]) -> Result<Vec<Value>, String> {
-        if self.frames.len() >= MAX_CALL_DEPTH {
+        if self.frames.len() >= self.max_call_depth {
             return Err(format!(
                 "call stack overflow: exceeded maximum call depth of {}",
-                MAX_CALL_DEPTH
+                self.max_call_depth
             ));
         }
         match func {
@@ -785,16 +799,47 @@ impl VM {
 
     /// An error message followed by the traceback recorded for it, if any.
     pub fn describe_error(&self, message: &str) -> String {
-        let mut out = message.to_string();
+        let mut out = format!(
+            "runtime error[{}]: {}\n",
+            crate::diagnostics::error_code::ErrorCode::E0200,
+            message
+        );
         if let Some(trace) = &self.error_trace {
-            for frame in trace {
+            if let Some(top) = trace.first() {
+                let src_name = top.source.as_deref().unwrap_or("<unknown>");
+                let line = top.line.max(1);
+                let pad = line.to_string().len().max(2);
+                out.push_str(&format!(
+                    "{:pad$}--> {}:{}:1\n",
+                    "",
+                    src_name,
+                    line,
+                    pad = pad
+                ));
+                out.push_str(&format!("{:pad$} |\n", "", pad = pad));
+                if let Ok(content) = std::fs::read_to_string(src_name)
+                    && let Some(line_content) = content.lines().nth((line - 1) as usize)
+                {
+                    out.push_str(&format!("{:pad$} | {}\n", line, line_content, pad = pad));
+                    out.push_str(&format!("{:pad$} | ^ {}\n", "", message, pad = pad));
+                }
+                out.push_str(&format!("{:pad$} |\n", "", pad = pad));
+            }
+            out.push_str("  = stack backtrace:\n");
+            for (idx, frame) in trace.iter().enumerate() {
                 if frame.source.is_none() && frame.line == 0 {
                     out.push_str(&format!(
-                        "\n    {}",
-                        frame.function.as_deref().unwrap_or("")
+                        "    {:2}: {}\n",
+                        idx,
+                        frame.function.as_deref().unwrap_or("...")
                     ));
                 } else {
-                    out.push_str(&format!("\n    at {}", frame));
+                    let func = frame.function.as_deref().unwrap_or("<main>");
+                    let src = frame.source.as_deref().unwrap_or("?");
+                    out.push_str(&format!(
+                        "    {:2}: {} at {}:{}\n",
+                        idx, func, src, frame.line
+                    ));
                 }
             }
         }
@@ -1770,10 +1815,10 @@ impl VM {
                                         count: MULTRET,
                                     }) if *ret == callee
                                 );
-                            if !tail && self.frames.len() >= MAX_CALL_DEPTH {
+                            if !tail && self.frames.len() >= self.max_call_depth {
                                 throw!(
                                     "call stack overflow: exceeded maximum call depth of {}",
-                                    MAX_CALL_DEPTH
+                                    self.max_call_depth
                                 );
                             }
                             let callee_closure = callee_closure.clone();
@@ -2790,15 +2835,30 @@ mod tests {
     #[test]
     fn test_vm_call_stack_overflow_caught() {
         // Infinite NON-tail recursion via Instruction::Call must be caught by
-        // MAX_CALL_DEPTH = 512. (A tail call like `return f()` reuses the
-        // frame instead and legitimately runs forever.)
+        // max_call_depth (configurable, default 16,384).
         let code = "local function f()\n  return f() + 1\nend\nreturn f()";
         let stmts = crate::compiler::compile_source(code).expect("syntax error");
         let proto = crate::compiler::compile_to_proto(&stmts);
         let mut vm = VM::new();
+        vm.set_max_call_depth(128);
         let res = vm.execute(proto);
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("call stack overflow"));
+    }
+
+    #[test]
+    fn test_vm_deep_recursion_exceeds_old_512_limit() {
+        // Deep recursion past old 512-frame limit (e.g. 1000 frames) now executes
+        // successfully without call stack overflow.
+        let code = "local function rec(n)\n  if n <= 1 then return 1 end\n  return rec(n - 1) + 1\nend\nreturn rec(1000)";
+        let stmts = crate::compiler::compile_source(code).expect("syntax error");
+        let proto = crate::compiler::compile_to_proto(&stmts);
+        let mut vm = VM::new();
+        assert_eq!(vm.max_call_depth(), DEFAULT_MAX_CALL_DEPTH);
+        let res = vm
+            .execute(proto)
+            .expect("recursion up to 1000 frames must succeed");
+        assert_eq!(res.to_string(), "1000");
     }
 
     #[test]

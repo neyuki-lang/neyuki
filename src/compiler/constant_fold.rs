@@ -650,6 +650,7 @@ fn fold_stmt_scoped(stmt: Stmt, shadowed: &mut HashSet<String>) -> Option<Stmt> 
         Stmt::Local {
             name,
             is_const,
+            is_global,
             type_name,
             initializer,
             id,
@@ -659,6 +660,7 @@ fn fold_stmt_scoped(stmt: Stmt, shadowed: &mut HashSet<String>) -> Option<Stmt> 
             Some(Stmt::Local {
                 name,
                 is_const,
+                is_global,
                 type_name,
                 initializer: new_init,
                 id,
@@ -667,6 +669,7 @@ fn fold_stmt_scoped(stmt: Stmt, shadowed: &mut HashSet<String>) -> Option<Stmt> 
         Stmt::LocalMany {
             names,
             is_const,
+            is_global,
             initializers,
             id,
         } => {
@@ -680,6 +683,7 @@ fn fold_stmt_scoped(stmt: Stmt, shadowed: &mut HashSet<String>) -> Option<Stmt> 
             Some(Stmt::LocalMany {
                 names,
                 is_const,
+                is_global,
                 initializers: new_inits,
                 id,
             })

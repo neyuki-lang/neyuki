@@ -17,6 +17,15 @@ pub fn parse_statement(parser: &mut Parser) -> Result<Stmt, String> {
 }
 
 pub fn parse_statement_inner(parser: &mut Parser) -> Result<Stmt, String> {
+    if parser.check_word("enum") {
+        return parse_enum(parser);
+    }
+    if parser.check_word("match") {
+        return parse_match(parser);
+    }
+    if parser.check_keyword("do") {
+        return parse_do(parser);
+    }
     if parser.check_keyword("local")
         || parser.check_keyword("const")
         || parser.check_keyword("global")
@@ -150,11 +159,13 @@ pub fn parse_statement_inner(parser: &mut Parser) -> Result<Stmt, String> {
 
 pub fn parse_binding(parser: &mut Parser) -> Result<Stmt, String> {
     let mut is_const = false;
+    let mut is_global = false;
     while parser.check_keyword("local")
         || parser.check_keyword("const")
         || parser.check_keyword("global")
     {
         is_const |= parser.check_keyword("const");
+        is_global |= parser.check_keyword("global");
         parser.pos += 1;
     }
 
@@ -202,6 +213,7 @@ pub fn parse_binding(parser: &mut Parser) -> Result<Stmt, String> {
             id: NodeId::next(),
             names,
             is_const,
+            is_global,
             initializers,
         });
     }
@@ -221,6 +233,7 @@ pub fn parse_binding(parser: &mut Parser) -> Result<Stmt, String> {
         id: NodeId::next(),
         name,
         is_const,
+        is_global,
         type_name,
         initializer,
     })
@@ -285,6 +298,19 @@ pub fn parse_function(parser: &mut Parser, is_const: bool) -> Result<Stmt, Strin
         params,
         return_type,
         body,
+    })
+}
+
+pub fn parse_do(parser: &mut Parser) -> Result<Stmt, String> {
+    parser.expect_keyword("do")?;
+    let body = parse_block_until(parser, "end")?;
+    parser.expect_keyword("end")?;
+    Ok(Stmt::If {
+        id: NodeId::next(),
+        condition: Expr::bool(true),
+        then_branch: body,
+        else_if_branches: Vec::new(),
+        else_branch: None,
     })
 }
 
@@ -461,4 +487,521 @@ pub fn match_compound_assignment(parser: &mut Parser) -> Option<String> {
     let op = token.value[..token.value.len() - 1].to_string();
     parser.pos += 1;
     Some(op)
+}
+
+pub fn parse_enum(parser: &mut Parser) -> Result<Stmt, String> {
+    parser.expect_word("enum")?;
+    let enum_name = parser.expect_name()?;
+    let mut table_entries = Vec::new();
+
+    while !parser.check_word("end") && !parser.is_eof() {
+        while parser.match_symbol(";") || parser.match_symbol(",") {}
+        if parser.check_word("end") {
+            break;
+        }
+        let variant_name = parser.expect_name()?;
+        let mut fields = Vec::new();
+        if parser.match_symbol("(") {
+            if !parser.check_symbol(")") {
+                fields.push(parser.expect_name()?);
+                while parser.match_symbol(",") {
+                    if parser.check_symbol(")") {
+                        break;
+                    }
+                    fields.push(parser.expect_name()?);
+                }
+            }
+            parser.expect_symbol(")")?;
+        }
+
+        if fields.is_empty() {
+            let variant_entries = vec![
+                TableEntry {
+                    key: Some("__enum".to_string()),
+                    computed: None,
+                    value: Expr::string(enum_name.clone()),
+                },
+                TableEntry {
+                    key: Some("__variant".to_string()),
+                    computed: None,
+                    value: Expr::string(variant_name.clone()),
+                },
+            ];
+            let variant_table = Expr::Table {
+                entries: variant_entries,
+                id: NodeId::next(),
+            };
+            table_entries.push(TableEntry {
+                key: Some(variant_name),
+                computed: None,
+                value: variant_table,
+            });
+        } else {
+            let mut ret_entries = Vec::new();
+            ret_entries.push(TableEntry {
+                key: Some("__enum".to_string()),
+                computed: None,
+                value: Expr::string(enum_name.clone()),
+            });
+            ret_entries.push(TableEntry {
+                key: Some("__variant".to_string()),
+                computed: None,
+                value: Expr::string(variant_name.clone()),
+            });
+            let mut params = Vec::new();
+            for field in &fields {
+                params.push(Param::new(field.clone(), None, false));
+                ret_entries.push(TableEntry {
+                    key: Some(field.clone()),
+                    computed: None,
+                    value: Expr::Variable {
+                        name: field.clone(),
+                        id: NodeId::next(),
+                    },
+                });
+                ret_entries.push(TableEntry {
+                    key: None,
+                    computed: None,
+                    value: Expr::Variable {
+                        name: field.clone(),
+                        id: NodeId::next(),
+                    },
+                });
+            }
+
+            let ret_stmt = Stmt::Return {
+                values: vec![Expr::Table {
+                    entries: ret_entries,
+                    id: NodeId::next(),
+                }],
+                id: NodeId::next(),
+            };
+
+            let constructor = Expr::Function {
+                params,
+                body: vec![ret_stmt],
+                id: NodeId::next(),
+            };
+
+            table_entries.push(TableEntry {
+                key: Some(variant_name),
+                computed: None,
+                value: constructor,
+            });
+        }
+
+        while parser.match_symbol(";") || parser.match_symbol(",") {}
+    }
+
+    parser.expect_keyword("end")?;
+
+    Ok(Stmt::Local {
+        name: enum_name,
+        is_const: true,
+        is_global: false,
+        type_name: None,
+        initializer: Some(Expr::Table {
+            entries: table_entries,
+            id: NodeId::next(),
+        }),
+        id: NodeId::next(),
+    })
+}
+
+pub fn parse_match(parser: &mut Parser) -> Result<Stmt, String> {
+    parser.expect_word("match")?;
+    let target_expr = parse_expr(parser)?;
+
+    let match_var_id = NodeId::next();
+    let match_var_name = format!("__match_val_{}", match_var_id.0);
+
+    let mut cases: Vec<(Expr, Vec<Stmt>)> = Vec::new();
+    let mut default_body: Option<Vec<Stmt>> = None;
+
+    while !parser.check_word("end") && !parser.is_eof() {
+        if parser.match_word("default") {
+            parser.expect_symbol(":")?;
+            let mut stmts = Vec::new();
+            while !parser.check_word("case")
+                && !parser.check_word("default")
+                && !parser.check_word("end")
+                && !parser.is_eof()
+            {
+                stmts.push(parse_statement(parser)?);
+            }
+            default_body = Some(stmts);
+        } else if parser.match_word("case") {
+            if parser.match_symbol("_") {
+                parser.expect_symbol(":")?;
+                let mut stmts = Vec::new();
+                while !parser.check_word("case")
+                    && !parser.check_word("default")
+                    && !parser.check_word("end")
+                    && !parser.is_eof()
+                {
+                    stmts.push(parse_statement(parser)?);
+                }
+                default_body = Some(stmts);
+            } else {
+                let (condition, mut bindings) = parse_pattern_test(parser, &match_var_name)?;
+                let condition = if parser.match_word("if") {
+                    let mut guard = parse_expr(parser)?;
+                    for b in &bindings {
+                        if let Stmt::Local {
+                            name,
+                            initializer: Some(init),
+                            ..
+                        } = b
+                        {
+                            substitute_expr(&mut guard, name, init);
+                        }
+                    }
+                    Expr::Binary {
+                        left: Box::new(condition),
+                        op: crate::ast::op::BinOp::And,
+                        right: Box::new(guard),
+                        id: NodeId::next(),
+                    }
+                } else {
+                    condition
+                };
+                parser.expect_symbol(":")?;
+                let mut body = Vec::new();
+                while !parser.check_word("case")
+                    && !parser.check_word("default")
+                    && !parser.check_word("end")
+                    && !parser.is_eof()
+                {
+                    body.push(parse_statement(parser)?);
+                }
+                bindings.extend(body);
+                cases.push((condition, bindings));
+            }
+        } else {
+            return Err(format!(
+                "[line {}] expected 'case', 'default', or 'end' in match statement",
+                parser.peek().line
+            ));
+        }
+    }
+
+    parser.expect_keyword("end")?;
+
+    let inner_if = if cases.is_empty() {
+        if let Some(def) = default_body {
+            Stmt::If {
+                condition: Expr::bool(true),
+                then_branch: def,
+                else_if_branches: Vec::new(),
+                else_branch: None,
+                id: NodeId::next(),
+            }
+        } else {
+            Stmt::Expr {
+                expr: Expr::nil(),
+                id: NodeId::next(),
+            }
+        }
+    } else {
+        let (first_cond, first_body) = cases.remove(0);
+        Stmt::If {
+            condition: first_cond,
+            then_branch: first_body,
+            else_if_branches: cases,
+            else_branch: default_body,
+            id: NodeId::next(),
+        }
+    };
+
+    Ok(Stmt::If {
+        condition: Expr::bool(true),
+        then_branch: vec![
+            Stmt::Local {
+                name: match_var_name,
+                is_const: true,
+                is_global: false,
+                type_name: None,
+                initializer: Some(target_expr),
+                id: NodeId::next(),
+            },
+            inner_if,
+        ],
+        else_if_branches: Vec::new(),
+        else_branch: None,
+        id: NodeId::next(),
+    })
+}
+
+fn parse_pattern_test(
+    parser: &mut Parser,
+    match_var_name: &str,
+) -> Result<(Expr, Vec<Stmt>), String> {
+    let match_var = || Expr::Variable {
+        name: match_var_name.to_string(),
+        id: NodeId::next(),
+    };
+
+    if parser.peek().kind == "number"
+        || parser.peek().kind == "string"
+        || parser.check_keyword("true")
+        || parser.check_keyword("false")
+        || parser.check_keyword("nil")
+    {
+        let lit_expr = parse_expr(parser)?;
+        let cond = Expr::Binary {
+            left: Box::new(match_var()),
+            op: crate::ast::op::BinOp::Eq,
+            right: Box::new(lit_expr),
+            id: NodeId::next(),
+        };
+        return Ok((cond, Vec::new()));
+    }
+
+    let first_name = parser.expect_name()?;
+    if parser.match_symbol(".") {
+        let second_name = parser.expect_name()?;
+        if parser.match_symbol("(") {
+            parse_variant_pattern_args(parser, match_var_name, Some(&first_name), &second_name)
+        } else {
+            let is_table = Expr::Binary {
+                left: Box::new(Expr::Call {
+                    callee: Box::new(Expr::Variable {
+                        name: "type".to_string(),
+                        id: NodeId::next(),
+                    }),
+                    args: vec![match_var()],
+                    id: NodeId::next(),
+                }),
+                op: crate::ast::op::BinOp::Eq,
+                right: Box::new(Expr::string("table")),
+                id: NodeId::next(),
+            };
+            let check_variant = Expr::Binary {
+                left: Box::new(Expr::Member {
+                    object: Box::new(match_var()),
+                    field: "__variant".to_string(),
+                    id: NodeId::next(),
+                }),
+                op: crate::ast::op::BinOp::Eq,
+                right: Box::new(Expr::string(second_name.clone())),
+                id: NodeId::next(),
+            };
+            let check_enum = Expr::Binary {
+                left: Box::new(Expr::Member {
+                    object: Box::new(match_var()),
+                    field: "__enum".to_string(),
+                    id: NodeId::next(),
+                }),
+                op: crate::ast::op::BinOp::Eq,
+                right: Box::new(Expr::string(first_name.clone())),
+                id: NodeId::next(),
+            };
+            let table_cond = Expr::Binary {
+                left: Box::new(Expr::Binary {
+                    left: Box::new(is_table),
+                    op: crate::ast::op::BinOp::And,
+                    right: Box::new(check_variant),
+                    id: NodeId::next(),
+                }),
+                op: crate::ast::op::BinOp::And,
+                right: Box::new(check_enum),
+                id: NodeId::next(),
+            };
+            let direct_eq = Expr::Binary {
+                left: Box::new(match_var()),
+                op: crate::ast::op::BinOp::Eq,
+                right: Box::new(Expr::Member {
+                    object: Box::new(Expr::Variable {
+                        name: first_name,
+                        id: NodeId::next(),
+                    }),
+                    field: second_name,
+                    id: NodeId::next(),
+                }),
+                id: NodeId::next(),
+            };
+            let cond = Expr::Binary {
+                left: Box::new(table_cond),
+                op: crate::ast::op::BinOp::Or,
+                right: Box::new(direct_eq),
+                id: NodeId::next(),
+            };
+            Ok((cond, Vec::new()))
+        }
+    } else if parser.match_symbol("(") {
+        parse_variant_pattern_args(parser, match_var_name, None, &first_name)
+    } else {
+        let cond = Expr::bool(true);
+        let binding = Stmt::Local {
+            name: first_name,
+            is_const: false,
+            is_global: false,
+            type_name: None,
+            initializer: Some(match_var()),
+            id: NodeId::next(),
+        };
+        Ok((cond, vec![binding]))
+    }
+}
+
+fn parse_variant_pattern_args(
+    parser: &mut Parser,
+    match_var_name: &str,
+    enum_name: Option<&str>,
+    variant_name: &str,
+) -> Result<(Expr, Vec<Stmt>), String> {
+    let match_var = || Expr::Variable {
+        name: match_var_name.to_string(),
+        id: NodeId::next(),
+    };
+
+    let is_table = Expr::Binary {
+        left: Box::new(Expr::Call {
+            callee: Box::new(Expr::Variable {
+                name: "type".to_string(),
+                id: NodeId::next(),
+            }),
+            args: vec![match_var()],
+            id: NodeId::next(),
+        }),
+        op: crate::ast::op::BinOp::Eq,
+        right: Box::new(Expr::string("table")),
+        id: NodeId::next(),
+    };
+
+    let check_variant = Expr::Binary {
+        left: Box::new(Expr::Member {
+            object: Box::new(match_var()),
+            field: "__variant".to_string(),
+            id: NodeId::next(),
+        }),
+        op: crate::ast::op::BinOp::Eq,
+        right: Box::new(Expr::string(variant_name)),
+        id: NodeId::next(),
+    };
+
+    let mut condition = Expr::Binary {
+        left: Box::new(is_table),
+        op: crate::ast::op::BinOp::And,
+        right: Box::new(check_variant),
+        id: NodeId::next(),
+    };
+
+    if let Some(ename) = enum_name {
+        let check_enum = Expr::Binary {
+            left: Box::new(Expr::Member {
+                object: Box::new(match_var()),
+                field: "__enum".to_string(),
+                id: NodeId::next(),
+            }),
+            op: crate::ast::op::BinOp::Eq,
+            right: Box::new(Expr::string(ename)),
+            id: NodeId::next(),
+        };
+        condition = Expr::Binary {
+            left: Box::new(condition),
+            op: crate::ast::op::BinOp::And,
+            right: Box::new(check_enum),
+            id: NodeId::next(),
+        };
+    }
+
+    let mut bindings = Vec::new();
+    let mut arg_idx = 1;
+
+    if !parser.check_symbol(")") {
+        loop {
+            if parser.match_symbol("_") {
+                // Wildcard
+            } else if parser.peek().kind == "number"
+                || parser.peek().kind == "string"
+                || parser.check_keyword("true")
+                || parser.check_keyword("false")
+                || parser.check_keyword("nil")
+            {
+                let lit = parse_expr(parser)?;
+                let field_access = Expr::Index {
+                    object: Box::new(match_var()),
+                    index: Box::new(Expr::int(arg_idx as i64)),
+                    id: NodeId::next(),
+                };
+                let check_lit = Expr::Binary {
+                    left: Box::new(field_access),
+                    op: crate::ast::op::BinOp::Eq,
+                    right: Box::new(lit),
+                    id: NodeId::next(),
+                };
+                condition = Expr::Binary {
+                    left: Box::new(condition),
+                    op: crate::ast::op::BinOp::And,
+                    right: Box::new(check_lit),
+                    id: NodeId::next(),
+                };
+            } else {
+                let var_name = parser.expect_name()?;
+                let field_access = Expr::Index {
+                    object: Box::new(match_var()),
+                    index: Box::new(Expr::int(arg_idx as i64)),
+                    id: NodeId::next(),
+                };
+                bindings.push(Stmt::Local {
+                    name: var_name,
+                    is_const: false,
+                    is_global: false,
+                    type_name: None,
+                    initializer: Some(field_access),
+                    id: NodeId::next(),
+                });
+            }
+            arg_idx += 1;
+            if !parser.match_symbol(",") {
+                break;
+            }
+        }
+    }
+    parser.expect_symbol(")")?;
+
+    Ok((condition, bindings))
+}
+
+fn substitute_expr(expr: &mut Expr, from: &str, to: &Expr) {
+    if let Expr::Variable { name, .. } = expr
+        && name == from
+    {
+        *expr = to.clone();
+        return;
+    }
+    match expr {
+        Expr::Unary { expr: inner, .. } => substitute_expr(inner, from, to),
+        Expr::Binary { left, right, .. } => {
+            substitute_expr(left, from, to);
+            substitute_expr(right, from, to);
+        }
+        Expr::Call { callee, args, .. } => {
+            substitute_expr(callee, from, to);
+            for arg in args {
+                substitute_expr(arg, from, to);
+            }
+        }
+        Expr::MethodCall { object, args, .. } => {
+            substitute_expr(object, from, to);
+            for arg in args {
+                substitute_expr(arg, from, to);
+            }
+        }
+        Expr::Member { object, .. } => substitute_expr(object, from, to),
+        Expr::Index { object, index, .. } => {
+            substitute_expr(object, from, to);
+            substitute_expr(index, from, to);
+        }
+        Expr::Table { entries, .. } => {
+            for entry in entries {
+                if let Some(comp) = &mut entry.computed {
+                    substitute_expr(comp, from, to);
+                }
+                substitute_expr(&mut entry.value, from, to);
+            }
+        }
+        _ => {}
+    }
 }

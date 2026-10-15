@@ -221,12 +221,15 @@ impl<'a> SemanticAnalyzer<'a> {
             Stmt::Local {
                 name,
                 is_const,
+                is_global,
                 type_name,
                 initializer,
                 ..
             } => {
                 let span = self.find_ident_span(name);
-                self.check_shadowing(name, span);
+                if !*is_global {
+                    self.check_shadowing(name, span);
+                }
 
                 let declared_type = type_name.as_deref().map(NeyukiType::parse);
 
@@ -240,7 +243,17 @@ impl<'a> SemanticAnalyzer<'a> {
                 if let Some(init) = initializer {
                     sym.inferred_type = self.infer_expr_type(init);
                 }
-                if let Err(orig_span) = self.scope_mgr.define(sym) {
+                if *is_global {
+                    if let Err(orig_span) = self.scope_mgr.define_global(sym) {
+                        let diag =
+                            Diagnostic::error(format!("duplicate global variable '{}'", name))
+                                .with_code(ErrorCode::E0005)
+                                .with_label(span, "redefined here")
+                                .with_secondary_label(orig_span, "previous definition was here");
+                        self.diagnostics.push(diag);
+                    }
+                    self.known_globals.insert(name.clone());
+                } else if let Err(orig_span) = self.scope_mgr.define(sym) {
                     let diag = Diagnostic::error(format!(
                         "duplicate local variable '{}' in the same scope",
                         name
@@ -274,19 +287,35 @@ impl<'a> SemanticAnalyzer<'a> {
             Stmt::LocalMany {
                 names,
                 is_const,
+                is_global,
                 initializers,
                 ..
             } => {
                 for (i, name) in names.iter().enumerate() {
                     let span = self.find_ident_span(name);
-                    self.check_shadowing(name, span);
+                    if !*is_global {
+                        self.check_shadowing(name, span);
+                    }
 
                     let mut sym =
                         Symbol::new(name.clone(), SymbolKind::Variable, *is_const, None, span);
                     if let Some(init) = initializers.get(i) {
                         sym.inferred_type = self.infer_expr_type(init);
                     }
-                    if let Err(orig_span) = self.scope_mgr.define(sym) {
+                    if *is_global {
+                        if let Err(orig_span) = self.scope_mgr.define_global(sym) {
+                            let diag =
+                                Diagnostic::error(format!("duplicate global variable '{}'", name))
+                                    .with_code(ErrorCode::E0005)
+                                    .with_label(span, "redefined here")
+                                    .with_secondary_label(
+                                        orig_span,
+                                        "previous definition was here",
+                                    );
+                            self.diagnostics.push(diag);
+                        }
+                        self.known_globals.insert(name.clone());
+                    } else if let Err(orig_span) = self.scope_mgr.define(sym) {
                         let diag = Diagnostic::error(format!(
                             "duplicate local variable '{}' in the same scope",
                             name

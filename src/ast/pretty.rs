@@ -9,11 +9,17 @@ pub fn pretty_print_stmt(stmt: &Stmt, indent: usize) -> String {
         Stmt::Local {
             name,
             is_const,
+            is_global,
             type_name,
             initializer,
             ..
         } => {
-            let kw = if *is_const { "const" } else { "local" };
+            let kw = match (*is_global, *is_const) {
+                (true, true) => "global const",
+                (true, false) => "global",
+                (false, true) => "const",
+                (false, false) => "local",
+            };
             let ty = type_name
                 .as_ref()
                 .map(|t| format!(": {}", t))
@@ -27,10 +33,16 @@ pub fn pretty_print_stmt(stmt: &Stmt, indent: usize) -> String {
         Stmt::LocalMany {
             names,
             is_const,
+            is_global,
             initializers,
             ..
         } => {
-            let kw = if *is_const { "const" } else { "local" };
+            let kw = match (*is_global, *is_const) {
+                (true, true) => "global const",
+                (true, false) => "global",
+                (false, true) => "const",
+                (false, false) => "local",
+            };
             let inits = initializers
                 .iter()
                 .map(pretty_print_expr)

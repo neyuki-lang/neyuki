@@ -1,0 +1,52 @@
+# Neyuki Versioning and Backward Compatibility Policy
+
+This document defines the versioning scheme, stability guarantees, and breaking change deprecation procedures for the Neyuki programming language, compiler toolchain, bytecode formats, and standard libraries.
+
+## 1. Semantic Versioning
+
+Neyuki strictly adheres to Semantic Versioning 2.0.0 (`MAJOR.MINOR.PATCH`):
+
+- **MAJOR**: Incompatible language syntax alterations, opcode encoding changes, removal of deprecated standard APIs, or fundamental alterations to runtime semantics.
+- **MINOR**: Backward-compatible new features (new standard library modules, additional language constructs, optimizer improvements, new tooling capabilities such as `fmt` or `lsp`).
+- **PATCH**: Backward-compatible bug fixes, performance optimizations, memory safety improvements, and diagnostic message enhancements.
+
+---
+
+## 2. Stability Tiers
+
+Language features and APIs are organized into three distinct stability tiers:
+
+### Tier 1: Core Language and Runtime (Frozen)
+- **Scope**: Syntax grammar defined in `docs/spec.md`, register VM execution model, call stack mechanics, lexical scoping, basic data types (nil, bool, int, float, string, table, function).
+- **Guarantee**: Backwards compatible across all minor and patch versions within a major release. Syntax will not change or break existing compliant code.
+
+### Tier 2: Standard Library (`@neyuki/*`)
+- **Scope**: Built-in modules including `string`, `table`, `math`, `bit`, `buffer`, `json`, `os`, `fs`, `io`.
+- **Guarantee**: APIs are strictly additive within minor versions. Any deprecated function will be marked with diagnostics warning `W0005` for at least one minor release cycle before potential removal in a major release.
+
+### Tier 3: Experimental and Preview Tooling
+- **Scope**: Features designated with `--experimental` flags, unstable LSP extensions, and internal development tools.
+- **Guarantee**: May be modified or refined based on community feedback without triggering a major version increment.
+
+---
+
+## 3. Bytecode Stability Policy
+
+Bytecode artifacts (`.nykb`) carry an explicit version byte in the 12-byte header (`BYTECODE_VERSION`):
+
+1. **Current Version**: Bytecode Version 4 (`0x04`).
+2. **Forward Compatibility**: The VM strictly rejects bytecode with a version byte greater than its supported `BYTECODE_VERSION` with a clean diagnostic:
+   ```text
+   unsupported bytecode version: X (expected 4)
+   ```
+3. **Backward Compatibility**: Production releases of the VM must provide decoding pathways for the immediately preceding bytecode version or provide an automated bytecode migrator in `neyuki pkg upgrade-bytecode`.
+4. **Bytecode Freeze**: Once Version 1.0 of Neyuki is tagged, Bytecode Version 4 enters Long-Term Support (LTS) status.
+
+---
+
+## 4. Deprecation Lifecycle
+
+When an API or language pattern is targeted for deprecation:
+1. **Phase 1 (Warning)**: The compiler and linter emit a diagnostic warning (`W0005`) with a clear explanation and recommendation for the replacement API (`= help: use new_api instead`). Code continues to execute identically.
+2. **Phase 2 (Deprecation Window)**: The feature remains operational for at least one full minor release cycle (minimum 6 months).
+3. **Phase 3 (Removal)**: The feature is retired upon the subsequent major version boundary (`v2.0`).

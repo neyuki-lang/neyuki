@@ -8,6 +8,7 @@ use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::rc::Rc;
 
+use crate::ast::ty::TypeExpr;
 use crate::bytecode::proto::Proto;
 use crate::vm::buffer::VmBuffer;
 use crate::vm::hash::{FxHashMap, new_map};
@@ -434,6 +435,70 @@ impl Value {
             Value::Table(_) => "table",
             Value::Closure(_) | Value::Native(..) => "function",
             Value::Buffer(_) => "buffer",
+        }
+    }
+
+    /// Checks if this runtime value satisfies a given type expression.
+    pub fn matches_type_expr(&self, ty: &TypeExpr) -> bool {
+        match ty {
+            TypeExpr::Any => true,
+            TypeExpr::Never => false,
+            TypeExpr::Nil => matches!(self, Value::Nil),
+            TypeExpr::Named(name) => match name.to_lowercase().as_str() {
+                "any" => true,
+                "nil" | "void" => matches!(self, Value::Nil),
+                "never" => false,
+                "bool" | "boolean" => matches!(self, Value::Bool(_)),
+                "int" | "integer" | "i32" | "i64" | "u32" | "u64" => {
+                    matches!(self, Value::Int(_) | Value::BigInt(_))
+                }
+                "float" | "f32" | "f64" => matches!(self, Value::Float(_)),
+                "num" | "number" => self.is_number(),
+                "str" | "string" => matches!(self, Value::String(_)),
+                "table" | "dict" => matches!(self, Value::Table(_)),
+                "array" | "list" => matches!(self, Value::Table(_)),
+                "buf" | "buffer" => matches!(self, Value::Buffer(_)),
+                "thread" | "coroutine" => {
+                    matches!(self, Value::Table(t) if t.try_borrow().is_ok_and(|t| t.co_state.is_some()))
+                }
+                "function" => matches!(self, Value::Closure(_) | Value::Native(..)),
+                _ => true,
+            },
+            TypeExpr::Optional(inner) => {
+                matches!(self, Value::Nil) || self.matches_type_expr(inner)
+            }
+            TypeExpr::Union(variants) => variants.iter().any(|v| self.matches_type_expr(v)),
+            TypeExpr::Array(elem_ty) => {
+                if let Value::Table(t) = self {
+                    if let Ok(tbl) = t.try_borrow() {
+                        tbl.array.iter().all(|elem| elem.matches_type_expr(elem_ty))
+                    } else {
+                        true
+                    }
+                } else {
+                    false
+                }
+            }
+            TypeExpr::Record(fields) => {
+                if let Value::Table(t) = self {
+                    if let Ok(tbl) = t.try_borrow() {
+                        for (fname, fty) in fields {
+                            let fval = tbl.get_str(fname);
+                            if !fval.matches_type_expr(fty) {
+                                return false;
+                            }
+                        }
+                        true
+                    } else {
+                        true
+                    }
+                } else {
+                    false
+                }
+            }
+            TypeExpr::Tuple(_) => matches!(self, Value::Table(_)),
+            TypeExpr::Table { .. } => matches!(self, Value::Table(_)),
+            TypeExpr::Function { .. } => matches!(self, Value::Closure(_) | Value::Native(..)),
         }
     }
 }

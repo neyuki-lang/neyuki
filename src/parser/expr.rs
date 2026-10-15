@@ -258,7 +258,7 @@ pub fn parse_table(parser: &mut Parser) -> Result<Expr, String> {
     let mut entries = Vec::new();
     if !parser.check_symbol("}") {
         loop {
-            if parser.peek().kind == "name"
+            if (parser.peek().kind == "name" || parser.peek().kind == "keyword")
                 && parser
                     .tokens
                     .get(parser.pos + 1)
