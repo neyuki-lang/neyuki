@@ -48,25 +48,7 @@ pub fn parse_statement_inner(parser: &mut Parser) -> Result<Stmt, String> {
         return parse_repeat(parser);
     }
     if parser.check_keyword("return") {
-        parser.pos += 1;
-        let expr = if !parser.is_eof()
-            && !parser.check_keyword("end")
-            && !parser.check_keyword("else")
-            && !parser.check_keyword("elseif")
-            && !parser.check_keyword("until")
-        {
-            let mut values = vec![parse_expr(parser)?];
-            while parser.match_symbol(",") {
-                values.push(parse_expr(parser)?);
-            }
-            values
-        } else {
-            Vec::new()
-        };
-        return Ok(Stmt::Return {
-            id: NodeId::next(),
-            values: expr,
-        });
+        return parse_return(parser);
     }
     if parser.check_keyword("break") {
         parser.pos += 1;
@@ -77,6 +59,34 @@ pub fn parse_statement_inner(parser: &mut Parser) -> Result<Stmt, String> {
         return Ok(Stmt::Continue { id: NodeId::next() });
     }
 
+    parse_expr_or_assign(parser)
+}
+
+#[inline(never)]
+fn parse_return(parser: &mut Parser) -> Result<Stmt, String> {
+    parser.pos += 1;
+    let expr = if !parser.is_eof()
+        && !parser.check_keyword("end")
+        && !parser.check_keyword("else")
+        && !parser.check_keyword("elseif")
+        && !parser.check_keyword("until")
+    {
+        let mut values = vec![parse_expr(parser)?];
+        while parser.match_symbol(",") {
+            values.push(parse_expr(parser)?);
+        }
+        values
+    } else {
+        Vec::new()
+    };
+    Ok(Stmt::Return {
+        id: NodeId::next(),
+        values: expr,
+    })
+}
+
+#[inline(never)]
+fn parse_expr_or_assign(parser: &mut Parser) -> Result<Stmt, String> {
     let expr = parse_expr(parser)?;
     if parser.match_symbol("++") {
         let target = AssignTarget::from_expr(expr)?;
@@ -305,13 +315,13 @@ pub fn parse_do(parser: &mut Parser) -> Result<Stmt, String> {
     parser.expect_keyword("do")?;
     let body = parse_block_until(parser, "end")?;
     parser.expect_keyword("end")?;
-    Ok(Stmt::If {
-        id: NodeId::next(),
-        condition: Expr::bool(true),
-        then_branch: body,
-        else_if_branches: Vec::new(),
-        else_branch: None,
-    })
+    Ok(Stmt::if_stmt(
+        Expr::bool(true),
+        body,
+        Vec::new(),
+        None,
+        NodeId::next(),
+    ))
 }
 
 pub fn parse_if(parser: &mut Parser) -> Result<Stmt, String> {
@@ -320,6 +330,15 @@ pub fn parse_if(parser: &mut Parser) -> Result<Stmt, String> {
     parser.expect_keyword("then")?;
 
     let then_branch = parse_block_until_any(parser, &["else", "elseif", "end"])?;
+    parse_if_rest(parser, condition, then_branch)
+}
+
+#[inline(never)]
+fn parse_if_rest(
+    parser: &mut Parser,
+    condition: Expr,
+    then_branch: Vec<Stmt>,
+) -> Result<Stmt, String> {
     let mut else_if_branches = Vec::new();
     let mut else_branch = None;
 
@@ -338,13 +357,13 @@ pub fn parse_if(parser: &mut Parser) -> Result<Stmt, String> {
 
     parser.expect_keyword("end")?;
 
-    Ok(Stmt::If {
-        id: NodeId::next(),
+    Ok(Stmt::if_stmt(
         condition,
         then_branch,
         else_if_branches,
         else_branch,
-    })
+        NodeId::next(),
+    ))
 }
 
 pub fn parse_for(parser: &mut Parser) -> Result<Stmt, String> {
@@ -352,26 +371,36 @@ pub fn parse_for(parser: &mut Parser) -> Result<Stmt, String> {
     let first_name = parser.expect_name()?;
     if parser.match_symbol("=") {
         let start = parse_expr(parser)?;
-        parser.expect_symbol(",")?;
-        let end = parse_expr(parser)?;
-        let step = if parser.match_symbol(",") {
-            Some(parse_expr(parser)?)
-        } else {
-            None
-        };
-        parser.expect_keyword("do")?;
-        let body = parse_block_until(parser, "end")?;
-        parser.expect_keyword("end")?;
-        return Ok(Stmt::NumericFor {
-            id: NodeId::next(),
-            var: first_name,
-            start,
-            end,
-            step,
-            body,
-        });
+        parse_numeric_for(parser, first_name, start)
+    } else {
+        parse_generic_for(parser, first_name)
     }
+}
 
+#[inline(never)]
+fn parse_numeric_for(parser: &mut Parser, var: String, start: Expr) -> Result<Stmt, String> {
+    parser.expect_symbol(",")?;
+    let end = parse_expr(parser)?;
+    let step = if parser.match_symbol(",") {
+        Some(parse_expr(parser)?)
+    } else {
+        None
+    };
+    parser.expect_keyword("do")?;
+    let body = parse_block_until(parser, "end")?;
+    parser.expect_keyword("end")?;
+    Ok(Stmt::numeric_for(
+        var,
+        start,
+        end,
+        step,
+        body,
+        NodeId::next(),
+    ))
+}
+
+#[inline(never)]
+fn parse_generic_for(parser: &mut Parser, first_name: String) -> Result<Stmt, String> {
     let mut vars = vec![first_name];
     if parser.match_symbol(",") {
         vars.push(parser.expect_name()?);
@@ -468,7 +497,14 @@ pub fn parse_block_until_any(parser: &mut Parser, end_words: &[&str]) -> Result<
             parser.pos += 1;
             continue;
         }
-        if end_words.iter().any(|word| parser.check_keyword(word)) {
+        let mut hit = false;
+        for &word in end_words {
+            if parser.check_keyword(word) {
+                hit = true;
+                break;
+            }
+        }
+        if hit {
             break;
         }
         block.push(parse_statement(parser)?);
@@ -689,13 +725,7 @@ pub fn parse_match(parser: &mut Parser) -> Result<Stmt, String> {
 
     let inner_if = if cases.is_empty() {
         if let Some(def) = default_body {
-            Stmt::If {
-                condition: Expr::bool(true),
-                then_branch: def,
-                else_if_branches: Vec::new(),
-                else_branch: None,
-                id: NodeId::next(),
-            }
+            Stmt::if_stmt(Expr::bool(true), def, Vec::new(), None, NodeId::next())
         } else {
             Stmt::Expr {
                 expr: Expr::nil(),
@@ -704,18 +734,12 @@ pub fn parse_match(parser: &mut Parser) -> Result<Stmt, String> {
         }
     } else {
         let (first_cond, first_body) = cases.remove(0);
-        Stmt::If {
-            condition: first_cond,
-            then_branch: first_body,
-            else_if_branches: cases,
-            else_branch: default_body,
-            id: NodeId::next(),
-        }
+        Stmt::if_stmt(first_cond, first_body, cases, default_body, NodeId::next())
     };
 
-    Ok(Stmt::If {
-        condition: Expr::bool(true),
-        then_branch: vec![
+    Ok(Stmt::if_stmt(
+        Expr::bool(true),
+        vec![
             Stmt::Local {
                 name: match_var_name,
                 is_const: true,
@@ -726,10 +750,10 @@ pub fn parse_match(parser: &mut Parser) -> Result<Stmt, String> {
             },
             inner_if,
         ],
-        else_if_branches: Vec::new(),
-        else_branch: None,
-        id: NodeId::next(),
-    })
+        Vec::new(),
+        None,
+        NodeId::next(),
+    ))
 }
 
 fn parse_pattern_test(

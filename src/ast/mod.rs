@@ -25,7 +25,7 @@ pub use op::{AssignOp, BinOp, CompoundOp, UnOp};
 pub use pattern::{AssignTarget, SpannedAssignTarget};
 pub use pretty::{pretty_print_expr, pretty_print_stmt, to_sexpr};
 pub use span::{SourceLocation, Span, SpanPool};
-pub use stmt::Stmt;
+pub use stmt::{IfData, NumericForData, Stmt};
 pub use ty::TypeExpr;
 pub use visitor::{
     AstSanityChecker, AstVisitor, check_ast_sanity, walk_assign_target, walk_expr, walk_stmt,

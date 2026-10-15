@@ -520,11 +520,9 @@ mod tests {
         assert!(matches!(
             &program[0],
             Stmt::NumericFor {
-                var,
-                step: Some(_),
-                body,
+                data,
                 ..
-            } if var == "i" && body.len() == 1
+            } if data.var == "i" && data.step.is_some() && data.body.len() == 1
         ));
     }
 

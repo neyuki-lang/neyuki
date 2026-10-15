@@ -46,10 +46,7 @@ pub enum Stmt {
         id: NodeId,
     },
     If {
-        condition: Expr,
-        then_branch: Vec<Stmt>,
-        else_if_branches: Vec<(Expr, Vec<Stmt>)>,
-        else_branch: Option<Vec<Stmt>>,
+        data: Box<IfData>,
         id: NodeId,
     },
     For {
@@ -59,11 +56,7 @@ pub enum Stmt {
         id: NodeId,
     },
     NumericFor {
-        var: String,
-        start: Expr,
-        end: Expr,
-        step: Option<Expr>,
-        body: Vec<Stmt>,
+        data: Box<NumericForData>,
         id: NodeId,
     },
     While {
@@ -98,6 +91,63 @@ pub enum Stmt {
         expr: Expr,
         id: NodeId,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IfData {
+    pub condition: Expr,
+    pub then_branch: Vec<Stmt>,
+    pub else_if_branches: Vec<(Expr, Vec<Stmt>)>,
+    pub else_branch: Option<Vec<Stmt>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NumericForData {
+    pub var: String,
+    pub start: Expr,
+    pub end: Expr,
+    pub step: Option<Expr>,
+    pub body: Vec<Stmt>,
+}
+
+impl Stmt {
+    pub fn if_stmt(
+        condition: Expr,
+        then_branch: Vec<Stmt>,
+        else_if_branches: Vec<(Expr, Vec<Stmt>)>,
+        else_branch: Option<Vec<Stmt>>,
+        id: NodeId,
+    ) -> Self {
+        Stmt::If {
+            data: Box::new(IfData {
+                condition,
+                then_branch,
+                else_if_branches,
+                else_branch,
+            }),
+            id,
+        }
+    }
+
+    pub fn numeric_for(
+        var: String,
+        start: Expr,
+        end: Expr,
+        step: Option<Expr>,
+        body: Vec<Stmt>,
+        id: NodeId,
+    ) -> Self {
+        Stmt::NumericFor {
+            data: Box::new(NumericForData {
+                var,
+                start,
+                end,
+                step,
+                body,
+            }),
+            id,
+        }
+    }
 }
 
 impl PartialEq for Stmt {
@@ -193,22 +243,7 @@ impl PartialEq for Stmt {
                     ..
                 },
             ) => na == nb && ca == cb && pa == pb && ra == rb && ba == bb,
-            (
-                Stmt::If {
-                    condition: ca,
-                    then_branch: ta,
-                    else_if_branches: ea,
-                    else_branch: ela,
-                    ..
-                },
-                Stmt::If {
-                    condition: cb,
-                    then_branch: tb,
-                    else_if_branches: eb,
-                    else_branch: elb,
-                    ..
-                },
-            ) => ca == cb && ta == tb && ea == eb && ela == elb,
+            (Stmt::If { data: da, .. }, Stmt::If { data: db, .. }) => da == db,
             (
                 Stmt::For {
                     vars: va,
@@ -223,24 +258,7 @@ impl PartialEq for Stmt {
                     ..
                 },
             ) => va == vb && sa == sb && ba == bb,
-            (
-                Stmt::NumericFor {
-                    var: va,
-                    start: sa,
-                    end: ea,
-                    step: sta,
-                    body: ba,
-                    ..
-                },
-                Stmt::NumericFor {
-                    var: vb,
-                    start: sb,
-                    end: eb,
-                    step: stb,
-                    body: bb,
-                    ..
-                },
-            ) => va == vb && sa == sb && ea == eb && sta == stb && ba == bb,
+            (Stmt::NumericFor { data: da, .. }, Stmt::NumericFor { data: db, .. }) => da == db,
             (
                 Stmt::While {
                     condition: ca,

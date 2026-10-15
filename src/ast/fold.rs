@@ -90,19 +90,13 @@ pub fn walk_fold_stmt<F: AstFolder + ?Sized>(folder: &mut F, stmt: Stmt) -> Stmt
             body: body.into_iter().map(|s| folder.fold_stmt(s)).collect(),
             id,
         },
-        Stmt::If {
-            condition,
-            then_branch,
-            else_if_branches,
-            else_branch,
-            id,
-        } => Stmt::If {
-            condition: folder.fold_expr(condition),
-            then_branch: then_branch
+        Stmt::If { data, id } => Stmt::if_stmt(
+            folder.fold_expr(data.condition),
+            data.then_branch
                 .into_iter()
                 .map(|s| folder.fold_stmt(s))
                 .collect(),
-            else_if_branches: else_if_branches
+            data.else_if_branches
                 .into_iter()
                 .map(|(cond, branch)| {
                     (
@@ -111,10 +105,10 @@ pub fn walk_fold_stmt<F: AstFolder + ?Sized>(folder: &mut F, stmt: Stmt) -> Stmt
                     )
                 })
                 .collect(),
-            else_branch: else_branch
+            data.else_branch
                 .map(|eb| eb.into_iter().map(|s| folder.fold_stmt(s)).collect()),
             id,
-        },
+        ),
         Stmt::For {
             vars,
             source,
@@ -126,21 +120,14 @@ pub fn walk_fold_stmt<F: AstFolder + ?Sized>(folder: &mut F, stmt: Stmt) -> Stmt
             body: body.into_iter().map(|s| folder.fold_stmt(s)).collect(),
             id,
         },
-        Stmt::NumericFor {
-            var,
-            start,
-            end,
-            step,
-            body,
+        Stmt::NumericFor { data, id } => Stmt::numeric_for(
+            data.var,
+            folder.fold_expr(data.start),
+            folder.fold_expr(data.end),
+            data.step.map(|s| folder.fold_expr(s)),
+            data.body.into_iter().map(|s| folder.fold_stmt(s)).collect(),
             id,
-        } => Stmt::NumericFor {
-            var,
-            start: folder.fold_expr(start),
-            end: folder.fold_expr(end),
-            step: step.map(|s| folder.fold_expr(s)),
-            body: body.into_iter().map(|s| folder.fold_stmt(s)).collect(),
-            id,
-        },
+        ),
         Stmt::While {
             condition,
             body,

@@ -979,17 +979,11 @@ impl IrBuilder {
                     }
                 }
             }
-            Stmt::If {
-                condition,
-                then_branch,
-                else_if_branches,
-                else_branch,
-                ..
-            } => {
-                if else_if_branches.is_empty()
-                    && else_branch.is_none()
+            Stmt::If { data, .. } => {
+                if data.else_if_branches.is_empty()
+                    && data.else_branch.is_none()
                     && matches!(
-                        condition,
+                        data.condition,
                         Expr::Literal {
                             value: Literal::Bool(true),
                             ..
@@ -997,14 +991,14 @@ impl IrBuilder {
                     )
                 {
                     self.enter_scope();
-                    for s in then_branch {
+                    for s in &data.then_branch {
                         self.compile_stmt(s);
                     }
                     self.exit_scope();
                     return;
                 }
 
-                let cond_var = self.compile_expr(condition, None);
+                let cond_var = self.compile_expr(&data.condition, None);
                 let else_label = self.alloc_label();
                 let end_label = self.alloc_label();
 
@@ -1014,14 +1008,14 @@ impl IrBuilder {
                 });
 
                 self.enter_scope();
-                for s in then_branch {
+                for s in &data.then_branch {
                     self.compile_stmt(s);
                 }
                 self.exit_scope();
                 self.emit(IrInst::Jump(end_label));
 
                 self.emit(IrInst::Label(else_label));
-                for (elif_cond, elif_body) in else_if_branches {
+                for (elif_cond, elif_body) in &data.else_if_branches {
                     let next_elif_label = self.alloc_label();
                     let elif_var = self.compile_expr(elif_cond, None);
                     self.emit(IrInst::JumpIfFalse {
@@ -1037,7 +1031,7 @@ impl IrBuilder {
                     self.emit(IrInst::Label(next_elif_label));
                 }
 
-                if let Some(else_stmts) = else_branch {
+                if let Some(else_stmts) = &data.else_branch {
                     self.enter_scope();
                     for s in else_stmts {
                         self.compile_stmt(s);
@@ -1106,21 +1100,14 @@ impl IrBuilder {
 
                 self.loops.pop();
             }
-            Stmt::NumericFor {
-                var,
-                start,
-                end,
-                step,
-                body,
-                ..
-            } => {
+            Stmt::NumericFor { data, .. } => {
                 self.enter_scope();
                 let base = self.alloc_var();
-                self.compile_expr(start, Some(base));
+                self.compile_expr(&data.start, Some(base));
                 let limit = self.alloc_var();
-                self.compile_expr(end, Some(limit));
+                self.compile_expr(&data.end, Some(limit));
                 let step_var = self.alloc_var();
-                if let Some(s) = step {
+                if let Some(s) = &data.step {
                     self.compile_expr(s, Some(step_var));
                 } else {
                     self.emit(IrInst::LoadConst {
@@ -1130,7 +1117,7 @@ impl IrBuilder {
                 };
 
                 let loop_var = self.alloc_var();
-                self.add_local(var.clone(), loop_var);
+                self.add_local(data.var.clone(), loop_var);
 
                 let body_label = self.alloc_label();
                 let test_label = self.alloc_label();
@@ -1151,7 +1138,7 @@ impl IrBuilder {
 
                 self.emit(IrInst::Label(body_label));
                 self.enter_scope();
-                for s in body {
+                for s in &data.body {
                     self.compile_stmt(s);
                 }
                 self.exit_scope();

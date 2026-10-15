@@ -101,26 +101,20 @@ pub fn pretty_print_stmt(stmt: &Stmt, indent: usize) -> String {
             out.push_str(&format!("{}end", pad));
             out
         }
-        Stmt::If {
-            condition,
-            then_branch,
-            else_if_branches,
-            else_branch,
-            ..
-        } => {
-            let mut out = format!("{}if {} then\n", pad, pretty_print_expr(condition));
-            for s in then_branch {
+        Stmt::If { data, .. } => {
+            let mut out = format!("{}if {} then\n", pad, pretty_print_expr(&data.condition));
+            for s in &data.then_branch {
                 out.push_str(&pretty_print_stmt(s, indent + 1));
                 out.push('\n');
             }
-            for (cond, branch) in else_if_branches {
+            for (cond, branch) in &data.else_if_branches {
                 out.push_str(&format!("{}elseif {} then\n", pad, pretty_print_expr(cond)));
                 for s in branch {
                     out.push_str(&pretty_print_stmt(s, indent + 1));
                     out.push('\n');
                 }
             }
-            if let Some(eb) = else_branch {
+            if let Some(eb) = &data.else_branch {
                 out.push_str(&format!("{}else\n", pad));
                 for s in eb {
                     out.push_str(&pretty_print_stmt(s, indent + 1));
@@ -168,27 +162,21 @@ pub fn pretty_print_stmt(stmt: &Stmt, indent: usize) -> String {
             out.push_str(&format!("{}end", pad));
             out
         }
-        Stmt::NumericFor {
-            var,
-            start,
-            end,
-            step,
-            body,
-            ..
-        } => {
-            let st = step
+        Stmt::NumericFor { data, .. } => {
+            let st = data
+                .step
                 .as_ref()
                 .map(|e| format!(", {}", pretty_print_expr(e)))
                 .unwrap_or_default();
             let mut out = format!(
                 "{}for {} = {}, {}{} do\n",
                 pad,
-                var,
-                pretty_print_expr(start),
-                pretty_print_expr(end),
+                data.var,
+                pretty_print_expr(&data.start),
+                pretty_print_expr(&data.end),
                 st
             );
-            for s in body {
+            for s in &data.body {
                 out.push_str(&pretty_print_stmt(s, indent + 1));
                 out.push('\n');
             }

@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use crate::ast::expr::Expr;
+use crate::ast::expr::{Expr, Param};
 use crate::ast::literal::Literal;
 use crate::ast::op::{BinOp, UnOp};
 use crate::ast::pattern::AssignTarget;
@@ -161,46 +161,14 @@ impl<'a> SemanticAnalyzer<'a> {
                 ..
             } = stmt
             {
-                self.enter_stmt(stmt);
-                let span = self.find_ident_span(fn_name);
-                let param_types: Vec<NeyukiType> = params
-                    .iter()
-                    .map(|p| {
-                        p.type_name
-                            .as_deref()
-                            .map(NeyukiType::parse)
-                            .unwrap_or(NeyukiType::Any)
-                    })
-                    .collect();
-                let is_vararg = params.iter().any(|p| p.variadic);
-                let ret_ty = return_type.as_deref().map(NeyukiType::parse);
-                let fn_type = NeyukiType::Function {
-                    params: param_types,
-                    return_type: Box::new(ret_ty.unwrap_or(NeyukiType::Any)),
-                    is_vararg,
-                };
-                let mut sym = Symbol::new(
-                    fn_name.clone(),
-                    SymbolKind::Function,
-                    *is_const,
-                    Some(fn_type),
-                    span,
-                );
-                sym.num_params = Some(params.iter().filter(|p| !p.variadic).count());
-                sym.is_vararg = is_vararg;
-                let _ = self.scope_mgr.define(sym);
+                self.hoist_function(stmt, fn_name, *is_const, params, return_type.as_deref());
             }
         }
 
         let mut unreachable = false;
         for stmt in statements {
             if unreachable {
-                self.enter_stmt(stmt);
-                let span = self.find_stmt_span(stmt);
-                let diag = Diagnostic::warning("unreachable code")
-                    .with_code(ErrorCode::W0004)
-                    .with_label(span, "unreachable statement follows terminal control flow");
-                self.diagnostics.push(diag);
+                self.warn_unreachable(stmt);
                 continue;
             }
 
@@ -215,6 +183,55 @@ impl<'a> SemanticAnalyzer<'a> {
         }
     }
 
+    #[inline(never)]
+    fn hoist_function(
+        &mut self,
+        stmt: &Stmt,
+        fn_name: &str,
+        is_const: bool,
+        params: &[Param],
+        return_type: Option<&str>,
+    ) {
+        self.enter_stmt(stmt);
+        let span = self.find_ident_span(fn_name);
+        let param_types: Vec<NeyukiType> = params
+            .iter()
+            .map(|p| {
+                p.type_name
+                    .as_deref()
+                    .map(NeyukiType::parse)
+                    .unwrap_or(NeyukiType::Any)
+            })
+            .collect();
+        let is_vararg = params.iter().any(|p| p.variadic);
+        let ret_ty = return_type.map(NeyukiType::parse);
+        let fn_type = NeyukiType::Function {
+            params: param_types,
+            return_type: Box::new(ret_ty.unwrap_or(NeyukiType::Any)),
+            is_vararg,
+        };
+        let mut sym = Symbol::new(
+            fn_name.to_string(),
+            SymbolKind::Function,
+            is_const,
+            Some(fn_type),
+            span,
+        );
+        sym.num_params = Some(params.iter().filter(|p| !p.variadic).count());
+        sym.is_vararg = is_vararg;
+        let _ = self.scope_mgr.define(sym);
+    }
+
+    #[inline(never)]
+    fn warn_unreachable(&mut self, stmt: &Stmt) {
+        self.enter_stmt(stmt);
+        let span = self.find_stmt_span(stmt);
+        let diag = Diagnostic::warning("unreachable code")
+            .with_code(ErrorCode::W0004)
+            .with_label(span, "unreachable statement follows terminal control flow");
+        self.diagnostics.push(diag);
+    }
+
     fn analyze_stmt(&mut self, stmt: &Stmt) {
         self.enter_stmt(stmt);
         match stmt {
@@ -226,63 +243,13 @@ impl<'a> SemanticAnalyzer<'a> {
                 initializer,
                 ..
             } => {
-                let span = self.find_ident_span(name);
-                if !*is_global {
-                    self.check_shadowing(name, span);
-                }
-
-                let declared_type = type_name.as_deref().map(NeyukiType::parse);
-
-                let mut sym = Symbol::new(
-                    name.clone(),
-                    SymbolKind::Variable,
+                self.analyze_local(
+                    name,
                     *is_const,
-                    declared_type.clone(),
-                    span,
+                    *is_global,
+                    type_name.as_deref(),
+                    initializer.as_ref(),
                 );
-                if let Some(init) = initializer {
-                    sym.inferred_type = self.infer_expr_type(init);
-                }
-                if *is_global {
-                    if let Err(orig_span) = self.scope_mgr.define_global(sym) {
-                        let diag =
-                            Diagnostic::error(format!("duplicate global variable '{}'", name))
-                                .with_code(ErrorCode::E0005)
-                                .with_label(span, "redefined here")
-                                .with_secondary_label(orig_span, "previous definition was here");
-                        self.diagnostics.push(diag);
-                    }
-                    self.known_globals.insert(name.clone());
-                } else if let Err(orig_span) = self.scope_mgr.define(sym) {
-                    let diag = Diagnostic::error(format!(
-                        "duplicate local variable '{}' in the same scope",
-                        name
-                    ))
-                    .with_code(ErrorCode::E0005)
-                    .with_label(span, "redefined here")
-                    .with_secondary_label(orig_span, "previous definition was here");
-                    self.diagnostics.push(diag);
-                }
-
-                if let Some(init) = initializer {
-                    self.analyze_expr(init);
-                    let init_type = self.infer_expr_type(init);
-                    if let Some(decl_type) = &declared_type
-                        && init_type != NeyukiType::Any
-                        && !init_type.is_assignable_to(decl_type)
-                    {
-                        let diag = Diagnostic::error(format!(
-                                "type mismatch: variable '{}' declared as '{}' but initialized with '{}'",
-                                name,
-                                decl_type.display_name(),
-                                init_type.display_name()
-                            ))
-                            .with_code(ErrorCode::E0003)
-                            .with_label(span, format!("expected '{}', found '{}'", decl_type.display_name(), init_type.display_name()))
-                            .with_help(format!("ensure the assigned value matches '{}'", decl_type.display_name()));
-                        self.diagnostics.push(diag);
-                    }
-                }
             }
             Stmt::LocalMany {
                 names,
@@ -291,44 +258,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 initializers,
                 ..
             } => {
-                for (i, name) in names.iter().enumerate() {
-                    let span = self.find_ident_span(name);
-                    if !*is_global {
-                        self.check_shadowing(name, span);
-                    }
-
-                    let mut sym =
-                        Symbol::new(name.clone(), SymbolKind::Variable, *is_const, None, span);
-                    if let Some(init) = initializers.get(i) {
-                        sym.inferred_type = self.infer_expr_type(init);
-                    }
-                    if *is_global {
-                        if let Err(orig_span) = self.scope_mgr.define_global(sym) {
-                            let diag =
-                                Diagnostic::error(format!("duplicate global variable '{}'", name))
-                                    .with_code(ErrorCode::E0005)
-                                    .with_label(span, "redefined here")
-                                    .with_secondary_label(
-                                        orig_span,
-                                        "previous definition was here",
-                                    );
-                            self.diagnostics.push(diag);
-                        }
-                        self.known_globals.insert(name.clone());
-                    } else if let Err(orig_span) = self.scope_mgr.define(sym) {
-                        let diag = Diagnostic::error(format!(
-                            "duplicate local variable '{}' in the same scope",
-                            name
-                        ))
-                        .with_code(ErrorCode::E0005)
-                        .with_label(span, "redefined here")
-                        .with_secondary_label(orig_span, "previous definition was here");
-                        self.diagnostics.push(diag);
-                    }
-                }
-                for init in initializers {
-                    self.analyze_expr(init);
-                }
+                self.analyze_local_many(names, *is_const, *is_global, initializers);
             }
             Stmt::Assign { target, value, .. } => {
                 self.analyze_expr(value);
@@ -337,48 +267,11 @@ impl<'a> SemanticAnalyzer<'a> {
             Stmt::AssignMany {
                 targets, values, ..
             } => {
-                for v in values {
-                    self.analyze_expr(v);
-                }
-                for (i, t) in targets.iter().enumerate() {
-                    if let Some(v) = values.get(i) {
-                        self.check_assign_target(t, v);
-                    } else {
-                        self.check_assign_target(t, &Expr::nil());
-                    }
-                }
+                self.analyze_assign_many(targets, values);
             }
-            Stmt::Increment { target, .. } => match target {
-                AssignTarget::Variable(name) => {
-                    let span = self.find_ident_span(name);
-                    if let Some(sym) = self.scope_mgr.lookup_mut(name) {
-                        sym.used = true;
-                        if sym.is_const {
-                            let diag = Diagnostic::error(format!(
-                                "cannot increment const variable '{}'",
-                                name
-                            ))
-                            .with_code(ErrorCode::E0002)
-                            .with_label(span, "cannot mutate a const variable")
-                            .with_secondary_label(sym.span, "defined as const here");
-                            self.diagnostics.push(diag);
-                        }
-                    } else if !self.is_known_global(name) {
-                        let diag =
-                            Diagnostic::error(format!("variable '{}' is not declared", name))
-                                .with_code(ErrorCode::E0001)
-                                .with_label(span, "cannot increment undeclared variable");
-                        self.diagnostics.push(diag);
-                    }
-                }
-                AssignTarget::Member { object, .. } => {
-                    self.analyze_expr(object);
-                }
-                AssignTarget::Index { object, index } => {
-                    self.analyze_expr(object);
-                    self.analyze_expr(index);
-                }
-            },
+            Stmt::Increment { target, .. } => {
+                self.analyze_increment(target);
+            }
             Stmt::Function {
                 name,
                 is_const,
@@ -444,26 +337,20 @@ impl<'a> SemanticAnalyzer<'a> {
                 self.check_unused_symbols();
                 self.current_return_type = prev_ret;
             }
-            Stmt::If {
-                condition,
-                then_branch,
-                else_if_branches,
-                else_branch,
-                ..
-            } => {
-                self.analyze_expr(condition);
+            Stmt::If { data, .. } => {
+                self.analyze_expr(&data.condition);
                 self.scope_mgr.enter_scope(ScopeKind::Block);
-                self.analyze_block(then_branch);
+                self.analyze_block(&data.then_branch);
                 self.check_unused_symbols();
 
-                for (cond, branch) in else_if_branches {
+                for (cond, branch) in &data.else_if_branches {
                     self.analyze_expr(cond);
                     self.scope_mgr.enter_scope(ScopeKind::Block);
                     self.analyze_block(branch);
                     self.check_unused_symbols();
                 }
 
-                if let Some(branch) = else_branch {
+                if let Some(branch) = &data.else_branch {
                     self.scope_mgr.enter_scope(ScopeKind::Block);
                     self.analyze_block(branch);
                     self.check_unused_symbols();
@@ -485,23 +372,16 @@ impl<'a> SemanticAnalyzer<'a> {
                 self.analyze_expr(condition);
                 self.check_unused_symbols();
             }
-            Stmt::NumericFor {
-                var,
-                start,
-                end,
-                step,
-                body,
-                ..
-            } => {
-                self.analyze_expr(start);
-                self.analyze_expr(end);
-                if let Some(s) = step {
+            Stmt::NumericFor { data, .. } => {
+                self.analyze_expr(&data.start);
+                self.analyze_expr(&data.end);
+                if let Some(s) = &data.step {
                     self.analyze_expr(s);
                 }
                 self.scope_mgr.enter_scope(ScopeKind::Loop);
-                let span = self.find_ident_span(var);
+                let span = self.find_ident_span(&data.var);
                 let mut sym = Symbol::new(
-                    var.clone(),
+                    data.var.clone(),
                     SymbolKind::Variable,
                     false,
                     Some(NeyukiType::Number),
@@ -509,7 +389,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 );
                 sym.used = true; // loop variable is automatically considered used
                 let _ = self.scope_mgr.define(sym);
-                self.analyze_block(body);
+                self.analyze_block(&data.body);
                 self.check_unused_symbols();
             }
             Stmt::For {
@@ -527,70 +407,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 self.check_unused_symbols();
             }
             Stmt::Return { values: exprs, .. } => {
-                for e in exprs {
-                    self.analyze_expr(e);
-                }
-                if let Some(expected_ret) = &self.current_return_type {
-                    if exprs.is_empty() {
-                        if *expected_ret != NeyukiType::Nil && *expected_ret != NeyukiType::Any {
-                            let span = Span::line(self.current_line);
-                            let diag = Diagnostic::error(format!(
-                                "empty return in function declared to return '{}'",
-                                expected_ret.display_name()
-                            ))
-                            .with_code(ErrorCode::E0003)
-                            .with_label(
-                                span,
-                                format!(
-                                    "expected return of type '{}'",
-                                    expected_ret.display_name()
-                                ),
-                            );
-                            self.diagnostics.push(diag);
-                        }
-                    } else {
-                        // `(A, B)` return types are records with `_0`, `_1`, ...
-                        // fields; each returned value is checked against its
-                        // position, and values left out are nil.
-                        let expected: Vec<NeyukiType> = match expected_ret {
-                            NeyukiType::Record(fields)
-                                if fields.first().is_some_and(|(name, _)| name == "_0") =>
-                            {
-                                fields.iter().map(|(_, ty)| ty.clone()).collect()
-                            }
-                            other => vec![other.clone()],
-                        };
-                        let spreads = matches!(
-                            exprs.last(),
-                            Some(Expr::Call { .. } | Expr::MethodCall { .. } | Expr::Vararg { .. })
-                        );
-                        for (index, want) in expected.iter().enumerate() {
-                            if spreads && index + 1 >= exprs.len() {
-                                break;
-                            }
-                            let (actual_ret, span) = match exprs.get(index) {
-                                Some(expr) => {
-                                    (self.infer_expr_type(expr), self.find_expr_span(expr))
-                                }
-                                None => (
-                                    NeyukiType::Nil,
-                                    self.find_expr_span(&exprs[exprs.len() - 1]),
-                                ),
-                            };
-                            if actual_ret != NeyukiType::Any && !actual_ret.is_assignable_to(want) {
-                                let diag = Diagnostic::error(format!(
-                                    "type mismatch: function declared with return type '{}' returns '{}'",
-                                    want.display_name(),
-                                    actual_ret.display_name()
-                                ))
-                                .with_code(ErrorCode::E0003)
-                                .with_label(span, format!("expected '{}', found '{}'", want.display_name(), actual_ret.display_name()));
-                                self.diagnostics.push(diag);
-                                break;
-                            }
-                        }
-                    }
-                }
+                self.analyze_return(exprs);
             }
             Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Goto { .. } | Stmt::Label { .. } => {
             }
@@ -940,6 +757,241 @@ impl<'a> SemanticAnalyzer<'a> {
         match self.spans.and_then(|pool| pool.get(expr.node_id())) {
             Some(span) if span.start.line > 0 => self.diagnostic_span(span),
             _ => Span::line(self.current_line),
+        }
+    }
+
+    #[inline(never)]
+    fn analyze_local(
+        &mut self,
+        name: &str,
+        is_const: bool,
+        is_global: bool,
+        type_name: Option<&str>,
+        initializer: Option<&Expr>,
+    ) {
+        let span = self.find_ident_span(name);
+        if !is_global {
+            self.check_shadowing(name, span);
+        }
+
+        let declared_type = type_name.map(NeyukiType::parse);
+
+        let mut sym = Symbol::new(
+            name.to_string(),
+            SymbolKind::Variable,
+            is_const,
+            declared_type.clone(),
+            span,
+        );
+        if let Some(init) = initializer {
+            sym.inferred_type = self.infer_expr_type(init);
+        }
+        if is_global {
+            if let Err(orig_span) = self.scope_mgr.define_global(sym) {
+                let diag = Diagnostic::error(format!("duplicate global variable '{}'", name))
+                    .with_code(ErrorCode::E0005)
+                    .with_label(span, "redefined here")
+                    .with_secondary_label(orig_span, "previous definition was here");
+                self.diagnostics.push(diag);
+            }
+            self.known_globals.insert(name.to_string());
+        } else if let Err(orig_span) = self.scope_mgr.define(sym) {
+            let diag = Diagnostic::error(format!(
+                "duplicate local variable '{}' in the same scope",
+                name
+            ))
+            .with_code(ErrorCode::E0005)
+            .with_label(span, "redefined here")
+            .with_secondary_label(orig_span, "previous definition was here");
+            self.diagnostics.push(diag);
+        }
+
+        if let Some(init) = initializer {
+            self.analyze_expr(init);
+            let init_type = self.infer_expr_type(init);
+            if let Some(decl_type) = &declared_type
+                && init_type != NeyukiType::Any
+                && !init_type.is_assignable_to(decl_type)
+            {
+                let diag = Diagnostic::error(format!(
+                    "type mismatch: variable '{}' declared as '{}' but initialized with '{}'",
+                    name,
+                    decl_type.display_name(),
+                    init_type.display_name()
+                ))
+                .with_code(ErrorCode::E0003)
+                .with_label(
+                    span,
+                    format!(
+                        "expected '{}', found '{}'",
+                        decl_type.display_name(),
+                        init_type.display_name()
+                    ),
+                )
+                .with_help(format!(
+                    "ensure the assigned value matches '{}'",
+                    decl_type.display_name()
+                ));
+                self.diagnostics.push(diag);
+            }
+        }
+    }
+
+    #[inline(never)]
+    fn analyze_local_many(
+        &mut self,
+        names: &[String],
+        is_const: bool,
+        is_global: bool,
+        initializers: &[Expr],
+    ) {
+        for (i, name) in names.iter().enumerate() {
+            let span = self.find_ident_span(name);
+            if !is_global {
+                self.check_shadowing(name, span);
+            }
+
+            let mut sym = Symbol::new(name.clone(), SymbolKind::Variable, is_const, None, span);
+            if let Some(init) = initializers.get(i) {
+                sym.inferred_type = self.infer_expr_type(init);
+            }
+            if is_global {
+                if let Err(orig_span) = self.scope_mgr.define_global(sym) {
+                    let diag = Diagnostic::error(format!("duplicate global variable '{}'", name))
+                        .with_code(ErrorCode::E0005)
+                        .with_label(span, "redefined here")
+                        .with_secondary_label(orig_span, "previous definition was here");
+                    self.diagnostics.push(diag);
+                }
+                self.known_globals.insert(name.clone());
+            } else if let Err(orig_span) = self.scope_mgr.define(sym) {
+                let diag = Diagnostic::error(format!(
+                    "duplicate local variable '{}' in the same scope",
+                    name
+                ))
+                .with_code(ErrorCode::E0005)
+                .with_label(span, "redefined here")
+                .with_secondary_label(orig_span, "previous definition was here");
+                self.diagnostics.push(diag);
+            }
+        }
+        for init in initializers {
+            self.analyze_expr(init);
+        }
+    }
+
+    #[inline(never)]
+    fn analyze_assign_many(&mut self, targets: &[AssignTarget], values: &[Expr]) {
+        for v in values {
+            self.analyze_expr(v);
+        }
+        for (i, t) in targets.iter().enumerate() {
+            if let Some(v) = values.get(i) {
+                self.check_assign_target(t, v);
+            } else {
+                self.check_assign_target(t, &Expr::nil());
+            }
+        }
+    }
+
+    #[inline(never)]
+    fn analyze_increment(&mut self, target: &AssignTarget) {
+        match target {
+            AssignTarget::Variable(name) => {
+                let span = self.find_ident_span(name);
+                if let Some(sym) = self.scope_mgr.lookup_mut(name) {
+                    sym.used = true;
+                    if sym.is_const {
+                        let diag = Diagnostic::error(format!(
+                            "cannot increment const variable '{}'",
+                            name
+                        ))
+                        .with_code(ErrorCode::E0002)
+                        .with_label(span, "cannot mutate a const variable")
+                        .with_secondary_label(sym.span, "defined as const here");
+                        self.diagnostics.push(diag);
+                    }
+                } else if !self.is_known_global(name) {
+                    let diag = Diagnostic::error(format!("variable '{}' is not declared", name))
+                        .with_code(ErrorCode::E0001)
+                        .with_label(span, "cannot increment undeclared variable");
+                    self.diagnostics.push(diag);
+                }
+            }
+            AssignTarget::Member { object, .. } => {
+                self.analyze_expr(object);
+            }
+            AssignTarget::Index { object, index } => {
+                self.analyze_expr(object);
+                self.analyze_expr(index);
+            }
+        }
+    }
+
+    #[inline(never)]
+    fn analyze_return(&mut self, exprs: &[Expr]) {
+        for e in exprs {
+            self.analyze_expr(e);
+        }
+        if let Some(expected_ret) = &self.current_return_type {
+            if exprs.is_empty() {
+                if *expected_ret != NeyukiType::Nil && *expected_ret != NeyukiType::Any {
+                    let span = Span::line(self.current_line);
+                    let diag = Diagnostic::error(format!(
+                        "empty return in function declared to return '{}'",
+                        expected_ret.display_name()
+                    ))
+                    .with_code(ErrorCode::E0003)
+                    .with_label(
+                        span,
+                        format!("expected return of type '{}'", expected_ret.display_name()),
+                    );
+                    self.diagnostics.push(diag);
+                }
+            } else {
+                let expected: Vec<NeyukiType> = match expected_ret {
+                    NeyukiType::Record(fields)
+                        if fields.first().is_some_and(|(name, _)| name == "_0") =>
+                    {
+                        fields.iter().map(|(_, ty)| ty.clone()).collect()
+                    }
+                    other => vec![other.clone()],
+                };
+                let spreads = matches!(
+                    exprs.last(),
+                    Some(Expr::Call { .. } | Expr::MethodCall { .. } | Expr::Vararg { .. })
+                );
+                for (index, want) in expected.iter().enumerate() {
+                    if spreads && index + 1 >= exprs.len() {
+                        break;
+                    }
+                    let (actual_ret, span) = match exprs.get(index) {
+                        Some(expr) => (self.infer_expr_type(expr), self.find_expr_span(expr)),
+                        None => (
+                            NeyukiType::Nil,
+                            self.find_expr_span(&exprs[exprs.len() - 1]),
+                        ),
+                    };
+                    if actual_ret != NeyukiType::Any && !actual_ret.is_assignable_to(want) {
+                        let diag = Diagnostic::error(format!(
+                            "type mismatch: function declared with return type '{}' returns '{}'",
+                            want.display_name(),
+                            actual_ret.display_name()
+                        ))
+                        .with_code(ErrorCode::E0003)
+                        .with_label(
+                            span,
+                            format!(
+                                "expected '{}', found '{}'",
+                                want.display_name(),
+                                actual_ret.display_name()
+                            ),
+                        );
+                        self.diagnostics.push(diag);
+                        break;
+                    }
+                }
+            }
         }
     }
 }
