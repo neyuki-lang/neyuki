@@ -359,23 +359,24 @@ pub fn check_method_call(parser: &Parser) -> bool {
 }
 
 pub fn parse_interp_parts(value: &str) -> Result<Vec<InterpPart>, String> {
+    // The tokenizer encodes the parts as `L<len>:<text>` and `E<len>:<source>`.
+    let malformed = || "syntax error: malformed interpolated string".to_string();
     let mut parts = Vec::new();
     let mut rest = value;
-    while let Some(start) = rest.find('{') {
-        if start > 0 {
-            parts.push(InterpPart::Literal(rest[..start].to_string()));
+    while !rest.is_empty() {
+        let tag = rest.as_bytes()[0];
+        let colon = rest.find(':').ok_or_else(malformed)?;
+        let len: usize = rest[1..colon].parse().map_err(|_| malformed())?;
+        let text = rest.get(colon + 1..colon + 1 + len).ok_or_else(malformed)?;
+        rest = &rest[colon + 1 + len..];
+        if tag == b'L' {
+            parts.push(InterpPart::Literal(text.to_string()));
+            continue;
         }
-        let after_start = &rest[start + 1..];
-        let end = match after_start.find('}') {
-            Some(e) => e,
-            None => {
-                return Err(format!(
-                    "syntax error: unfinished string interpolation in {:?}",
-                    value
-                ));
-            }
-        };
-        let expression = &after_start[..end];
+        let expression = text;
+        if expression.trim().is_empty() {
+            return Err("syntax error: empty expression in interpolated string".to_string());
+        }
         let mut inner_parser = Parser::new(expression);
         let (statements, _pool) = inner_parser.parse_program()?;
         if statements.len() != 1 {
@@ -395,10 +396,6 @@ pub fn parse_interp_parts(value: &str) -> Result<Vec<InterpPart>, String> {
                 ));
             }
         }
-        rest = &after_start[end + 1..];
-    }
-    if !rest.is_empty() {
-        parts.push(InterpPart::Literal(rest.to_string()));
     }
     Ok(parts)
 }

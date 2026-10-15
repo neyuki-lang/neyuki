@@ -1,0 +1,19 @@
+-- Escapes and interpolation in string literals.
+
+assert("\65\066" == "AB", "decimal escapes")
+assert("\x41\u{42}" == "AB", "hex and unicode escapes")
+assert("a\z
+       b" == "ab", "\\z skips whitespace")
+assert("line\
+break" == "line\nbreak", "a backslash keeps a line break")
+
+local name = "Yuki"
+assert(`hi {name}\n` == "hi Yuki\n", "escapes work in backtick strings")
+assert(`\{name}` == "{name}", "an escaped brace is literal")
+assert(`a \` b` == "a ` b", "an escaped backtick is literal")
+assert(`{"}"}` == "}", "braces inside string literals do not end the expression")
+assert(`{#{ 1, 2, 3 }}` == "3", "table constructors nest")
+assert(`{name}{name}` == "YukiYuki", "adjacent expressions")
+assert(`` == "", "empty")
+
+print("[pass] string literals")
