@@ -1,2 +1,4 @@
+-- The smallest program.
+
 local msg = "hello"
 print(msg)

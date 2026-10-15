@@ -1,3 +1,5 @@
+-- Random numbers, extremes and integer math.
+
 local math = require("@neyuki/math")
 local table = require("@neyuki/table")
 

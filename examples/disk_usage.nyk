@@ -1,0 +1,35 @@
+-- The ten largest files under a directory, with sizes and dates.
+--
+--   neyuki disk_usage.nyk ~/Downloads
+
+local fs = require("@neyuki/fs")
+
+local root = os.args()[1] ?? "."
+
+local function human(bytes: number): string
+    local units = { "B", "KB", "MB", "GB", "TB" }
+    local size, unit = bytes, 1
+    while size >= 1024 and unit < #units do
+        size /= 1024
+        unit += 1
+    end
+    return string.format(unit == 1 and "%d %s" or "%.1f %s", size, units[unit])
+end
+
+local files = {}
+local total = 0
+for _, path in fs.walk(root) do
+    local info = fs.info(fs.join(root, path))
+    if info != nil then
+        files[#files + 1] = { path = path, size = info.size, modified = info.modified }
+        total += info.size
+    end
+end
+
+table.sort(files, function(a, b) return a.size > b.size end)
+
+print(`{#files} files, {human(total)} in {fs.absolute(root)}\n`)
+for index = 1, math.min(10, #files) do
+    local file = files[index]
+    print(string.format("%10s  %s  %s", human(file.size), os.date("%Y-%m-%d", file.modified), file.path))
+end

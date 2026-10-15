@@ -1,3 +1,5 @@
+-- Ask questions on the terminal and read the answers.
+
 local io = require("@neyuki/io")
 
 local name = io.prompt("What is your name? ")
