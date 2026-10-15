@@ -820,7 +820,11 @@ impl<'a> SemanticAnalyzer<'a> {
                 BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Pow => {
                     let l_ty = self.infer_expr_type(left);
                     let r_ty = self.infer_expr_type(right);
-                    if l_ty == NeyukiType::Int && r_ty == NeyukiType::Int {
+                    // An operand of unknown type (a call, a table field)
+                    // could be an integer or a float, or have metamethods.
+                    if l_ty == NeyukiType::Any || r_ty == NeyukiType::Any {
+                        NeyukiType::Any
+                    } else if l_ty == NeyukiType::Int && r_ty == NeyukiType::Int {
                         NeyukiType::Int
                     } else if l_ty == NeyukiType::Float || r_ty == NeyukiType::Float {
                         NeyukiType::Float

@@ -45,3 +45,10 @@ touch()
 assert(touched == 1, "one-line bodies after a return type")
 local function passAll(...: any): ...any return ... end
 assert(select("#", passAll(1, nil, 3)) == 3, "variadic return types accept any values")
+
+-- arithmetic on calls keeps their unknown type instead of becoming `number`
+local function fib(n: int): int
+    if n <= 1 then return n end
+    return fib(n - 1) + fib(n - 2)
+end
+assert(fib(10) == 55, "typed recursion")
