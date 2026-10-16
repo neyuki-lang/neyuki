@@ -1,3 +1,5 @@
+-- Recursion with type annotations.
+
 const function fibonacci(n: int): int
     if n <= 1 then
         return n

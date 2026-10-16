@@ -1,0 +1,45 @@
+-- A to-do list on the command line, kept in a JSON file next to where it runs.
+--
+--   neyuki todo.nyk add "water the plants"
+--   neyuki todo.nyk done 1
+--   neyuki todo.nyk
+
+local fs = require("@neyuki/fs")
+
+const FILE = "todo.json"
+
+local function load(): {any}
+    if not fs.exists(FILE) then return {} end
+    return json.decode(fs.read(FILE))
+end
+
+local function save(items: {any})
+    fs.write(FILE, json.encode(json.array(items), { indent = 2 }))
+end
+
+local items = load()
+local command, argument = os.args()[1], os.args()[2]
+
+if command == "add" and argument != nil then
+    items[#items + 1] = { text = argument, done = false, added = os.date("%Y-%m-%d") }
+    save(items)
+    print(`added #{#items}: {argument}`)
+elseif command == "done" and tonumber(argument) != nil then
+    local item = items[tonumber(argument)]
+    if item == nil then
+        print(`there is no item #{argument}`)
+        os.exit(1)
+    end
+    item.done = true
+    save(items)
+    print(`done: {item.text}`)
+elseif command == nil then
+    if #items == 0 then print("nothing to do") end
+    for index, item in items do
+        local mark = item.done and "x" or " "
+        print(`[{mark}] {index}. {item.text}  ({item.added})`)
+    end
+else
+    print("usage: neyuki todo.nyk [add <text> | done <number>]")
+    os.exit(1)
+end

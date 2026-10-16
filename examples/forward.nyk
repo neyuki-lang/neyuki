@@ -1,3 +1,5 @@
+-- Put a dev server behind another port, proxying everything but one route.
+
 local http = require("@neyuki/http")
 local os = require("@neyuki/os")
 

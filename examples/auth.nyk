@@ -1,14 +1,14 @@
-local crypto = require("@neyuki/crypto")
-local http = require("@neyuki/http")
-local json = require("@neyuki/json")
-local string = require("@neyuki/string")
-
 -- A small login service: passwords are stored as argon2id hashes and
 -- sessions are HMAC-signed tokens, so the server keeps no session state.
 --
 --   curl -X POST localhost:8080/register -d '{"user":"ada","password":"hunter2"}'
 --   curl -X POST localhost:8080/login    -d '{"user":"ada","password":"hunter2"}'
 --   curl localhost:8080/me -H "authorization: Bearer <token>"
+
+local crypto = require("@neyuki/crypto")
+local http = require("@neyuki/http")
+local json = require("@neyuki/json")
+local string = require("@neyuki/string")
 
 const SESSION_KEY = crypto.randomBytes(32)
 local users = {}

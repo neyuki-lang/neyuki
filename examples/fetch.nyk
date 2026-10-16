@@ -1,3 +1,5 @@
+-- Fetch a JSON document over HTTPS and print the response.
+
 local http = require("@neyuki/http")
 local io = require("@neyuki/io")
 

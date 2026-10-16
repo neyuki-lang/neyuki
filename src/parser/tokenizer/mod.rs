@@ -390,6 +390,6 @@ mod tests {
         let mut tokenizer = TokenizerEngine::new("`hello {user}!`");
         let tokens = tokenizer.tokenize().unwrap();
         assert_eq!(tokens[0].kind, "interp");
-        assert_eq!(tokens[0].value, "hello {user}!");
+        assert_eq!(tokens[0].value, "L6:hello E4:userL1:!");
     }
 }

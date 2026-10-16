@@ -1,0 +1,21 @@
+-- Who committed what this month, by running git and reading its output.
+
+local since = os.date("%Y-%m-01")
+local log = os.run({ "git", "log", "--since=" .. since, "--format=%an" })
+if not log.ok then
+    print("git failed: " .. log.stderr)
+    os.exit(1)
+end
+
+local counts = {}
+for _, author in log.stdout:trim():split("\n") do
+    if author != "" then counts[author] = (counts[author] ?? 0) + 1 end
+end
+
+local authors = table.keys(counts)
+table.sort(authors, function(a, b) return counts[a] > counts[b] end)
+
+print(`commits since {since}:`)
+for _, author in authors do
+    print(string.format("  %4d  %s", counts[author], author))
+end

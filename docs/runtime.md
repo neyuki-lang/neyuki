@@ -1,219 +1,65 @@
-# Runtime and tools
+# Tools and runtime
 
-## Commands
-
-Run these commands from the `neyuki/` directory:
+## The `neyuki` command
 
 ```text
-cargo run -- lint examples/hello.nyk
-cargo run -- compile examples/hello.nyk
-cargo run -- run examples/hello.nyk
-cargo run -- disasm examples/hello.nyk
-cargo run -- test
+neyuki script.nyk [args...]       run a script (short for `neyuki run`)
+neyuki run <file> [args...]       run a .nyk script or .nykb bytecode file
+neyuki lint [--json] [--stdin] <file>
+neyuki compile <file> [out]       compile to bytecode (default: <file>b)
+neyuki repl                       interactive session
+neyuki test                       run every .nyk file in tests/
+neyuki pkg <command>              manage the project manifest and packages
+neyuki dap                        Debug Adapter Protocol server on stdio
+neyuki disasm <file>              print the bytecode the compiler emits
+neyuki dump-ir <file>             print the IR before and after optimization
+neyuki help | --version
 ```
 
-`lint` reports syntax errors, undefined names, `const` writes, type mismatches and unused or unreachable code with their positions; `lint --json` prints them as a JSON array for editors and `lint --stdin <path>` checks source read from standard input. `compile` compiles a file to `.nykb` bytecode. `run` compiles the file (or loads a `.nykb`) and executes it on the register VM; `neyuki script.nyk` is short for `neyuki run script.nyk`, and arguments after the path reach the script through `os.args()`. `neyuki help` lists every command and `neyuki --version` prints the version. `disasm` prints the bytecode the compiler emits, and `dump-ir` the intermediate representation before and after optimization. `test` runs every `.nyk` file in `tests/`.
+Arguments after the script path reach the script through `os.args()`. A script that fails prints the error with a stack trace and exits with status 1; `os.exit(code)` chooses the status explicitly.
 
-## Builtins
+### Checking without running
 
-The base runtime provides `print`, `tostring`, `type`, `typeof`, `assert`, `int`, `float`, `try`, and `require`. `type` groups integers and floats as `number`; `typeof` reports `bigint` for arbitrary-precision integers and `float` for floating-point values.
+`neyuki lint` reports what the checker finds, the same checks `run` performs before executing: syntax errors, undefined names, assignments to `const` variables, values that do not match their type annotations, unused variables and parameters, shadowed names and unreachable code. Errors stop a script from running; warnings do not.
 
-`try(function, ...)` returns a leading boolean followed by the function result or an error message. The bundled `@neyuki/crypto`, `@neyuki/fs`, `@neyuki/hid`, `@neyuki/http`, `@neyuki/io`, `@neyuki/math`, `@neyuki/sql`, `@neyuki/string`, `@neyuki/table` and `@neyuki/ui` modules can be loaded with `require`.
-
-```lua
-local math = require("@neyuki/math")
-print(math.max(2, 7, 4))
+```text
+warning[W0001]: unused variable 'total'
+ --> report.nyk:4:7
+  |
+4 | local total = 0
+  |       ^^^^^ variable declared here but never used
+  |
+  = help: if this is intentional, prefix with an underscore: '_total'
 ```
 
-`@neyuki/string` follows Lua's string library: `byte`, `char`, `count` (codepoints; `#s` counts bytes), `find`, `format`, `gmatch`, `gsub`, `len`, `lower`, `match`, `pack`, `packsize`, `rep`, `reverse`, `split`, `sub`, `unpack` and `upper`. Indices are byte positions and patterns use Lua pattern syntax. `pack` returns one character per byte (codes 0-255) so binary data fits in a string; `unpack` expects the same encoding.
+`--json` prints the diagnostics as a JSON array of `{ severity, code, message, line, column, endLine, endColumn, help? }` (1-based, end exclusive) for editors and CI, and `--stdin` reads the source from standard input, so an editor can check a buffer that has not been saved.
 
-```lua
-local string = require("@neyuki/string")
-for key, value in string.gmatch("a=1, b=2", "(%w+)=(%w+)") do
-    print(string.format("%s -> %d", key, value))
-end
-```
+### Bytecode
 
-`@neyuki/fs` exposes the filesystem: `open(path, mode?)` returns a `File` (modes `"r"`, `"w"` and `"a"`; the default is `"r"` and a missing file is an error), plus `exists`, `remove` (files and empty directories), `rename`, `mkdir(path, recursive?)`, `list` (sorted entry names) and `isDir`. A `File` has a read-only `path` and the methods `read()`, `write(text, append?)` (replaces the contents unless `append` is true; files opened with `"a"` always append), `lines()` (an iterator yielding one line at a time) and `close()`.
+`neyuki compile app.nyk` writes `app.nykb`, which `neyuki run` loads without parsing or checking. Bytecode is verified before it runs, so a damaged or hand-made file is rejected instead of crashing the VM.
 
-```lua
-local fs = require("@neyuki/fs")
-local file = fs.open("notes.txt", "w")
-file:write("one
-two
-")
-file:close()
-for line in fs.open("notes.txt"):lines() do
-    print(line)
-end
-```
+### Debugging
 
-`@neyuki/io` talks to the terminal. `read(...formats)` reads from stdin, one value per format: `"l"` (a line without its newline, the default), `"L"` (a line with its newline), `"a"` (everything remaining), `"n"` (a whitespace-delimited number) or a count of characters; every format yields `nil` once input is exhausted. `lines(format?)` returns an iterator that reads with `format` until input runs out, `write(...)` prints strings and numbers to stdout with no separators or trailing newline (and returns the stream so calls chain), `flush()` flushes stdout and `prompt(text?, format?)` writes `text`, flushes and reads one value. The streams `io.stdin`, `io.stdout` and `io.stderr` expose the same operations as methods (`stdin:read`, `stdin:lines`, `stdout:write`, `stderr:flush`, ...) plus `isTerminal()`, which reports whether the stream is attached to a terminal rather than a pipe or file.
+`neyuki dap` speaks the Debug Adapter Protocol on standard input and output, which the VS Code extension uses for breakpoints, stepping, the call stack and variables. Scripts can also inspect themselves with the [debug library](reference/debug.md) and time functions with [@neyuki/profile](reference/profile.md).
 
-```lua
-local io = require("@neyuki/io")
-local name = io.prompt("What is your name? ")
-io.write("Hello, ", name, "!
-")
-local total = 0
-for value in io.lines("n") do
-    total += value
-end
-io.stderr:write("sum: ", total, "
-")
-```
+## Modules and packages
 
-`@neyuki/http` is an HTTP/1.1 client and server. `request(url, options?)` performs one request, where `options` may hold `method` (default `"GET"`), `headers` (a `{ name = value }` table), `body`, `timeout` (seconds for the whole exchange; unlimited by default), `follow` (whether redirects are followed; `true` by default) and `maxBody` (the largest response body accepted, in bytes; 64 MiB by default, past which the request raises an error). The shorthands `get`, `head` and `delete` take `(url, options?)` and `post`, `put` and `patch` take `(url, body?, options?)`. Only transport failures (DNS, connection, TLS, timeout) raise errors; every status code comes back as a `Response` with `status`, `ok` (true for 2xx), `headers` (names lower-cased), `body`, `url` (after redirects) and `header(name)` for a case-insensitive lookup. `encode` and `decode` percent-encode a string, `query(params)` builds a sorted `a=1&b=2` query string and `parseQuery(target)` splits a `path?query` target into the path and a decoded parameter table. Bodies are strings; responses that are not valid UTF-8 have those bytes replaced with U+FFFD.
+`require(name)` loads a module once and returns what it returned:
 
-```lua
-local http = require("@neyuki/http")
-local response = http.get("https://httpbin.org/get?" .. http.query({ q = "neyuki" }), { timeout = 10 })
-if (response.ok) then
-    print(response:header("content-type"), response.body)
-end
-```
+- the standard libraries by name: `require("json")`, also available as globals;
+- bundled modules by `@neyuki/` name: `require("@neyuki/http")`;
+- anything else as a file from the working directory: `name.nyk`, `name/init.nyk`, then the same under `modules/`, `packages/` and `neyuki_packages/` (where `neyuki pkg` keeps packages, entered through `init.nyk` or `main.nyk`).
 
-`listen(options?)` binds a server (`options` is a port number or `{ host?, port?, maxBody? }`; the defaults are `127.0.0.1`, `8080` and 64 MiB, and port `0` picks a free one; a request with a body over `maxBody` bytes is answered with 413 and never returned, and one whose client disconnects before sending its whole body is dropped) and returns a `Server` with `host`, `port`, `url`, `accept(timeout?)` (the next `Request`, or `nil` once `timeout` seconds pass without one), `isOpen()` and `close()`. A `Request` has `method`, `path`, `headers`, `body`, `remote`, `header(name)`, `query()` (the path and decoded query parameters) and `respond(reply)`, which may be called once with `nil` (204), a string (200, `text/plain`) or `{ status?, headers?, body? }`. `serve(options?, handler)` runs `listen` and then calls `handler(request)` for every request forever, sending its return value with `respond` unless the handler already answered; a handler error is reported on stderr and answered with a 500. The runtime is single-threaded, so a script cannot serve and request itself at the same time.
+Paths in `require` may not contain `..` or be absolute.
 
-```lua
-local http = require("@neyuki/http")
-http.serve(8080, function(request: Request): any
-    local path, params = request:query()
-    if (path == "/hello") then return "hello " .. (params.name ?? "world") end
-    return { status = 404, body = "not found" }
-end)
-```
+`neyuki pkg init` creates a `neyuki.toml` manifest, `pkg add <name> [version]` records a dependency, `pkg check` validates the manifest and `pkg list` shows what is in `neyuki_packages/`. Packages are placed in that directory by hand for now; there is no registry to download from yet.
 
-Two functions hand traffic to another server. `forward(options?, target)` is a TCP port forward: it binds `options` (as for `listen`) and relays every connection to `target` (a port on `localhost`, which reaches a server bound to either `127.0.0.1` or `::1`, or a `{ host?, port }` table) byte for byte, so HTTP, WebSockets, TLS and anything else that speaks TCP pass through; a Vite dev server on 5173 becomes reachable on 1234 with `http.forward(1234, 5173)`, hot reloading included. The relaying runs on background threads and returns a `Forward` with `host`, `port`, `url`, `target`, `isOpen()`, `close()` and `wait(timeout?)`, which blocks for `timeout` seconds or, without one, for as long as the forward runs, so a script that only forwards stays alive. A `Request` also has `forward(target, options?)`, which answers that one request with whatever `target` (a port, a `{ host?, port }` table or a base URL such as `"https://api.example.com"`) replies: the method, path, headers and body go upstream and the status, headers and body come back unchanged, redirects included, so a handler can serve a few routes itself and `return request:forward(5173)` for the rest. `options.timeout` bounds the upstream call. If the upstream cannot be reached the client receives a 502 and the error is raised, which `serve` reports on stderr. WebSocket upgrades do not pass through `request:forward` (the handshake is answered like a plain request, so a client such as Vite's falls back to connecting directly); use `http.forward` for those.
+## Memory and limits
 
-```lua
-local http = require("@neyuki/http")
--- everything on 1234 goes straight to the dev server, sockets included...
-local dev = http.forward(1234, 5173)
--- ...while 8080 answers /api itself and proxies the rest
-http.serve(8080, function(request: Request): any
-    if (request.path == "/api/time") then return tostring(os.time()) end
-    return request:forward(5173)
-end)
-```
+Memory is managed by reference counting with a cycle collector, so most values are freed the moment they become unreachable and cycles are reclaimed in the background. `collectgarbage` controls it, `__gc` runs finalizers and `__mode` makes tables weak.
 
-`@neyuki/crypto` is built on the RustCrypto and dalek crates rather than Neyuki code, so keys do not leak through timing and bulk encryption runs at native speed. Binary values are strings in an *encoding*, `"hex"`, `"base64"` or `"base64url"`: digests default to hex and everything else (keys, ciphertexts, signatures, random bytes) to base64. Asymmetric keys are PEM strings (PKCS#8 private, SPKI public) that OpenSSL and other languages read; PKCS#1 `RSA PRIVATE KEY` files are accepted too. `encode(s, encoding)` and `decode(s, encoding)` convert; `decode` errors if the bytes are not UTF-8 text, so keys and ciphertexts should stay encoded.
+A few limits keep one script from exhausting the machine: integers are capped at 2^20 bits, `string.rep` at 100 MiB, `json.encode` at 64 MiB of output, nesting at 120 levels, and a table passed to a native library function at a million values.
 
-- `hash(s, algorithm?, encoding?)` digests `s` with `sha256` (default), `sha224`, `sha384`, `sha512`, `sha3-256`, `sha3-512`, `blake2b`, `blake2s`, `sha1` or `md5`. `hmac(s, key, algorithm?, encoding?)` is the keyed version (no blake2). `equals(a, b)` compares in constant time, for MACs and tokens.
-- `hashPassword(password, options?)` produces a salted, self-describing hash with `argon2id` (default; `cost`, `memory` in KiB and `parallelism` default to 2, 19456 and 1) or `bcrypt` (`cost` defaults to 12; passwords over 72 bytes are refused). `verifyPassword(password, hash)` checks either kind and returns `false` on a mismatch. `pbkdf2(password, salt, options?)` (`algorithm`, `iterations` default 600000, `length` default 32, `encoding`) and `hkdf(key, options?)` (`algorithm`, `salt`, `info`, `length`, `encoding`, which applies to `key` too) derive keys.
-- `generateKey(algorithm?, options?)` makes a key for `aes-256-gcm` (default), `aes-128-gcm`, `chacha20-poly1305` or `xchacha20-poly1305`. `encrypt(s, key, options?)` seals `s` with a fresh random nonce and returns `nonce || ciphertext || tag`; `decrypt(s, key, options?)` reverses it and errors on a wrong key or tampered data. `options` may hold `algorithm`, `aad` (data that is authenticated but not encrypted, which `decrypt` must be given again) and `encoding` (of the key and the ciphertext). Only authenticated ciphers are offered.
-- `generateKeyPair(algorithm?, options?)` returns `{ publicKey, privateKey }` for `ed25519` (default), `x25519` or `rsa` (`options.bits` defaults to 2048). `publicKey(privateKey)` extracts the public half. `sign(s, privateKey, options?)` and `verify(s, signature, publicKey, options?)` use Ed25519 or RSA, where `options` may set `hash` (default `sha256`) and `padding` (`pss`, the default, or `pkcs1`); `verify` returns `false` for a bad or malformed signature and accepts a private key in place of the public one. `publicEncrypt(s, publicKey, options?)` and `privateDecrypt(s, privateKey, options?)` are RSA-OAEP for short messages such as a symmetric key. `sharedSecret(privateKey, publicKey, options?)` is X25519 key agreement; run the result through `hkdf` with an `info` before using it as a key.
-- `randomBytes(n, encoding?)`, `randomInt(n)` / `randomInt(min, max)` (inclusive, like `math.random`) and `uuid()` draw from the operating system's secure generator.
+## Platform notes
 
-```lua
-local crypto = require("@neyuki/crypto")
-
--- storing and checking a password
-local stored = crypto.hashPassword("correct horse battery staple")
-assert(crypto.verifyPassword("correct horse battery staple", stored))
-
--- encrypting a record at rest, bound to its id
-local key = crypto.generateKey()
-local sealed = crypto.encrypt("card ending 4242", key, { aad = "user:42" })
-print(crypto.decrypt(sealed, key, { aad = "user:42" }))
-
--- signing a token that another service verifies with the public key
-local keys = crypto.generateKeyPair("ed25519")
-local token = crypto.encode("user:42", "base64url")
-local signature = crypto.sign(token, keys.privateKey, { encoding = "base64url" })
-assert(crypto.verify(token, signature, keys.publicKey, { encoding = "base64url" }))
-```
-
-`@neyuki/sql` connects to PostgreSQL and to MySQL or MariaDB through the pure-Rust `postgres` and `mysql` drivers, with TLS through the platform's own library like `@neyuki/http`. `connect(target)` takes a URL (`"postgres://user:pass@host:5432/db"`, `"mysql://user:pass@host/db"`) or a table with `driver` (`"postgres"` or `"mysql"`) plus `host`, `port`, `user`, `password`, `database`, `ssl` (`true` to require TLS, `false` to refuse it; left unset, TLS is required for any host other than this machine, unless a PostgreSQL URL sets its own `sslmode`) and `timeout` (seconds to wait for the connection); a table may also carry `url`, with the other fields overriding parts of it. It returns a `Connection` with a `driver` field and these methods, each of which raises on a server error with the message and its SQLSTATE:
-
-- `query(statement, params?)` runs a statement and returns its rows as an array of `{ column = value }` tables; `rows.columns` lists the column names in select order, and a NULL column is absent from its row (`row.note == nil`). `queryOne(statement, params?)` returns the first row or `nil`.
-- `execute(statement, params?)` runs a statement for its effect and returns the number of rows it touched, followed by the auto-increment id of a MySQL insert (`nil` on PostgreSQL, where `RETURNING id` with `query` does the same job). Without parameters the statement goes through the simple protocol, so `BEGIN` and DDL work everywhere.
-- `transaction(body)` runs `body(connection)` inside a transaction, committing when it returns and rolling back and re-raising when it errors; it returns what `body` returned. `begin()`, `commit()` and `rollback()` are the manual version.
-- `ping()` reports whether the server still answers, `close()` drops the connection (calling it again is harmless) and `isOpen()` says whether it has been closed.
-
-Parameters are positional, in the server's own syntax (`$1, $2` on PostgreSQL, `?` on MySQL), and are handed to the server separately from the SQL text, so values are never quoted or spliced; the count must match the placeholders. A parameter may be `nil` (NULL), a boolean, a number or a string; PostgreSQL parses each one as the type it inferred for the placeholder, so a `"2024-02-29"` string binds to a `date` column and `$1::int` casts an untyped one. Results keep their types: integers (including `bigint` and MySQL unsigned values) stay integers, floats stay floats, PostgreSQL booleans are booleans (MySQL's are tinyints, so `0` and `1`), text is a string and a PostgreSQL array is an array. `numeric`/`decimal` values come back as strings so no digit is rounded; `date`, `time`, `timestamp`, `uuid`, `json` and `jsonb` come back in their text form (`timestamptz` in UTC, as `2024-02-29 10:34:56+00`). Binary columns are read as UTF-8 with invalid bytes replaced by U+FFFD, so select real binary data as hex (`encode(col, 'hex')`, `HEX(col)`). A PostgreSQL type the module does not know (`interval`, `inet`, ranges, composites, multidimensional arrays) raises an error naming it; cast it to `text` in the query. Only the first result set of a statement is returned.
-
-```lua
-local sql = require("@neyuki/sql")
-local os = require("@neyuki/os")
-local db = sql.connect(os.getenv("DATABASE_URL"))
-
-db:execute("CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE)")
-local user = db:queryOne("INSERT INTO users (name, email) VALUES ($1, $2) RETURNING id", { "Ada", "ada@example.com" })
-
-for _, row in db:query("SELECT id, name FROM users WHERE id > $1 ORDER BY id", { 0 }) do
-    print(row.id, row.name)
-end
-
-db:transaction(function(tx: Connection)
-    tx:execute("UPDATE accounts SET balance = balance - $1 WHERE id = $2", { 25, 1 })
-    tx:execute("UPDATE accounts SET balance = balance + $1 WHERE id = $2", { 25, 2 })
-end)
-db:close()
-```
-
-`@neyuki/ui` opens windows and draws into them, on X11, Wayland, macOS and Windows from one code path: `winit` provides the windows, `tiny-skia` and `fontdue` render each frame on the CPU and `softbuffer` shows it, all pure Rust with no GPU or GL involved. Like the HTTP server it is pull-based, because natives cannot call back into Neyuki: the script owns the loop, `poll` returns what happened and drawing calls paint a back buffer that `present` shows. Coordinates are logical pixels (HiDPI scaling is handled underneath) and colors are `"#rgb"`, `"#rrggbb"` or `"#rrggbbaa"` strings, `{ r, g, b, a? }` tables with channels from 0 to 255 or packed `0xRRGGBBAA` integers such as `ui.color` returns.
-
-- `open(options?)` returns a `Window`; `options` may hold `title`, `width` and `height` (default 800 × 600), `resizable` and `visible`. The canvas starts white. A window has `id`, `isOpen()`, `close()`, `title()`, `setTitle(title)`, `size()` (width, height), `setSize(width, height)` and `scale()` (physical pixels per logical pixel).
-- Drawing: `clear(color?)`, `fillRect(x, y, w, h, color, { radius? })`, `strokeRect(x, y, w, h, color, { width?, radius? })`, `line(x1, y1, x2, y2, color, { width? })`, `circle(cx, cy, r, color, { fill?, width? })`, `polygon({ x1, y1, x2, y2, ... }, color, { fill?, width? })`, `text(x, y, s, { size?, color?, font? })` (top-left of the line box at `(x, y)`, `"\n"` starts a new line, returns the width drawn), `drawImage(image, x, y, { width?, height? })` and `present()`, which shows everything drawn since the last call. Shapes are filled unless `fill` is false; `width` is then the line width (default 1).
-- `poll(timeout?)` pumps the event loop and returns the events since the last call; without a timeout it returns at once, with one (in seconds) it waits up to that long for the first event. Each event is a table with `kind`, `window` and the fields of its kind: `close` (a request only; call `window:close()` to honour it), `resize` (`width`, `height`), `focus`, `blur`, `redraw`, `keydown`/`keyup` (`key` such as `"a"`, `"escape"`, `"arrowleft"` or `"f1"`, `code` such as `"KeyA"`, `repeat`, `text` for what the key typed or `nil`, `mods` with `shift`, `ctrl`, `alt` and `meta`), `mousemove` (`x`, `y`), `mousedown`/`mouseup` (`button` of `"left"`, `"right"`, `"middle"`, `x`, `y`), `scroll` (`dx`, `dy`, `unit` of `"lines"` or `"pixels"`, `x`, `y`), `mouseenter` and `mouseleave`.
-- `run(handler, { fps?, autoClose? })` calls `handler(events, dt)` at `fps` (default 60) frames a second until every window is closed, with `dt` the seconds since the previous call; `close` events are honoured before the handler sees them unless `autoClose` is false, and an error in the handler closes the windows and is re-raised.
-- `loadImage(path)` decodes a PNG into an `Image` with `width`, `height` and `close()`; `loadFont(path)` reads a TrueType or OpenType file into a `Font` for the `font` text option (the bundled Noto Sans is used otherwise); `measureText(s, { size?, font? })` returns the width and height `text` would cover; `color(value)` packs a color into the integer the natives take, for scripts that draw the same colors every frame.
-- `isAvailable()` reports whether a display can be reached; on a headless machine `open` and `poll` raise an error saying so while `measureText`, `loadImage` and `loadFont` still work. On Linux the X11 or Wayland client libraries and `libxkbcommon` are loaded at run time, so a build needs none of them.
-
-A window's canvas is cleared to white whenever it is resized, so redraw everything each frame rather than once:
-
-```lua
-local ui = require("@neyuki/ui")
-local win = ui.open({ title = "Hello", width = 400, height = 300 })
-
-ui.run(function(events: {Event}, dt: number)
-    for _, event in events do
-        if (event.kind == "keydown" and event.key == "escape") then win:close() end
-    end
-    local w, h = win:size()
-    win:clear("#202030")
-    win:fillRect(20, 20, 160, 60, "#ff5555", { radius = 8 })
-    win:circle(w - 60, 60, 40, "#4488ff")
-    win:text(20, 100, "Hello, world!", { size = 24, color = "#ffffff" })
-    win:present()
-end)
-```
-
-Animations are tweens: `ui.tween(target, goal, duration, options?)` moves the fields of `target` toward the values in `goal` over `duration` seconds. Number fields move numerically and color fields (any color form) end up as packed colors the drawing calls accept. `options` may set `easing` (a function or the name of a `ui.easing` curve: `linear`, `inQuad`, `outQuad` (the default), `inOutQuad`, `inCubic`, `outCubic`, `inOutCubic`, `inSine`, `outSine`, `inOutSine`, `inExpo`, `outExpo`, `inBack`, `outBack`, `outElastic`, `outBounce`), `delay`, `repeat` (extra runs, or `true` for forever), `yoyo` (alternate runs play backwards), `onUpdate(target)` and `onComplete(target)`. Starting values are read when the tween starts, so a tween chained from `onComplete` continues where the last one ended. A tween has `update(dt)` (returns whether it has ended), `pause`, `resume`, `cancel` (stop in place), `finish` (jump to the goal), `isDone`, `isPaused` and `progress`. `ui.animate` takes the same arguments and registers the tween so `ui.run` steps it before each frame; a hand-written `poll` loop calls `ui.update(dt)` instead. `ui.lerp(a, b, t)` and `ui.mixColor(from, to, t)` interpolate single values.
-
-```lua
-local card = { x = -200, alpha = 0, fill = "#334455" }
-ui.animate(card, { x = 40, alpha = 1 }, 0.6, { easing = "outBack" })
-ui.animate(card, { fill = "#5577aa" }, 1.2, { ["repeat"] = true, yoyo = true })
-```
-
-`@neyuki/hid` sends keyboard and mouse input to whichever window has focus, exactly as if a person typed or clicked, and reads the screen size and clipboard. It drives SendInput on Windows, CoreGraphics on macOS and XTest on X11 (Wayland sessions need XWayland). Keys are single characters (`"a"`, `"7"`, `"/"`) or case-insensitive names: `enter`, `tab`, `space`, `backspace`, `delete`, `escape`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`, `shift`, `ctrl`, `alt`, `meta` (also `win`, `cmd`, `super`), `capslock`, `f1` to `f20`, `numpad0` to `numpad9`, `volumeup`, `volumedown`, `mute`, `playpause`, `nexttrack` and `prevtrack`. Mouse buttons are `"left"` (the default), `"right"`, `"middle"`, `"back"` and `"forward"`; coordinates are pixels from the top-left of the main display.
-
-- `hid.keyboard`: `press(key)` and `release(key)` hold and let go of a key, `tap(key, times?)` presses and releases it, `write(text)` types any text (including characters the layout has no key for), `combo(...)` presses keys in order and releases them in reverse (`combo("ctrl", "c")` or `combo("ctrl+c")`), `hold(keys, action)` runs `action` while `keys` are held and releases them even when it fails, and `isKey(name)` checks a key name.
-- `hid.mouse`: `move(x, y)`, `moveBy(dx, dy)`, `glide(x, y, seconds?)` (a straight line over 0.25 s by default), `position()` (two numbers), `click(button?, count?)`, `press(button?)`, `release(button?)`, `drag(x, y, button?, seconds?)` and `scroll(amount, horizontal?)`, where positive amounts scroll down or right.
-- `hid.screen.size()` returns the main display's width and height; `hid.clipboard.get()` returns its text (or `nil`) and `hid.clipboard.set(text)` replaces it.
-
-```lua
-local hid = require("@neyuki/hid")
-local os = require("@neyuki/os")
-
-local w, h = hid.screen.size()
-hid.mouse.glide(w / 2, h / 2)
-hid.mouse.click()
-hid.keyboard.write("Hello from Neyuki")
-hid.keyboard.combo("ctrl+a")
-hid.keyboard.combo("ctrl+c")
-os.sleep(0.1)
-print(hid.clipboard.get())
-```
-
-`@neyuki/os` provides `clock()` (seconds as a float, for timing), `time(t?)` (whole seconds since the Unix epoch, now or for a date table), `date(format?, time?)` (strftime formatting in local time, UTC with a leading `!`, or a table with `"*t"`), `difftime(t2, t1)`, `getenv(name)` (the variable's value, or `nil` when it is unset), `args()` (the command-line arguments after the script path, as a list of strings), `run(command, options?)` (runs a program through the shell or as an argument list and returns `{ ok, code, stdout, stderr }`), `sleep(seconds)` and `exit(code?)`, which flushes output and ends the process with 0 (nothing or `true`), 1 (`false`) or the given integer.
-
-## Current boundaries
-
-The compiler currently validates syntax rather than enforcing the declared type annotations. Runtime modules are resolved from the project checkout, and the base `require` implementation recognizes only the bundled modules listed above. User-defined functions return their explicit `return` values; a function without a return produces `nil` when called.
-
-A coroutine can only yield from its own Neyuki frames. Calling `coroutine.yield` from inside a function that a native function called back (a `try` or `pcall` body, a `table.sort` comparator, a metamethod) raises "attempt to yield across a native function call" instead. The handle `coroutine.create` returns is frozen, and only that handle resumes its coroutine.
-
-A few limits keep one script from exhausting memory: `json.encode` stops at 64 MiB of output, and a table passed to a native function (the `@neyuki/http`, `fs`, `hid`, `io`, `sql`, `crypto`, `string` and `ui` primitives) may hold at most a million values, counting a subtable once for every place it appears.
+The runtime is a single Rust executable with no C dependencies. `@neyuki/ui` and `@neyuki/hid` need a desktop session (on Linux, X11 or XWayland); everything else runs headless. TLS for `@neyuki/http` and `@neyuki/sql` uses the operating system's own library (SChannel, Secure Transport or OpenSSL).
