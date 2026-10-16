@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use crate::bytecode::proto::Proto;
 use crate::vm::buffer::VmBuffer;
-use crate::vm::hash::{FxHashMap, new_map};
+use crate::vm::hash::FxHashMap;
 use crate::vm::table::TableKey;
 
 pub type NativeFn = fn(&mut crate::vm::machine::VM, &[Value]) -> Result<Vec<Value>, String>;
@@ -42,17 +42,23 @@ macro_rules! native {
     };
 }
 
-/// Shared string handle. It wraps `Rc<String>` instead of `Rc<str>` so the
+/// Shared string handle. It wraps `Rc<VmString>` instead of `Rc<str>` so the
 /// pointer stays thin (8 bytes); a fat `Rc<str>` would push every `Value`
 /// past two words. Hash, equality and borrowing all follow the string
 /// contents, so `&str` lookups on maps keyed by this keep working.
 #[derive(Clone, Debug)]
-pub struct StrRef(pub Rc<String>);
+pub struct VmString {
+    pub str: String,
+    pub hash: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct StrRef(pub Rc<VmString>);
 
 impl PartialEq for StrRef {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
-        Rc::ptr_eq(&self.0, &other.0) || self.0 == other.0
+        Rc::ptr_eq(&self.0, &other.0) || (self.0.hash == other.0.hash && self.0.str == other.0.str)
     }
 }
 
@@ -68,21 +74,21 @@ impl PartialOrd for StrRef {
 impl Ord for StrRef {
     #[inline]
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0.cmp(&other.0)
+        self.0.str.cmp(&other.0.str)
     }
 }
 
 impl Hash for StrRef {
     #[inline]
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0.hash(state)
+        self.0.str.hash(state);
     }
 }
 
 impl std::borrow::Borrow<str> for StrRef {
     #[inline]
     fn borrow(&self) -> &str {
-        &self.0
+        &self.0.str
     }
 }
 
@@ -91,27 +97,39 @@ impl Deref for StrRef {
 
     #[inline]
     fn deref(&self) -> &str {
-        &self.0
+        &self.0.str
+    }
+}
+
+impl AsRef<str> for StrRef {
+    #[inline]
+    fn as_ref(&self) -> &str {
+        &self.0.str
     }
 }
 
 impl fmt::Display for StrRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
+        write!(f, "{}", self.0.str)
     }
 }
 
 impl From<&str> for StrRef {
     #[inline]
     fn from(s: &str) -> Self {
-        StrRef(Rc::new(s.to_owned()))
+        let hash = crate::vm::hash::fx_hash_bytes(s.as_bytes());
+        StrRef(Rc::new(VmString {
+            str: s.to_owned(),
+            hash,
+        }))
     }
 }
 
 impl From<String> for StrRef {
     #[inline]
     fn from(s: String) -> Self {
-        StrRef(Rc::new(s))
+        let hash = crate::vm::hash::fx_hash_bytes(s.as_bytes());
+        StrRef(Rc::new(VmString { str: s, hash }))
     }
 }
 
@@ -139,7 +157,7 @@ pub enum Value {
 
 pub struct VmTable {
     pub array: Vec<Value>,
-    pub fields: FxHashMap<StrRef, Value>,
+    pub fields: crate::vm::table::FieldMap,
     /// Every other key: integers outside the array part, floats, booleans,
     /// tables, functions and buffers. Each entry keeps its key value, so
     /// iteration can hand it back and a table key stays alive.
@@ -163,7 +181,7 @@ impl VmTable {
     pub fn new() -> Self {
         Self {
             array: Vec::new(),
-            fields: new_map(),
+            fields: crate::vm::table::FieldMap::new(),
             general: None,
             frozen: false,
             metatable: None,
@@ -172,11 +190,13 @@ impl VmTable {
     }
 
     pub fn with_capacity(array: usize, fields: usize) -> Self {
-        let mut map = new_map();
-        map.reserve(fields);
         Self {
-            array: Vec::with_capacity(array),
-            fields: map,
+            array: if array == 0 {
+                Vec::new()
+            } else {
+                Vec::with_capacity(array)
+            },
+            fields: crate::vm::table::FieldMap::with_capacity(fields),
             general: None,
             frozen: false,
             metatable: None,
@@ -210,7 +230,7 @@ impl VmTable {
             return self.raw_get(&Value::Int(*f as i64));
         }
         match key {
-            Value::String(k) => self.fields.get(&**k).cloned().unwrap_or(Value::Nil),
+            Value::String(k) => self.fields.get_by_strref(k).cloned().unwrap_or(Value::Nil),
             Value::Int(i) if *i >= 1 && (*i as u64) <= self.array.len() as u64 => {
                 self.array[*i as usize - 1].clone()
             }
@@ -229,7 +249,7 @@ impl VmTable {
         match key {
             Value::String(k) => {
                 if matches!(val, Value::Nil) {
-                    self.fields.remove(&*k);
+                    self.fields.remove_by_strref(&k);
                 } else {
                     self.fields.insert(k, val);
                 }
@@ -370,6 +390,16 @@ impl Value {
         }
     }
 
+    /// Builds an integer value from `i128`, storing it inline when it fits an `i64`.
+    #[inline]
+    pub fn from_i128(i: i128) -> Value {
+        if let Ok(small) = i64::try_from(i) {
+            Value::Int(small)
+        } else {
+            Value::BigInt(Rc::new(BigInt::from(i)))
+        }
+    }
+
     #[inline]
     pub fn from_usize(i: usize) -> Value {
         match i64::try_from(i) {
@@ -495,7 +525,7 @@ impl PartialEq for Value {
             (Value::Nil, Value::Nil) => true,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Int(a), Value::Int(b)) => a == b,
-            (Value::BigInt(a), Value::BigInt(b)) => a == b,
+            (Value::BigInt(a), Value::BigInt(b)) => Rc::ptr_eq(a, b) || a == b,
             // A normalised BigInt is outside the i64 range, so it can never
             // equal an Int.
             (Value::Int(_), Value::BigInt(_)) | (Value::BigInt(_), Value::Int(_)) => false,

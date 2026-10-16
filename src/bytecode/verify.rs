@@ -167,7 +167,7 @@ fn verify_proto_depth(proto: &Proto, depth: usize) -> Result<(), BytecodeVerifyE
                 check_reg(*a, pc)?;
                 check_reg(*b, pc)?;
             }
-            Instruction::NewTable { dst } => {
+            Instruction::NewTable { dst, .. } => {
                 check_reg(*dst, pc)?;
             }
             Instruction::GetTable { dst, table, key } => {

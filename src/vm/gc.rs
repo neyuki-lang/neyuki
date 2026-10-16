@@ -83,6 +83,7 @@ pub struct GcTracker {
     pub step_multiplier: usize,
     pub pause_multiplier: usize,
     pub is_running: bool,
+    pub has_weak_tables: bool,
 
     pub current_white: GcColor,
     pub state: GCState,
@@ -140,6 +141,7 @@ impl GcTracker {
             step_multiplier: 200,
             pause_multiplier: 200,
             is_running: true,
+            has_weak_tables: false,
 
             current_white: GcColor::White0,
             state: GCState::Pause,
@@ -175,6 +177,10 @@ impl GcTracker {
 
     pub fn register_table(&mut self, rc: &Rc<RefCell<VmTable>>) {
         let size = 64 + rc.borrow().array.capacity() * std::mem::size_of::<Value>();
+        self.register_table_sized(rc, size);
+    }
+
+    pub fn register_table_sized(&mut self, rc: &Rc<RefCell<VmTable>>, size: usize) {
         self.bytes_allocated += size;
         self.total_allocations += 1;
         let alloc_id = self.next_alloc_id;
@@ -182,15 +188,35 @@ impl GcTracker {
         self.young.push((Rc::downgrade(rc), size, alloc_id));
     }
 
+    /// Prunes dead young tables between GC cycles to release their weak handles
+    /// and keep `bytes_allocated` tracking accurate without triggering premature cycles.
+    pub fn prune_young(&mut self) {
+        let mut dropped = 0;
+        self.young.retain(|(weak, size, _)| {
+            if weak.strong_count() == 0 {
+                dropped += *size;
+                false
+            } else {
+                true
+            }
+        });
+        self.bytes_allocated = self.bytes_allocated.saturating_sub(dropped);
+    }
+
     /// Moves the young tables that are still alive into `tables` and
     /// returns the bytes of those that already died.
     pub fn flush_young(&mut self) -> usize {
         let mut dropped = 0;
-        for (weak, size, alloc_id) in std::mem::take(&mut self.young) {
+        self.young.retain(|(weak, size, _)| {
             if weak.strong_count() == 0 {
-                dropped += size;
-                continue;
+                dropped += *size;
+                false
+            } else {
+                true
             }
+        });
+        self.tables.reserve(self.young.len());
+        for (weak, size, alloc_id) in self.young.drain(..) {
             let header = GcHeader {
                 color: self.current_white,
                 size,
@@ -285,6 +311,7 @@ impl GcTracker {
     }
 
     pub fn mark_roots(&mut self, stack: &[Value], globals: &Globals) {
+        self.has_weak_tables = false;
         self.gray_stack.clear();
         for val in stack {
             self.mark_value(val);
@@ -308,10 +335,13 @@ impl GcTracker {
             if let Some((weak_rc, header)) = self.tables.get_mut(&t_ptr) {
                 header.color = GcColor::Black;
                 if let Some(rc) = weak_rc.upgrade() {
+                    let tbl = rc.borrow();
                     // Weak tables do not mark their values: entries whose
                     // value is only reachable from here die at sweep.
-                    let weak = table_weak_values(&rc);
-                    let tbl = rc.borrow();
+                    let weak = tbl.metatable.is_some() && table_weak_values(&rc);
+                    if weak {
+                        self.has_weak_tables = true;
+                    }
                     for val in &tbl.array {
                         if !(weak && is_collectible(val)) {
                             self.mark_value(val);
@@ -425,21 +455,23 @@ impl GcTracker {
             }
             // Live-but-weak holders: their values are unmarked by design,
             // so without this their targets would look externally held.
-            for (ptr, (weak_rc, header)) in &self.tables {
-                if header.color != GcColor::Black {
-                    continue;
-                }
-                let Some(rc) = weak_rc.upgrade() else {
-                    continue;
-                };
-                if !table_weak_values(&rc) {
-                    continue;
-                }
-                let _ = ptr;
-                let tbl = rc.borrow();
-                let general = tbl.general.iter().flat_map(|g| g.values().map(|(_, v)| v));
-                for val in tbl.array.iter().chain(tbl.fields.values()).chain(general) {
-                    count_ref(val, &white_tables, &mut internal_ref_counts);
+            if self.has_weak_tables {
+                for (ptr, (weak_rc, header)) in &self.tables {
+                    if header.color != GcColor::Black {
+                        continue;
+                    }
+                    let Some(rc) = weak_rc.upgrade() else {
+                        continue;
+                    };
+                    if !rc.borrow().metatable.is_some() || !table_weak_values(&rc) {
+                        continue;
+                    }
+                    let _ = ptr;
+                    let tbl = rc.borrow();
+                    let general = tbl.general.iter().flat_map(|g| g.values().map(|(_, v)| v));
+                    for val in tbl.array.iter().chain(tbl.fields.values()).chain(general) {
+                        count_ref(val, &white_tables, &mut internal_ref_counts);
+                    }
                 }
             }
         }
@@ -618,18 +650,21 @@ impl GcTracker {
 
         // Weak survivors to prune once all clearing is done. Upgraded now
         // so they cannot vanish mid-sweep.
-        let weak_black: Vec<Rc<RefCell<VmTable>>> = self
-            .tables
-            .iter()
-            .filter_map(|(_, (weak_rc, header))| {
-                if header.color == GcColor::Black {
-                    weak_rc.upgrade()
-                } else {
-                    None
-                }
-            })
-            .filter(table_weak_values)
-            .collect();
+        let weak_black: Vec<Rc<RefCell<VmTable>>> = if self.has_weak_tables {
+            self.tables
+                .iter()
+                .filter_map(|(_, (weak_rc, header))| {
+                    if header.color == GcColor::Black {
+                        weak_rc.upgrade()
+                    } else {
+                        None
+                    }
+                })
+                .filter(|rc| rc.borrow().metatable.is_some() && table_weak_values(rc))
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         self.sweep_plain = plain;
         self.sweep_buf_remove = to_remove_buffers;
@@ -653,7 +688,7 @@ impl GcTracker {
         while remaining > 0 {
             if let Some(rc) = self.sweep_plain.pop() {
                 let ptr = Rc::as_ptr(&rc);
-                if let Some((_, header)) = self.tables.get(&ptr) {
+                if let Some((_, header)) = self.tables.remove(&ptr) {
                     self.sweep_freed += header.size;
                     self.bytes_allocated = self.bytes_allocated.saturating_sub(header.size);
                 }
@@ -664,18 +699,20 @@ impl GcTracker {
                     tbl.general = None;
                     tbl.metatable = None;
                 }
-                self.tables.remove(&ptr);
-                self.pinned.remove(&ptr);
-                self.sweep_doomed_tables.insert(ptr);
+                if !self.pinned.is_empty() {
+                    self.pinned.remove(&ptr);
+                }
+                if !self.sweep_weak.is_empty() {
+                    self.sweep_doomed_tables.insert(ptr);
+                }
                 remaining -= 1;
                 continue;
             }
             if let Some(ptr) = self.sweep_buf_remove.pop() {
-                if let Some((_, header)) = self.buffers.get(&ptr) {
+                if let Some((_, header)) = self.buffers.remove(&ptr) {
                     self.sweep_freed += header.size;
                     self.bytes_allocated = self.bytes_allocated.saturating_sub(header.size);
                 }
-                self.buffers.remove(&ptr);
                 remaining -= 1;
                 continue;
             }

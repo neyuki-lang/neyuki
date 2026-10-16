@@ -2,7 +2,7 @@
 
 // Magic bytes at the start of compiled bytecode binary
 pub const MAGIC: &[u8; 7] = b"neyuki!";
-pub const BYTECODE_VERSION: u8 = 4;
+pub const BYTECODE_VERSION: u8 = 5;
 
 // IEEE 802.3 CRC-32 checksum calculation for bytecode integrity verification
 pub fn compute_crc32(data: &[u8]) -> u32 {

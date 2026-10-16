@@ -128,9 +128,15 @@ fn write_instruction(buf: &mut Vec<u8>, inst: &Instruction) {
             write_u8(buf, *src);
             write_u8(buf, *upval_idx);
         }
-        Instruction::NewTable { dst } => {
+        Instruction::NewTable {
+            dst,
+            array_cap,
+            fields_cap,
+        } => {
             write_u8(buf, 10);
             write_u8(buf, *dst);
+            write_u8(buf, *array_cap);
+            write_u8(buf, *fields_cap);
         }
         Instruction::GetTable { dst, table, key } => {
             write_u8(buf, 11);

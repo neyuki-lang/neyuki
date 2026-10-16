@@ -180,6 +180,8 @@ fn read_instruction(bytes: &[u8], cursor: &mut usize) -> Result<Instruction, Str
         }),
         10 => Ok(Instruction::NewTable {
             dst: read_u8(bytes, cursor)?,
+            array_cap: read_u8(bytes, cursor)?,
+            fields_cap: read_u8(bytes, cursor)?,
         }),
         11 => Ok(Instruction::GetTable {
             dst: read_u8(bytes, cursor)?,

@@ -24,7 +24,6 @@ use std::time::Duration;
 
 use ureq::ResponseExt;
 
-use crate::vm::hash::FxHashMap;
 use crate::vm::machine::VM;
 use crate::vm::value::{NativeDef, StrRef, Value, VmTable};
 
@@ -226,12 +225,12 @@ fn headers_table<'a>(headers: impl Iterator<Item = (&'a str, &'a [u8])>) -> Valu
             None => merged.push((name, value.into_owned())),
         }
     }
-    let mut fields: FxHashMap<StrRef, Value> = crate::vm::hash::new_map();
+    let mut table = VmTable::with_capacity(0, merged.len());
     for (name, value) in merged {
-        fields.insert(StrRef::from(name), Value::string(value));
+        table
+            .fields
+            .insert(StrRef::from(name), Value::string(value));
     }
-    let mut table = VmTable::new();
-    table.fields = fields;
     Value::Table(Rc::new(RefCell::new(table)))
 }
 

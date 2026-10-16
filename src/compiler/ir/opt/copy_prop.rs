@@ -18,6 +18,17 @@ pub fn copy_propagation_cfg(cfg: &mut ControlFlowGraph) -> bool {
         if propagate_copies_slice(&mut block.instructions, &captured) {
             changed = true;
         }
+        let before_len = block.instructions.len();
+        block.instructions.retain(|inst| {
+            if let IrInst::Move { dst, src } = inst {
+                dst != src
+            } else {
+                true
+            }
+        });
+        if block.instructions.len() != before_len {
+            changed = true;
+        }
     }
     changed
 }

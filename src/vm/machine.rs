@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 
 use num_integer::Integer as _;
+use num_traits::Signed as _;
 
 use crate::bytecode::instruction::{Instruction, MULTRET};
 use crate::bytecode::proto::Proto;
@@ -680,7 +681,7 @@ impl VM {
     /// explicit collections still drain fully. Slice size is fixed; pacing
     /// itself comes from the allocation threshold.
     pub(crate) fn gc_auto_step(&mut self) -> Result<(), String> {
-        const SLICE_BUDGET: usize = 64;
+        const SLICE_BUDGET: usize = 256;
         if self.gc.sweeping {
             self.gc.sweep_slice(SLICE_BUDGET);
             return Ok(());
@@ -984,12 +985,6 @@ impl VM {
                 set!($dst, res);
             }};
         }
-        macro_rules! bitop {
-            ($dst:expr, $a:expr, $b:expr, $slow:path) => {{
-                let res = attempt!($slow(&reg!($a), &reg!($b)));
-                set!($dst, res);
-            }};
-        }
         // Ordered comparison with a conditional jump. `$mm_swap` is true
         // for `>`/`>=`, which are `<`/`<=` with the operands swapped.
         macro_rules! compare {
@@ -1167,14 +1162,24 @@ impl VM {
                     let val = reg!(src).clone();
                     self.upvalue_set(&current_closure.upvalues[upval_idx as usize], val);
                 }
-                Instruction::NewTable { dst } => {
+                Instruction::NewTable {
+                    dst,
+                    array_cap,
+                    fields_cap,
+                } => {
                     if self.gc.should_collect() || self.gc.sweeping {
                         self.gc_auto_step().inspect_err(|_| {
                             sync_ip!();
                         })?;
                     }
-                    let rc = Rc::new(RefCell::new(VmTable::new()));
-                    self.gc.register_table(&rc);
+                    let table = if array_cap == 0 && fields_cap == 0 {
+                        VmTable::new()
+                    } else {
+                        VmTable::with_capacity(array_cap as usize, fields_cap as usize)
+                    };
+                    let rc = Rc::new(RefCell::new(table));
+                    let size = 64 + (array_cap as usize) * std::mem::size_of::<Value>();
+                    self.gc.register_table_sized(&rc, size);
                     set!(dst, Value::Table(rc));
                 }
                 Instruction::GetTable { dst, table, key } => {
@@ -1186,31 +1191,32 @@ impl VM {
                         let tbl = t.borrow();
                         let idx = *i as usize - 1;
                         if idx < tbl.array.len() {
-                            match &tbl.array[idx] {
-                                Value::Int(n) => {
-                                    let val = *n;
-                                    drop(tbl);
-                                    let slot = slot_mut(&mut self.stack, base + dst as usize);
-                                    if let Value::Int(old) = slot {
-                                        *old = val;
-                                    } else {
-                                        *slot = Value::Int(val);
-                                    }
-                                    continue;
-                                }
-                                Value::Float(f) => {
-                                    let val = *f;
-                                    drop(tbl);
-                                    let slot = slot_mut(&mut self.stack, base + dst as usize);
-                                    if let Value::Float(old) = slot {
-                                        *old = val;
-                                    } else {
-                                        *slot = Value::Float(val);
-                                    }
-                                    continue;
-                                }
-                                _ => {}
-                            }
+                            let val = match &tbl.array[idx] {
+                                Value::Int(n) => Value::Int(*n),
+                                Value::Float(f) => Value::Float(*f),
+                                Value::Bool(b) => Value::Bool(*b),
+                                other => other.clone(),
+                            };
+                            drop(tbl);
+                            set!(dst, val);
+                            continue;
+                        }
+                    } else if let (Value::Table(t), Value::String(s)) = (tbl_val, k) {
+                        let tbl = t.borrow();
+                        if let Some(v) = tbl.fields.get_by_strref(s) {
+                            let val = match v {
+                                Value::Int(n) => Value::Int(*n),
+                                Value::Float(f) => Value::Float(*f),
+                                Value::Bool(b) => Value::Bool(*b),
+                                other => other.clone(),
+                            };
+                            drop(tbl);
+                            set!(dst, val);
+                            continue;
+                        } else if tbl.metatable.is_none() {
+                            drop(tbl);
+                            set!(dst, Value::Nil);
+                            continue;
                         }
                     }
                     let val = match Self::table_get_fast(tbl_val, k) {
@@ -1224,12 +1230,30 @@ impl VM {
                     set!(dst, val);
                 }
                 Instruction::GetTableK { dst, table, key_k } => {
-                    let tbl = &reg!(table);
+                    let tbl_val = &reg!(table);
                     let k = &consts[key_k as usize];
-                    let val = match Self::table_get_fast(tbl, k) {
+                    if let (Value::Table(t), Value::String(s)) = (tbl_val, k) {
+                        let tbl = t.borrow();
+                        if let Some(v) = tbl.fields.get_by_strref(s) {
+                            let val = match v {
+                                Value::Int(n) => Value::Int(*n),
+                                Value::Float(f) => Value::Float(*f),
+                                Value::Bool(b) => Value::Bool(*b),
+                                other => other.clone(),
+                            };
+                            drop(tbl);
+                            set!(dst, val);
+                            continue;
+                        } else if tbl.metatable.is_none() {
+                            drop(tbl);
+                            set!(dst, Value::Nil);
+                            continue;
+                        }
+                    }
+                    let val = match Self::table_get_fast(tbl_val, k) {
                         Some(v) => v,
                         None => {
-                            let tbl = tbl.clone();
+                            let tbl = tbl_val.clone();
                             sync_ip!();
                             self.table_get(&tbl, k)?
                         }
@@ -1306,6 +1330,7 @@ impl VM {
                                 match (v, &mut tbl.array[idx]) {
                                     (Value::Int(n), Value::Int(o)) => *o = *n,
                                     (Value::Float(n), Value::Float(o)) => *o = *n,
+                                    (Value::Bool(n), Value::Bool(o)) => *o = *n,
                                     (v_other, slot) => *slot = v_other.clone(),
                                 }
                                 continue;
@@ -1317,6 +1342,33 @@ impl VM {
                                 continue;
                             }
                         }
+                    } else if let (Value::Table(t), Value::String(s)) = (tbl_val, k)
+                        && !matches!(v, Value::Nil)
+                    {
+                        let mut tbl = t.borrow_mut();
+                        if !tbl.frozen {
+                            if tbl.metatable.is_none() {
+                                if let Some(slot) = tbl.fields.get_mut_by_strref(s) {
+                                    match (v, slot) {
+                                        (Value::Int(n), Value::Int(o)) => *o = *n,
+                                        (Value::Float(n), Value::Float(o)) => *o = *n,
+                                        (Value::Bool(n), Value::Bool(o)) => *o = *n,
+                                        (val, slot) => *slot = val.clone(),
+                                    }
+                                } else {
+                                    tbl.fields.insert(s.clone(), v.clone());
+                                }
+                                continue;
+                            } else if let Some(slot) = tbl.fields.get_mut_by_strref(s) {
+                                match (v, slot) {
+                                    (Value::Int(n), Value::Int(o)) => *o = *n,
+                                    (Value::Float(n), Value::Float(o)) => *o = *n,
+                                    (Value::Bool(n), Value::Bool(o)) => *o = *n,
+                                    (val, slot) => *slot = val.clone(),
+                                }
+                                continue;
+                            }
+                        }
                     }
                     if !Self::table_set_fast(tbl_val, k, v) {
                         let (tbl, k, v) = (tbl_val.clone(), k.clone(), v.clone());
@@ -1325,11 +1377,39 @@ impl VM {
                     }
                 }
                 Instruction::SetTableK { table, key_k, val } => {
-                    let tbl = &reg!(table);
+                    let tbl_val = &reg!(table);
                     let k = &consts[key_k as usize];
                     let v = &reg!(val);
-                    if !Self::table_set_fast(tbl, k, v) {
-                        let (tbl, k, v) = (tbl.clone(), k.clone(), v.clone());
+                    if let (Value::Table(t), Value::String(s)) = (tbl_val, k)
+                        && !matches!(v, Value::Nil)
+                    {
+                        let mut tbl = t.borrow_mut();
+                        if !tbl.frozen {
+                            if tbl.metatable.is_none() {
+                                if let Some(slot) = tbl.fields.get_mut_by_strref(s) {
+                                    match (v, slot) {
+                                        (Value::Int(n), Value::Int(o)) => *o = *n,
+                                        (Value::Float(n), Value::Float(o)) => *o = *n,
+                                        (Value::Bool(n), Value::Bool(o)) => *o = *n,
+                                        (val, slot) => *slot = val.clone(),
+                                    }
+                                } else {
+                                    tbl.fields.insert(s.clone(), v.clone());
+                                }
+                                continue;
+                            } else if let Some(slot) = tbl.fields.get_mut_by_strref(s) {
+                                match (v, slot) {
+                                    (Value::Int(n), Value::Int(o)) => *o = *n,
+                                    (Value::Float(n), Value::Float(o)) => *o = *n,
+                                    (Value::Bool(n), Value::Bool(o)) => *o = *n,
+                                    (val, slot) => *slot = val.clone(),
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                    if !Self::table_set_fast(tbl_val, k, v) {
+                        let (tbl, k, v) = (tbl_val.clone(), k.clone(), v.clone());
                         sync_ip!();
                         self.table_set(&tbl, k, v)?;
                     }
@@ -1409,10 +1489,6 @@ impl VM {
                     set!(dst, res);
                 }
                 Instruction::Mod { dst, a, b } => {
-                    // Fast path for small ints; the zero divisor,
-                    // MIN/-1 overflow, floats, BigInts and metamethods
-                    // keep going through the generic evaluator so
-                    // semantics cannot drift.
                     let ra = &reg!(a);
                     let rb = &reg!(b);
                     let res = match (ra, rb) {
@@ -1423,6 +1499,13 @@ impl VM {
                                 Value::Int(0)
                             } else {
                                 Value::Int(x.mod_floor(y))
+                            }
+                        }
+                        (Value::BigInt(x), Value::Int(y)) => {
+                            if *y == 0 {
+                                attempt!(ops::eval_mod(ra, rb))
+                            } else {
+                                Value::Int(ops::bigint_mod_floor_i64(x, *y))
                             }
                         }
                         _ => attempt!(ops::eval_mod(ra, rb)),
@@ -1460,29 +1543,37 @@ impl VM {
                     set!(dst, res);
                 }
                 Instruction::Shl { dst, a, b } => {
-                    // Only shifts that provably keep every bit stay
-                    // inline; the headroom rule mirrors `shift_left`
-                    // exactly and everything else (negatives, widening,
-                    // floats) delegates to it.
                     let ra = &reg!(a);
                     let rb = &reg!(b);
                     let res = match (ra, rb) {
-                        (Value::Int(x), Value::Int(y))
-                            if *x >= 0
-                                && *y >= 0
-                                && (*y as u64) <= x.leading_zeros().saturating_sub(1) as u64 =>
-                        {
-                            Value::Int(x << *y)
+                        (Value::Int(x), Value::Int(y)) if *x >= 0 && *y >= 0 => {
+                            let headroom = x.leading_zeros().saturating_sub(1) as i64;
+                            if *y <= headroom {
+                                Value::Int(x << *y)
+                            } else if *y < 127 {
+                                Value::from_i128((*x as i128) << *y)
+                            } else if (*y as u64) <= ops::MAX_INT_BITS {
+                                Value::BigInt(std::rc::Rc::new(
+                                    num_bigint::BigInt::from(*x) << (*y as usize),
+                                ))
+                            } else {
+                                attempt!(ops::eval_shl(ra, rb))
+                            }
+                        }
+                        (Value::BigInt(x), Value::Int(y)) if *y >= 0 => {
+                            if (*y as u64) <= ops::MAX_INT_BITS
+                                && x.bits().saturating_add(*y as u64) <= ops::MAX_INT_BITS
+                            {
+                                Value::BigInt(std::rc::Rc::new(&**x << (*y as usize)))
+                            } else {
+                                attempt!(ops::eval_shl(ra, rb))
+                            }
                         }
                         _ => attempt!(ops::eval_shl(ra, rb)),
                     };
                     set!(dst, res);
                 }
                 Instruction::Shr { dst, a, b } => {
-                    // Fast path for the overwhelmingly common
-                    // small-int shift; every other operand shape keeps
-                    // going through the generic evaluator so its
-                    // semantics (widening, floats, errors) cannot drift.
                     let ra = &reg!(a);
                     let rb = &reg!(b);
                     let res = match (ra, rb) {
@@ -1495,12 +1586,46 @@ impl VM {
                                 Value::Int(x >> *y)
                             }
                         }
+                        (Value::BigInt(x), Value::Int(y)) if *y >= 0 => {
+                            if (*y as u64) >= x.bits() {
+                                Value::Int(if x.is_negative() { -1 } else { 0 })
+                            } else {
+                                Value::from_bigint(&**x >> (*y as usize))
+                            }
+                        }
                         _ => attempt!(ops::eval_shr(ra, rb)),
                     };
                     set!(dst, res);
                 }
-                Instruction::LShl { dst, a, b } => bitop!(dst, a, b, ops::eval_lshl),
-                Instruction::LShr { dst, a, b } => bitop!(dst, a, b, ops::eval_lshr),
+
+                Instruction::LShl { dst, a, b } => {
+                    let ra = &reg!(a);
+                    let rb = &reg!(b);
+                    let res = match (ra, rb) {
+                        (Value::Int(x), Value::Int(y)) => {
+                            let word = *x as u64;
+                            let bits = if *y < 0 { usize::MAX } else { *y as usize };
+                            let val = if bits >= 64 { 0 } else { word << bits };
+                            Value::from_u64(val)
+                        }
+                        _ => attempt!(ops::eval_lshl(ra, rb)),
+                    };
+                    set!(dst, res);
+                }
+                Instruction::LShr { dst, a, b } => {
+                    let ra = &reg!(a);
+                    let rb = &reg!(b);
+                    let res = match (ra, rb) {
+                        (Value::Int(x), Value::Int(y)) => {
+                            let word = *x as u64;
+                            let bits = if *y < 0 { usize::MAX } else { *y as usize };
+                            let val = if bits >= 64 { 0 } else { word >> bits };
+                            Value::from_u64(val)
+                        }
+                        _ => attempt!(ops::eval_lshr(ra, rb)),
+                    };
+                    set!(dst, res);
+                }
                 Instruction::Concat { dst, a, b } => {
                     let ra = &reg!(a);
                     let rb = &reg!(b);
@@ -1511,14 +1636,14 @@ impl VM {
                             s.push_str(y);
                             Value::string(s)
                         }
-                        (Value::Table(_), _) | (_, Value::Table(_))
-                            if self.get_binop_metamethod(ra, rb, "__concat").is_some() =>
-                        {
-                            let mm = self.get_binop_metamethod(ra, rb, "__concat").unwrap();
-                            let (va, vb) = (ra.clone(), rb.clone());
-                            sync_ip!();
-                            self.call_binop_mm(mm, va, vb, base, dst)?;
-                            continue;
+                        (Value::Table(_), _) | (_, Value::Table(_)) => {
+                            if let Some(mm) = self.get_binop_metamethod(ra, rb, "__concat") {
+                                let (va, vb) = (ra.clone(), rb.clone());
+                                sync_ip!();
+                                self.call_binop_mm(mm, va, vb, base, dst)?;
+                                continue;
+                            }
+                            Value::string(format!("{}{}", ra, rb))
                         }
                         _ => Value::string(format!("{}{}", ra, rb)),
                     };
@@ -1823,6 +1948,7 @@ impl VM {
                             } else {
                                 Vec::new()
                             };
+                            let same_closure = Rc::ptr_eq(&current_closure, &callee_closure);
                             let new_frame =
                                 CallFrame::with_varargs(callee_closure.clone(), new_base, varargs)
                                     .wanting(want_ret);
@@ -1854,11 +1980,13 @@ impl VM {
                                     .map_err(|e| e.to_string())?;
                                 callee_closure.proto.mark_verified();
                             }
-                            current_closure = callee_closure;
+                            if !same_closure {
+                                current_closure = callee_closure;
+                                code = &current_closure.proto.instructions;
+                                consts = current_closure.proto.values();
+                            }
                             base = new_base;
                             ip = 0;
-                            code = &current_closure.proto.instructions;
-                            consts = current_closure.proto.values();
                             continue;
                         }
                         Value::Native(def) => {
@@ -1961,52 +2089,80 @@ impl VM {
                     // Values move down the stack in order; the source and
                     // destination windows may overlap, which is fine when
                     // copying front to back since caller_dest < ret_start.
-                    for i in 0..wanted {
-                        if i < nret {
-                            let src = &mut self.stack[ret_start + i];
-                            match src {
-                                Value::Int(n) => {
-                                    let val = *n;
-                                    *src = Value::Nil;
-                                    let dest_slot = &mut self.stack[caller_dest + i];
-                                    if let Value::Int(old) = dest_slot {
-                                        *old = val;
-                                    } else {
-                                        *dest_slot = Value::Int(val);
-                                    }
-                                }
-                                Value::Float(f) => {
-                                    let val = *f;
-                                    *src = Value::Nil;
-                                    let dest_slot = &mut self.stack[caller_dest + i];
-                                    if let Value::Float(old) = dest_slot {
-                                        *old = val;
-                                    } else {
-                                        *dest_slot = Value::Float(val);
-                                    }
-                                }
-                                _ => {
-                                    let v = std::mem::replace(src, Value::Nil);
-                                    self.stack[caller_dest + i] = v;
+                    if wanted == 1 && nret == 1 {
+                        let src = &mut self.stack[ret_start];
+                        match src {
+                            Value::Int(n) => {
+                                let val = *n;
+                                let dest_slot = &mut self.stack[caller_dest];
+                                if let Value::Int(old) = dest_slot {
+                                    *old = val;
+                                } else {
+                                    *dest_slot = Value::Int(val);
                                 }
                             }
-                        } else {
-                            self.stack[caller_dest + i] = Value::Nil;
+                            Value::Float(f) => {
+                                let val = *f;
+                                let dest_slot = &mut self.stack[caller_dest];
+                                if let Value::Float(old) = dest_slot {
+                                    *old = val;
+                                } else {
+                                    *dest_slot = Value::Float(val);
+                                }
+                            }
+                            _ => {
+                                let v = std::mem::replace(src, Value::Nil);
+                                self.stack[caller_dest] = v;
+                            }
+                        }
+                    } else {
+                        for i in 0..wanted {
+                            if i < nret {
+                                let src = &mut self.stack[ret_start + i];
+                                match src {
+                                    Value::Int(n) => {
+                                        let val = *n;
+                                        let dest_slot = &mut self.stack[caller_dest + i];
+                                        if let Value::Int(old) = dest_slot {
+                                            *old = val;
+                                        } else {
+                                            *dest_slot = Value::Int(val);
+                                        }
+                                    }
+                                    Value::Float(f) => {
+                                        let val = *f;
+                                        let dest_slot = &mut self.stack[caller_dest + i];
+                                        if let Value::Float(old) = dest_slot {
+                                            *old = val;
+                                        } else {
+                                            *dest_slot = Value::Float(val);
+                                        }
+                                    }
+                                    _ => {
+                                        let v = std::mem::replace(src, Value::Nil);
+                                        self.stack[caller_dest + i] = v;
+                                    }
+                                }
+                            } else {
+                                self.stack[caller_dest + i] = Value::Nil;
+                            }
                         }
                     }
                     if frame.want_ret == MULTRET {
                         self.top = caller_dest + nret;
                     }
                     let caller_frame = self.frames.last().unwrap();
-                    current_closure = caller_frame.closure.clone();
+                    if !Rc::ptr_eq(&current_closure, &caller_frame.closure) {
+                        current_closure = caller_frame.closure.clone();
+                        code = &current_closure.proto.instructions;
+                        consts = current_closure.proto.values();
+                    }
                     base = caller_frame.base;
                     ip = caller_frame.ip;
                     if self.trap != TRAP {
                         sync_ip!();
                         return Ok(None);
                     }
-                    code = &current_closure.proto.instructions;
-                    consts = current_closure.proto.values();
                     continue;
                 }
                 Instruction::Vararg { dst, count } => {
@@ -2163,7 +2319,7 @@ impl VM {
             Value::Int(i) if *i >= 1 && (*i as u64) <= tbl.array.len() as u64 => {
                 tbl.array[*i as usize - 1].clone()
             }
-            Value::String(k) => tbl.fields.get(&**k).cloned().unwrap_or(Value::Nil),
+            Value::String(k) => tbl.fields.get_by_strref(k).cloned().unwrap_or(Value::Nil),
             Value::BigInt(_) => return None,
             other => tbl.raw_get(other),
         };
@@ -2208,7 +2364,7 @@ impl VM {
                 }
             }
             Value::String(k) => {
-                if let Some(slot) = tbl.fields.get_mut(&**k) {
+                if let Some(slot) = tbl.fields.get_mut_by_strref(k) {
                     *slot = val.clone();
                     true
                 } else if tbl.metatable.is_none() {
@@ -2279,7 +2435,7 @@ impl VM {
                 (Value::Table(lib), Value::String(name)) => Ok(lib
                     .borrow()
                     .fields
-                    .get(&**name)
+                    .get_by_strref(name)
                     .cloned()
                     .unwrap_or(Value::Nil)),
                 _ => Ok(Value::Nil),

@@ -204,6 +204,287 @@ pub fn next_entry(table: &VmTable, key: &Value) -> Result<Option<(Value, Value)>
     }))
 }
 
+/// A fast string-keyed map for a table's named fields (`obj.id`, `obj[k]`).
+///
+/// Implemented as an open-addressing hash table with power-of-two capacity and
+/// Knuth backward-shift deletion (zero tombstones). Keys store their precomputed
+/// 64-bit hash, eliminating re-hashing across all lookups, mutations, and table growths.
+#[derive(Clone, Debug)]
+pub struct FieldEntry {
+    pub hash: u64,
+    pub key: StrRef,
+    pub val: Value,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct FieldMap {
+    entries: Vec<Option<FieldEntry>>,
+    count: usize,
+}
+
+impl FieldMap {
+    #[inline]
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            count: 0,
+        }
+    }
+
+    #[inline]
+    pub fn with_capacity(cap: usize) -> Self {
+        if cap == 0 {
+            Self::new()
+        } else {
+            let n = (cap * 4 / 3 + 1).next_power_of_two().max(4);
+            let mut entries = Vec::with_capacity(n);
+            entries.resize_with(n, || None);
+            Self { entries, count: 0 }
+        }
+    }
+
+    #[inline(always)]
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    #[inline(always)]
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    #[inline]
+    pub fn find_index_by_strref(&self, key: &StrRef) -> Option<usize> {
+        if self.count == 0 {
+            return None;
+        }
+        let mask = self.entries.len() - 1;
+        let hash = key.0.hash;
+        let mut idx = (hash as usize) & mask;
+        loop {
+            let entry = self.entries[idx].as_ref()?;
+            if entry.hash == hash
+                && (Rc::ptr_eq(&entry.key.0, &key.0) || entry.key.0.str == key.0.str)
+            {
+                return Some(idx);
+            }
+            idx = (idx + 1) & mask;
+        }
+    }
+
+    #[inline]
+    pub fn find_index(&self, key: &str) -> Option<usize> {
+        if self.count == 0 {
+            return None;
+        }
+        let mask = self.entries.len() - 1;
+        let hash = crate::vm::hash::fx_hash_bytes(key.as_bytes());
+        let mut idx = (hash as usize) & mask;
+        loop {
+            let entry = self.entries[idx].as_ref()?;
+            if entry.hash == hash && entry.key.0.str == key {
+                return Some(idx);
+            }
+            idx = (idx + 1) & mask;
+        }
+    }
+
+    #[inline]
+    pub fn get_by_strref(&self, key: &StrRef) -> Option<&Value> {
+        let idx = self.find_index_by_strref(key)?;
+        self.entries[idx].as_ref().map(|entry| &entry.val)
+    }
+
+    #[inline]
+    pub fn get_mut_by_strref(&mut self, key: &StrRef) -> Option<&mut Value> {
+        let idx = self.find_index_by_strref(key)?;
+        self.entries[idx].as_mut().map(|entry| &mut entry.val)
+    }
+
+    #[inline]
+    pub fn get(&self, key: &str) -> Option<&Value> {
+        let idx = self.find_index(key)?;
+        self.entries[idx].as_ref().map(|entry| &entry.val)
+    }
+
+    #[inline]
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut Value> {
+        let idx = self.find_index(key)?;
+        self.entries[idx].as_mut().map(|entry| &mut entry.val)
+    }
+
+    #[inline]
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.get(key).is_some()
+    }
+
+    pub fn insert(&mut self, key: StrRef, val: Value) -> Option<Value> {
+        if self.entries.is_empty() || (self.count + 1) * 4 > self.entries.len() * 3 {
+            self.grow();
+        }
+        let mask = self.entries.len() - 1;
+        let hash = key.0.hash;
+        let mut idx = (hash as usize) & mask;
+        loop {
+            match &mut self.entries[idx] {
+                None => {
+                    self.entries[idx] = Some(FieldEntry { hash, key, val });
+                    self.count += 1;
+                    return None;
+                }
+                Some(entry) => {
+                    if entry.hash == hash
+                        && (Rc::ptr_eq(&entry.key.0, &key.0) || entry.key.0.str == key.0.str)
+                    {
+                        return Some(std::mem::replace(&mut entry.val, val));
+                    }
+                    idx = (idx + 1) & mask;
+                }
+            }
+        }
+    }
+
+    fn grow(&mut self) {
+        let new_cap = (self.entries.len() * 2).max(4);
+        let mut new_entries = Vec::with_capacity(new_cap);
+        new_entries.resize_with(new_cap, || None);
+        let new_mask = new_cap - 1;
+        for entry in self.entries.drain(..).flatten() {
+            let mut idx = (entry.hash as usize) & new_mask;
+            while new_entries[idx].is_some() {
+                idx = (idx + 1) & new_mask;
+            }
+            new_entries[idx] = Some(entry);
+        }
+        self.entries = new_entries;
+    }
+
+    pub fn remove(&mut self, key: &str) -> Option<Value> {
+        if self.count == 0 {
+            return None;
+        }
+        let mask = self.entries.len() - 1;
+        let hash = crate::vm::hash::fx_hash_bytes(key.as_bytes());
+        let mut idx = (hash as usize) & mask;
+        let found = loop {
+            match &self.entries[idx] {
+                None => return None,
+                Some(entry) if entry.hash == hash && entry.key.0.str == key => {
+                    break idx;
+                }
+                _ => {
+                    idx = (idx + 1) & mask;
+                }
+            }
+        };
+        let removed = self.entries[found].take().map(|e| e.val);
+        self.count -= 1;
+        let mut i = found;
+        let mut j = (found + 1) & mask;
+        while let Some(entry) = &self.entries[j] {
+            let nat = (entry.hash as usize) & mask;
+            let dist_to_nat = (j + mask + 1 - nat) & mask;
+            let dist_to_i = (j + mask + 1 - i) & mask;
+            if dist_to_i <= dist_to_nat {
+                self.entries[i] = self.entries[j].take();
+                i = j;
+            }
+            j = (j + 1) & mask;
+        }
+        removed
+    }
+
+    pub fn remove_by_strref(&mut self, key: &StrRef) -> Option<Value> {
+        if self.count == 0 {
+            return None;
+        }
+        let mask = self.entries.len() - 1;
+        let hash = key.0.hash;
+        let mut idx = (hash as usize) & mask;
+        let found = loop {
+            match &self.entries[idx] {
+                None => return None,
+                Some(entry)
+                    if entry.hash == hash
+                        && (Rc::ptr_eq(&entry.key.0, &key.0) || entry.key.0.str == key.0.str) =>
+                {
+                    break idx;
+                }
+                _ => {
+                    idx = (idx + 1) & mask;
+                }
+            }
+        };
+        let removed = self.entries[found].take().map(|e| e.val);
+        self.count -= 1;
+        let mut i = found;
+        let mut j = (found + 1) & mask;
+        while let Some(entry) = &self.entries[j] {
+            let nat = (entry.hash as usize) & mask;
+            let dist_to_nat = (j + mask + 1 - nat) & mask;
+            let dist_to_i = (j + mask + 1 - i) & mask;
+            if dist_to_i <= dist_to_nat {
+                self.entries[i] = self.entries[j].take();
+                i = j;
+            }
+            j = (j + 1) & mask;
+        }
+        removed
+    }
+
+    #[inline]
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.count = 0;
+    }
+
+    #[inline]
+    pub fn iter(&self) -> impl Iterator<Item = (&StrRef, &Value)> {
+        self.entries
+            .iter()
+            .filter_map(|opt| opt.as_ref().map(|e| (&e.key, &e.val)))
+    }
+
+    #[inline]
+    pub fn values(&self) -> impl Iterator<Item = &Value> {
+        self.entries
+            .iter()
+            .filter_map(|opt| opt.as_ref().map(|e| &e.val))
+    }
+
+    #[inline]
+    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut Value> {
+        self.entries
+            .iter_mut()
+            .filter_map(|opt| opt.as_mut().map(|e| &mut e.val))
+    }
+
+    pub fn retain<F>(&mut self, mut f: F)
+    where
+        F: FnMut(&StrRef, &mut Value) -> bool,
+    {
+        if self.count == 0 {
+            return;
+        }
+        let old_entries = std::mem::take(&mut self.entries);
+        let cap = old_entries.len();
+        self.entries = Vec::with_capacity(cap);
+        self.entries.resize_with(cap, || None);
+        self.count = 0;
+        let mask = cap - 1;
+        for mut entry in old_entries.into_iter().flatten() {
+            if f(&entry.key, &mut entry.val) {
+                let mut idx = (entry.hash as usize) & mask;
+                while self.entries[idx].is_some() {
+                    idx = (idx + 1) & mask;
+                }
+                self.entries[idx] = Some(entry);
+                self.count += 1;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,5 +505,52 @@ mod tests {
         );
         assert!(TableKey::from_value(&Value::Nil).is_err());
         assert!(TableKey::from_value(&Value::Float(f64::NAN)).is_err());
+    }
+
+    #[test]
+    fn test_field_map_crud_and_backward_shift() {
+        let mut map = FieldMap::new();
+        assert!(map.is_empty());
+        assert_eq!(map.len(), 0);
+
+        // Insert keys
+        for i in 0..50 {
+            let key = StrRef::from(format!("field_{i}"));
+            assert!(map.insert(key, Value::Int(i * 10)).is_none());
+        }
+        assert_eq!(map.len(), 50);
+
+        // Read back
+        for i in 0..50 {
+            let key_str = format!("field_{i}");
+            let key = StrRef::from(key_str.clone());
+            assert_eq!(map.get_by_strref(&key), Some(&Value::Int(i * 10)));
+            assert_eq!(map.get(&key_str), Some(&Value::Int(i * 10)));
+        }
+
+        // Overwrite
+        let k0 = StrRef::from("field_0");
+        assert_eq!(map.insert(k0.clone(), Value::Int(999)), Some(Value::Int(0)));
+        assert_eq!(map.get_by_strref(&k0), Some(&Value::Int(999)));
+
+        // Remove every second key
+        for i in (0..50).step_by(2) {
+            let key_str = format!("field_{i}");
+            assert!(map.remove(&key_str).is_some());
+            assert_eq!(map.get(&key_str), None);
+        }
+        assert_eq!(map.len(), 25);
+
+        // Verify remaining odd keys are still reachable
+        for i in (1..50).step_by(2) {
+            let key_str = format!("field_{i}");
+            let key = StrRef::from(key_str.clone());
+            assert_eq!(map.get_by_strref(&key), Some(&Value::Int(i * 10)));
+        }
+
+        // Clear
+        map.clear();
+        assert!(map.is_empty());
+        assert_eq!(map.len(), 0);
     }
 }

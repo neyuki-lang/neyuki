@@ -1,6 +1,7 @@
 //! Micro-benchmarks for `neyuki bench`: the front end, the VM and the libraries.
 
-use crate::compiler::{compile_source, compile_to_proto};
+use crate::bytecode::Proto;
+use crate::compiler::{compile_source, try_compile_to_proto};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::vm::machine::VM;
@@ -26,6 +27,16 @@ impl BenchResult {
 }
 
 fn measure<F: FnMut()>(name: &'static str, iterations: usize, mut f: F) -> BenchResult {
+    if iterations == 0 {
+        return BenchResult {
+            name,
+            iterations: 0,
+            total_duration: Duration::ZERO,
+            avg_per_op: Duration::ZERO,
+            ops_per_sec: 0.0,
+        };
+    }
+
     // Warmup
     f();
 
@@ -51,11 +62,38 @@ fn measure<F: FnMut()>(name: &'static str, iterations: usize, mut f: F) -> Bench
     }
 }
 
+fn prepare_proto(code: &str) -> Result<Proto, String> {
+    let stmts = compile_source(code)?;
+    try_compile_to_proto(&stmts)
+}
+
+fn bench_vm_script(name: &'static str, iterations: usize, code: &str) -> BenchResult {
+    let proto = match prepare_proto(code) {
+        Ok(proto) => proto,
+        Err(err) => {
+            eprintln!("Benchmark '{name}' compile error: {err}");
+            return BenchResult {
+                name,
+                iterations: 0,
+                total_duration: Duration::ZERO,
+                avg_per_op: Duration::ZERO,
+                ops_per_sec: 0.0,
+            };
+        }
+    };
+    measure(name, iterations, || {
+        let mut vm = VM::new();
+        if let Err(err) = vm.execute(proto.clone()) {
+            eprintln!("Benchmark '{name}' runtime error: {err}");
+        }
+    })
+}
+
 fn run_vm_code(code: &str) {
-    let stmts = compile_source(code).expect("syntax error in benchmark code");
-    let proto = compile_to_proto(&stmts);
-    let mut vm = VM::new();
-    let _ = vm.execute(proto.clone());
+    if let Ok(proto) = prepare_proto(code) {
+        let mut vm = VM::new();
+        let _ = vm.execute(proto);
+    }
 }
 
 // 1. Lexer Benchmark
@@ -107,9 +145,21 @@ pub fn bench_compiler() -> BenchResult {
         end
         return calc(100)
     "#;
-    let stmts = compile_source(source).expect("parse error");
+    let stmts = match compile_source(source) {
+        Ok(stmts) => stmts,
+        Err(err) => {
+            eprintln!("Benchmark '3. Bytecode Compiler & Folding' AST error: {err}");
+            return BenchResult {
+                name: "3. Bytecode Compiler & Folding",
+                iterations: 0,
+                total_duration: Duration::ZERO,
+                avg_per_op: Duration::ZERO,
+                ops_per_sec: 0.0,
+            };
+        }
+    };
     measure("3. Bytecode Compiler & Folding", 1_000, || {
-        let _ = compile_to_proto(&stmts);
+        let _ = try_compile_to_proto(&stmts);
     })
 }
 
@@ -124,15 +174,10 @@ pub fn bench_arithmetic() -> BenchResult {
         end
         return sum
     "#;
-    let stmts = compile_source(code).unwrap();
-    let proto = compile_to_proto(&stmts);
-    measure("4. VM Arithmetic & Loop", 100, || {
-        let mut vm = VM::new();
-        let _ = vm.execute(proto.clone());
-    })
+    bench_vm_script("4. VM Arithmetic & Loop", 100, code)
 }
 
-// 5. VM Fibonacci Benchmark
+// 5. VM Fibonacci Benchmark (Iterative)
 pub fn bench_fibonacci() -> BenchResult {
     let code = r#"
         local a = 0
@@ -146,12 +191,7 @@ pub fn bench_fibonacci() -> BenchResult {
         end
         return b
     "#;
-    let stmts = compile_source(code).unwrap();
-    let proto = compile_to_proto(&stmts);
-    measure("5. VM Fibonacci (1000 iters)", 200, || {
-        let mut vm = VM::new();
-        let _ = vm.execute(proto.clone());
-    })
+    bench_vm_script("5. VM Fibonacci (Iterative)", 200, code)
 }
 
 // 6. VM Table Benchmark (Creation, Hash Lookups, Array Insertions)
@@ -168,12 +208,7 @@ pub fn bench_tables() -> BenchResult {
         end
         return acc
     "#;
-    let stmts = compile_source(code).unwrap();
-    let proto = compile_to_proto(&stmts);
-    measure("6. VM Table Operations", 50, || {
-        let mut vm = VM::new();
-        let _ = vm.execute(proto.clone());
-    })
+    bench_vm_script("6. VM Table Operations", 50, code)
 }
 
 // 7. VM String Operations Benchmark (Concatenation, Sub, Formatting)
@@ -188,12 +223,7 @@ pub fn bench_strings() -> BenchResult {
         end
         return out
     "#;
-    let stmts = compile_source(code).unwrap();
-    let proto = compile_to_proto(&stmts);
-    measure("7. VM String Lib Operations", 50, || {
-        let mut vm = VM::new();
-        let _ = vm.execute(proto.clone());
-    })
+    bench_vm_script("7. VM String Lib Operations", 50, code)
 }
 
 // 8. VM Coroutine Benchmark (Create, Yield, Resume throughput)
@@ -214,12 +244,7 @@ pub fn bench_coroutines() -> BenchResult {
         end
         return sum
     "#;
-    let stmts = compile_source(code).unwrap();
-    let proto = compile_to_proto(&stmts);
-    measure("8. VM Coroutines (1000 cycles)", 50, || {
-        let mut vm = VM::new();
-        let _ = vm.execute(proto.clone());
-    })
+    bench_vm_script("8. VM Coroutines (1000 cycles)", 50, code)
 }
 
 // 9. VM Garbage Collection Benchmark (Cyclic reference collection)
@@ -233,12 +258,7 @@ pub fn bench_gc() -> BenchResult {
         end
         collectgarbage("collect")
     "#;
-    let stmts = compile_source(code).unwrap();
-    let proto = compile_to_proto(&stmts);
-    measure("9. VM Cyclic Garbage Collector", 50, || {
-        let mut vm = VM::new();
-        let _ = vm.execute(proto.clone());
-    })
+    bench_vm_script("9. VM Cyclic Garbage Collector", 50, code)
 }
 
 // 10. Crypto SHA-256 Hashing Benchmark
@@ -250,12 +270,7 @@ pub fn bench_crypto() -> BenchResult {
             local h = crypto.hash(data, "sha256")
         end
     "#;
-    let stmts = compile_source(code).unwrap();
-    let proto = compile_to_proto(&stmts);
-    measure("10. VM Crypto SHA-256 (100x)", 50, || {
-        let mut vm = VM::new();
-        let _ = vm.execute(proto.clone());
-    })
+    bench_vm_script("10. VM Crypto SHA-256 (100x)", 50, code)
 }
 
 // 11. Buffer Operations Benchmark (Raw memory read/write & copy)
@@ -272,12 +287,7 @@ pub fn bench_buffer() -> BenchResult {
         end
         return buffer.readu32(b2, 0)
     "#;
-    let stmts = compile_source(code).unwrap();
-    let proto = compile_to_proto(&stmts);
-    measure("11. VM Buffer Raw Memory Ops", 100, || {
-        let mut vm = VM::new();
-        let _ = vm.execute(proto.clone());
-    })
+    bench_vm_script("11. VM Buffer Raw Memory Ops", 100, code)
 }
 
 // 12. JSON Serialization & Deserialization Benchmark
@@ -299,12 +309,7 @@ pub fn bench_json() -> BenchResult {
             local decoded = json.decode(encoded)
         end
     "#;
-    let stmts = compile_source(code).unwrap();
-    let proto = compile_to_proto(&stmts);
-    measure("12. VM JSON Encode/Decode", 50, || {
-        let mut vm = VM::new();
-        let _ = vm.execute(proto.clone());
-    })
+    bench_vm_script("12. VM JSON Encode/Decode", 50, code)
 }
 
 // 13. VM End-to-End Pipeline Benchmark (Lex, Parse, Compile & Execute)
@@ -319,6 +324,112 @@ pub fn bench_end_to_end() -> BenchResult {
     measure("13. VM End-to-End Pipeline", 200, || {
         run_vm_code(code);
     })
+}
+
+// 14. VM Recursive Fibonacci Benchmark (Call stack frames, function dispatch, tree recursion)
+pub fn bench_fibonacci_recursive() -> BenchResult {
+    let code = r#"
+        const function fibonacci(n: int): int
+            if n <= 1 then
+                return n
+            end
+            return fibonacci(n - 1) + fibonacci(n - 2)
+        end
+        return fibonacci(18)
+    "#;
+    bench_vm_script("14. VM Recursive Fibonacci", 50, code)
+}
+
+// 15. VM BigInt Arithmetic & Widening Benchmark (Multi-limb ops, dynamic widening, pow, shifts, div/mod)
+pub fn bench_bigint() -> BenchResult {
+    let code = r#"
+        local base = 2^100
+        local factor = 3^60
+        local sum = 0
+        for i = 1, 1000 do
+            local widened = (1 << (60 + (i % 6))) * (i + 1)
+            local product = (base + widened) * (factor - i)
+            local quotient = product // (base >> 20)
+            sum = sum + (quotient % 1000000007)
+            base = base + (quotient >> 15)
+        end
+        return sum
+    "#;
+    bench_vm_script("15. VM BigInt Operations", 50, code)
+}
+
+// 16. VM Table Lookup Throughput Benchmark (Balanced array indexing, named fields, dynamic keys, nested accesses)
+pub fn bench_table_lookup() -> BenchResult {
+    let code = r#"
+        local arr = {}
+        for i = 1, 1000 do
+            arr[i] = i * 7
+        end
+
+        local obj = {
+            id = 1001,
+            name = 2002,
+            score = 3003,
+            status = 4004,
+            count = 5005,
+            weight = 6006,
+            tag = 7007,
+            level = 8008,
+            role = 9009,
+            priority = 1010,
+            nested = {
+                a = 11,
+                b = 22,
+                c = 33,
+                d = 44,
+                inner = { x = 100, y = 200 }
+            }
+        }
+
+        local keys = { "id", "name", "score", "status", "count", "weight", "tag", "level", "role", "priority" }
+
+        local sum = 0
+        for _ = 1, 200 do
+            for j = 1, 10 do
+                sum = sum + arr[j * 99]
+            end
+            sum = sum + obj.id + obj.name + obj.score + obj.status + obj.count
+            sum = sum + obj.weight + obj.tag + obj.level + obj.role + obj.priority
+            for _, k in keys do
+                sum = sum + obj[k]
+            end
+            sum = sum + obj.nested.a + obj.nested.b + obj.nested.c + obj.nested.d
+            sum = sum + obj.nested.inner.x + obj.nested.inner.y
+        end
+        return sum
+    "#;
+    bench_vm_script("16. VM Table Lookup Throughput", 50, code)
+}
+
+// 17. VM GC Allocation Pressure Benchmark (Nursery churn, live retention, threshold triggers, cycle sweep)
+pub fn bench_gc_pressure() -> BenchResult {
+    let code = r#"
+        local keep = {}
+        for i = 1, 15000 do
+            local obj = {
+                id = i,
+                data = { val = i * 3, extra = i + 10 },
+                tags = { i, i * 2, i * 3 }
+            }
+            if i % 4 == 0 then
+                keep[#keep + 1] = obj
+            end
+        end
+
+        local sum = 0
+        for _, item in keep do
+            sum = sum + item.id + item.data.val + item.tags[2]
+        end
+
+        collectgarbage("collect")
+        return sum
+    "#;
+    bench_vm_script("17. VM GC Allocation Pressure", 30, code)
 }
 
 // Run the full benchmark suite and display formatted results
@@ -354,6 +465,10 @@ pub fn run_all_benchmarks() {
         bench_buffer(),
         bench_json(),
         bench_end_to_end(),
+        bench_fibonacci_recursive(),
+        bench_bigint(),
+        bench_table_lookup(),
+        bench_gc_pressure(),
     ];
 
     for res in &results {
@@ -369,6 +484,7 @@ pub fn run_all_benchmarks() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vm::value::Value;
 
     #[test]
     fn test_benchmarks_smoke() {
@@ -386,5 +502,103 @@ mod tests {
         assert!(bench_buffer().ops_per_sec > 0.0);
         assert!(bench_json().ops_per_sec > 0.0);
         assert!(bench_end_to_end().ops_per_sec > 0.0);
+        assert!(bench_fibonacci_recursive().ops_per_sec > 0.0);
+        assert!(bench_bigint().ops_per_sec > 0.0);
+        assert!(bench_table_lookup().ops_per_sec > 0.0);
+        assert!(bench_gc_pressure().ops_per_sec > 0.0);
+    }
+
+    #[test]
+    fn test_new_benchmarks_correctness() -> Result<(), String> {
+        let run = |code: &str| -> Result<Value, String> {
+            let proto = prepare_proto(code)?;
+            let mut vm = VM::new();
+            vm.execute(proto)
+        };
+
+        // 14. Recursive Fibonacci: fib(18) == 2584
+        let fib_code = r#"
+            const function fibonacci(n: int): int
+                if n <= 1 then
+                    return n
+                end
+                return fibonacci(n - 1) + fibonacci(n - 2)
+            end
+            return fibonacci(18)
+        "#;
+        assert_eq!(run(fib_code)?, Value::Int(2584));
+
+        // 15. BigInt: dynamic widening and multi-limb arithmetic
+        let bigint_code = r#"
+            local base = 2^100
+            local factor = 3^60
+            local sum = 0
+            for i = 1, 10 do
+                local widened = (1 << (60 + (i % 6))) * (i + 1)
+                local product = (base + widened) * (factor - i)
+                local quotient = product // (base >> 20)
+                sum = sum + (quotient % 1000000007)
+                base = base + (quotient >> 15)
+            end
+            return sum
+        "#;
+        match run(bigint_code)? {
+            Value::Int(v) => assert!(v > 0),
+            Value::BigInt(_) => {}
+            other => return Err(format!("expected int or bigint, got {:?}", other)),
+        }
+
+        // 16. Table lookup throughput: array, named fields, dynamic keys, nested accesses
+        let table_code = r#"
+            local arr = {}
+            for i = 1, 100 do arr[i] = i * 7 end
+            local obj = {
+                id = 1001, name = 2002, score = 3003, status = 4004, count = 5005,
+                weight = 6006, tag = 7007, level = 8008, role = 9009, priority = 1010,
+                nested = { a = 11, b = 22, c = 33, d = 44, inner = { x = 100, y = 200 } }
+            }
+            local keys = { "id", "name", "score", "status", "count", "weight", "tag", "level", "role", "priority" }
+            local sum = 0
+            for _ = 1, 5 do
+                for j = 1, 10 do sum = sum + arr[j * 9] end
+                sum = sum + obj.id + obj.name + obj.score + obj.status + obj.count
+                sum = sum + obj.weight + obj.tag + obj.level + obj.role + obj.priority
+                for _, k in keys do sum = sum + obj[k] end
+                sum = sum + obj.nested.a + obj.nested.b + obj.nested.c + obj.nested.d
+                sum = sum + obj.nested.inner.x + obj.nested.inner.y
+            end
+            return sum
+        "#;
+        match run(table_code)? {
+            Value::Int(v) => assert!(v > 0),
+            other => return Err(format!("expected int, got {:?}", other)),
+        }
+
+        // 17. GC allocation pressure: live retention and cycle sweep
+        let gc_code = r#"
+            local keep = {}
+            for i = 1, 100 do
+                local obj = {
+                    id = i,
+                    data = { val = i * 3, extra = i + 10 },
+                    tags = { i, i * 2, i * 3 }
+                }
+                if i % 4 == 0 then
+                    keep[#keep + 1] = obj
+                end
+            end
+            local sum = 0
+            for _, item in keep do
+                sum = sum + item.id + item.data.val + item.tags[2]
+            end
+            collectgarbage("collect")
+            return sum
+        "#;
+        match run(gc_code)? {
+            Value::Int(v) => assert!(v > 0),
+            other => return Err(format!("expected int, got {:?}", other)),
+        }
+
+        Ok(())
     }
 }

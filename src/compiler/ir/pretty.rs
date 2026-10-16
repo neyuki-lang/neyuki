@@ -92,7 +92,20 @@ pub fn format_inst(inst: &IrInst) -> String {
         IrInst::UnOp { dst, op, src } => {
             format!("v{} = {}v{}", dst.0, format_unop(*op), src.0)
         }
-        IrInst::NewTable { dst } => format!("v{} = new_table()", dst.0),
+        IrInst::NewTable {
+            dst,
+            array_cap,
+            fields_cap,
+        } => {
+            if *array_cap == 0 && *fields_cap == 0 {
+                format!("v{} = new_table()", dst.0)
+            } else {
+                format!(
+                    "v{} = new_table(arr={}, fields={})",
+                    dst.0, array_cap, fields_cap
+                )
+            }
+        }
         IrInst::Line(n) => format!("; line {}", n),
         IrInst::DebugLocal { name, var } => format!("; local {} = v{}", name, var.0),
         IrInst::DebugScopeEnd { vars, .. } => format!(

@@ -401,30 +401,34 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
         }
     }
 
-    let mut skip_next = false;
+    let mut skipped_indices: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut line = 1u32;
     // Locals whose scope is still open: their variable and debug-info entry.
     let mut open_locals: Vec<(IrVar, usize)> = Vec::new();
     for (index, inst) in func.instructions.iter().enumerate() {
-        if skip_next {
-            skip_next = false;
+        if skipped_indices.contains(&index) {
             continue;
         }
         let first_new = proto.instructions.len();
-        let next = func.instructions.get(index + 1);
+        let next_non_debug = func.instructions[index + 1..]
+            .iter()
+            .enumerate()
+            .find(|(_, i)| !i.is_debug_marker())
+            .map(|(offset, i)| (index + 1 + offset, i));
 
         // `t = <expr>; v = t` with `t` used nowhere else writes `v` directly.
         // Only instructions that may place their result in any register
         // qualify; a call's results land in its window and must be moved.
         if places_freely(inst)
-            && let Some(IrInst::Move { dst: v, src: t }) = next
+            && let Some((next_idx, IrInst::Move { dst: v, src: t })) = next_non_debug
             && v != t
             && inst.def_var() == Some(*t)
             && single_use(*t)
+            && !inst.use_vars().contains(v)
         {
             let rv = regs.get(*v, &mut proto);
             regs.bind(*t, rv, &mut proto);
-            skip_next = true;
+            skipped_indices.insert(next_idx);
         }
 
         match inst {
@@ -468,7 +472,9 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
             IrInst::Move { dst, src } => {
                 let rd = regs.get(*dst, &mut proto);
                 let rs = regs.get(*src, &mut proto);
-                proto.emit(Instruction::Move { dst: rd, src: rs }, 1);
+                if rd != rs {
+                    proto.emit(Instruction::Move { dst: rd, src: rs }, 1);
+                }
             }
             IrInst::BinOp { dst, op, lhs, rhs } => {
                 let rd = regs.get(*dst, &mut proto);
@@ -484,13 +490,14 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
                         // A comparison whose only reader is the branch right
                         // after it becomes that branch: the VM's comparison
                         // instructions already jump when the test fails.
-                        if let Some(IrInst::JumpIfFalse { cond, target }) = next
+                        if let Some((next_idx, IrInst::JumpIfFalse { cond, target })) =
+                            next_non_debug
                             && cond == dst
                             && single_use(*dst)
                         {
                             let ip = proto.emit(compare_instruction(*op, ra, rb), 1);
                             jump_patches.push((ip, *target));
-                            skip_next = true;
+                            skipped_indices.insert(next_idx);
                             continue;
                         }
                         let false_jump = match op {
@@ -682,9 +689,20 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
                 };
                 proto.emit(inst, 1);
             }
-            IrInst::NewTable { dst } => {
+            IrInst::NewTable {
+                dst,
+                array_cap,
+                fields_cap,
+            } => {
                 let rd = regs.get(*dst, &mut proto);
-                proto.emit(Instruction::NewTable { dst: rd }, 1);
+                proto.emit(
+                    Instruction::NewTable {
+                        dst: rd,
+                        array_cap: *array_cap,
+                        fields_cap: *fields_cap,
+                    },
+                    1,
+                );
             }
             IrInst::GetTable { dst, table, key } if const_keys.contains_key(key) => {
                 let rd = regs.get(*dst, &mut proto);
@@ -1123,6 +1141,102 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
                 Instruction::ForPrep { jump: o, .. } => *o = offset,
                 Instruction::ForLoop { jump: o, .. } => *o = offset,
                 Instruction::TForLoop { jump: o, .. } => *o = offset,
+                _ => {}
+            }
+        }
+    }
+
+    // Jump threading: shortcut any jump that lands directly on an unconditional Jump instruction
+    let num_insts = proto.instructions.len();
+    for ip in 0..num_insts {
+        let current_target = match proto.instructions[ip] {
+            Instruction::Jump { offset }
+            | Instruction::Test {
+                jump_if_false: offset,
+                ..
+            }
+            | Instruction::Eq {
+                jump_if_false: offset,
+                ..
+            }
+            | Instruction::Ne {
+                jump_if_false: offset,
+                ..
+            }
+            | Instruction::Lt {
+                jump_if_false: offset,
+                ..
+            }
+            | Instruction::Le {
+                jump_if_false: offset,
+                ..
+            }
+            | Instruction::Gt {
+                jump_if_false: offset,
+                ..
+            }
+            | Instruction::Ge {
+                jump_if_false: offset,
+                ..
+            } => {
+                let t = ip as isize + 1 + offset as isize;
+                if t >= 0 && (t as usize) < num_insts {
+                    t as usize
+                } else {
+                    continue;
+                }
+            }
+            _ => continue,
+        };
+
+        let mut target = current_target;
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(ip);
+        while visited.insert(target) && target < num_insts {
+            if let Instruction::Jump { offset } = proto.instructions[target] {
+                let next = target as isize + 1 + offset as isize;
+                if next >= 0 && (next as usize) < num_insts {
+                    target = next as usize;
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        if target != current_target {
+            let new_offset = (target as isize - (ip as isize + 1)) as i16;
+            match &mut proto.instructions[ip] {
+                Instruction::Jump { offset }
+                | Instruction::Test {
+                    jump_if_false: offset,
+                    ..
+                }
+                | Instruction::Eq {
+                    jump_if_false: offset,
+                    ..
+                }
+                | Instruction::Ne {
+                    jump_if_false: offset,
+                    ..
+                }
+                | Instruction::Lt {
+                    jump_if_false: offset,
+                    ..
+                }
+                | Instruction::Le {
+                    jump_if_false: offset,
+                    ..
+                }
+                | Instruction::Gt {
+                    jump_if_false: offset,
+                    ..
+                }
+                | Instruction::Ge {
+                    jump_if_false: offset,
+                    ..
+                } => *offset = new_offset,
                 _ => {}
             }
         }
