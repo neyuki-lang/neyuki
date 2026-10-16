@@ -1,19 +1,17 @@
 //! Source code formatter for Neyuki (`neyuki fmt`).
 //!
-//! # Architecture and Limitations
+//! # Architecture
 //!
-//! The formatter currently operates using a line-oriented indentation engine with
-//! block tracking. It preserves raw multiline strings (`[=*[...]=*]`) and multiline
-//! comments (`--[=*[...]=*]`) verbatim.
-//!
-//! ## Current Limitations:
-//! - Multi-line statement headers (e.g., an `if` condition whose `then` appears on a
-//!   later line, or a `for` header whose `do` appears on a later line) are formatted
-//!   based on line heuristics rather than a full token/AST-driven layout engine.
-//! - Whitespace inside single-line expressions is preserved to protect custom tabular
-//!   alignments.
-//! - Any formatted output is verified against the compiler parser to ensure that the
-//!   resulting Abstract Syntax Tree (AST) is strictly identical to the input.
+//! The formatter operates using a stateful line-and-block indentation engine:
+//! - Handles nested blocks (`function`, `if`/`elseif`/`else`, `for`, `while`,
+//!   `do`, `repeat`/`until`, `enum`, `match`/`case`/`default`).
+//! - Tracks multi-line statement headers (`if` conditions spanning lines until `then`,
+//!   `for`/`while` headers spanning lines until `do`) with continuation indentation.
+//! - Tracks multi-line delimiter pairs (`( )`, `[ ]`, `{ }`).
+//! - Preserves raw multiline strings (`[=*[...]=*]`) and multiline comments (`--[=*[...]=*]`) verbatim.
+//! - Whitespace inside single-line expressions is preserved to protect custom tabular alignments.
+//! - Every formatting operation verifies that the token stream (`kind` and `value`) and
+//!   parsed syntax are 100% identical to the original source.
 
 use std::fs;
 use std::path::Path;
@@ -22,6 +20,10 @@ use std::path::Path;
 enum BlockKind {
     Match { has_case: bool },
     Normal,
+    PendingIf,
+    PendingLoop,
+    Paren,
+    Bracket,
 }
 
 /// Checks whether a line starts with a specific keyword at a word boundary.
@@ -130,7 +132,29 @@ pub fn format_source(source: &str) -> Result<String, String> {
                 indent_level += 1;
             }
         } else {
-            // Check closing keywords first
+            // 1. Check if this line satisfies any pending headers (then / do)
+            if has_word(&stripped, "then")
+                && let Some(BlockKind::PendingIf) = block_stack.last()
+            {
+                block_stack.pop();
+                if !has_word(&stripped, "end") {
+                    block_stack.push(BlockKind::Normal);
+                } else {
+                    indent_level = indent_level.saturating_sub(1);
+                }
+            }
+            if has_word(&stripped, "do")
+                && let Some(BlockKind::PendingLoop) = block_stack.last()
+            {
+                block_stack.pop();
+                if !has_word(&stripped, "end") {
+                    block_stack.push(BlockKind::Normal);
+                } else {
+                    indent_level = indent_level.saturating_sub(1);
+                }
+            }
+
+            // 2. Check closing keywords
             if starts_with_keyword(trimmed, "end") {
                 if let Some(top) = block_stack.pop() {
                     match top {
@@ -147,35 +171,56 @@ pub fn format_source(source: &str) -> Result<String, String> {
                 indent_level = indent_level.saturating_sub(1);
             }
 
-            let opens_normal_block = (has_word(&stripped, "function")
-                && !has_word(&stripped, "end"))
-                || (has_word(&stripped, "if")
-                    && !has_word(&stripped, "elseif")
-                    && has_word(&stripped, "then")
-                    && !has_word(&stripped, "end"))
-                || (has_word(&stripped, "for")
-                    && has_word(&stripped, "do")
-                    && !has_word(&stripped, "end"))
-                || (has_word(&stripped, "while")
-                    && has_word(&stripped, "do")
-                    && !has_word(&stripped, "end"))
-                || (starts_with_keyword(trimmed, "do") && !has_word(&stripped, "end"))
-                || (starts_with_keyword(trimmed, "repeat") && !has_word(&stripped, "until"))
-                || (starts_with_keyword(trimmed, "enum") && !has_word(&stripped, "end"));
+            // 3. Check for starting multi-line headers
+            let is_if_start = starts_with_keyword(trimmed, "if")
+                || (starts_with_keyword(trimmed, "elseif") && !has_word(&stripped, "then"));
+            let is_loop_start = (starts_with_keyword(trimmed, "for")
+                || starts_with_keyword(trimmed, "while"))
+                && !has_word(&stripped, "do");
 
-            let is_match_block = starts_with_keyword(trimmed, "match")
-                && !trimmed["match".len()..].trim_start().starts_with('=')
-                && !has_word(&stripped, "end");
+            if is_if_start && !has_word(&stripped, "then") {
+                if starts_with_keyword(trimmed, "elseif")
+                    && let Some(BlockKind::Normal) = block_stack.last()
+                {
+                    block_stack.pop();
+                }
+                block_stack.push(BlockKind::PendingIf);
+                indent_level += 1;
+            } else if is_loop_start {
+                block_stack.push(BlockKind::PendingLoop);
+                indent_level += 1;
+            } else {
+                let opens_normal_block = (has_word(&stripped, "function")
+                    && !has_word(&stripped, "end"))
+                    || (has_word(&stripped, "if")
+                        && !has_word(&stripped, "elseif")
+                        && has_word(&stripped, "then")
+                        && !has_word(&stripped, "end"))
+                    || (has_word(&stripped, "for")
+                        && has_word(&stripped, "do")
+                        && !has_word(&stripped, "end"))
+                    || (has_word(&stripped, "while")
+                        && has_word(&stripped, "do")
+                        && !has_word(&stripped, "end"))
+                    || (starts_with_keyword(trimmed, "do") && !has_word(&stripped, "end"))
+                    || (starts_with_keyword(trimmed, "repeat") && !has_word(&stripped, "until"))
+                    || (starts_with_keyword(trimmed, "enum") && !has_word(&stripped, "end"));
 
-            if is_match_block {
-                block_stack.push(BlockKind::Match { has_case: false });
-                indent_level += 1;
-            } else if opens_normal_block {
-                block_stack.push(BlockKind::Normal);
-                indent_level += 1;
+                let is_match_block = starts_with_keyword(trimmed, "match")
+                    && !trimmed["match".len()..].trim_start().starts_with('=')
+                    && !has_word(&stripped, "end");
+
+                if is_match_block {
+                    block_stack.push(BlockKind::Match { has_case: false });
+                    indent_level += 1;
+                } else if opens_normal_block {
+                    block_stack.push(BlockKind::Normal);
+                    indent_level += 1;
+                }
             }
 
-            // Braces inside stripped code (safe from strings & comments)
+            // Delimiters inside stripped code (safe from strings & comments)
+            // Braces {}
             let open_braces = stripped.chars().filter(|&c| c == '{').count();
             let close_braces = stripped.chars().filter(|&c| c == '}').count();
             if open_braces > close_braces {
@@ -187,6 +232,40 @@ pub fn format_source(source: &str) -> Result<String, String> {
                 for _ in 0..(close_braces - open_braces) {
                     block_stack.pop();
                     indent_level = indent_level.saturating_sub(1);
+                }
+            }
+
+            // Parens ()
+            let open_parens = stripped.chars().filter(|&c| c == '(').count();
+            let close_parens = stripped.chars().filter(|&c| c == ')').count();
+            if open_parens > close_parens {
+                for _ in 0..(open_parens - close_parens) {
+                    block_stack.push(BlockKind::Paren);
+                    indent_level += 1;
+                }
+            } else if close_parens > open_parens {
+                for _ in 0..(close_parens - open_parens) {
+                    if let Some(BlockKind::Paren) = block_stack.last() {
+                        block_stack.pop();
+                        indent_level = indent_level.saturating_sub(1);
+                    }
+                }
+            }
+
+            // Brackets []
+            let open_brackets = stripped.chars().filter(|&c| c == '[').count();
+            let close_brackets = stripped.chars().filter(|&c| c == ']').count();
+            if open_brackets > close_brackets {
+                for _ in 0..(open_brackets - close_brackets) {
+                    block_stack.push(BlockKind::Bracket);
+                    indent_level += 1;
+                }
+            } else if close_brackets > open_brackets {
+                for _ in 0..(close_brackets - open_brackets) {
+                    if let Some(BlockKind::Bracket) = block_stack.last() {
+                        block_stack.pop();
+                        indent_level = indent_level.saturating_sub(1);
+                    }
                 }
             }
         }
@@ -508,5 +587,29 @@ mod tests {
         let input = "local x = 1 --[[\n    first comment line\n    second comment line\n]]\nlocal y = 2 --[==[\n    comment with ]] inside\n]==]\nlocal z = 3\n";
         let formatted = format_source(input).unwrap();
         assert_eq!(formatted, input);
+    }
+
+    #[test]
+    fn test_format_source_multiline_if_header() {
+        let input = "if cond1\nand cond2 then\nprint(\"ok\")\nend\n";
+        let formatted = format_source(input).unwrap();
+        let expected = "if cond1\n    and cond2 then\n    print(\"ok\")\nend\n";
+        assert_eq!(formatted, expected);
+    }
+
+    #[test]
+    fn test_format_source_multiline_for_header() {
+        let input = "for k, v in\npairs(t) do\nprint(k, v)\nend\n";
+        let formatted = format_source(input).unwrap();
+        let expected = "for k, v in\n    pairs(t) do\n    print(k, v)\nend\n";
+        assert_eq!(formatted, expected);
+    }
+
+    #[test]
+    fn test_format_source_multiline_parens() {
+        let input = "local res = call(\narg1,\narg2\n)\n";
+        let formatted = format_source(input).unwrap();
+        let expected = "local res = call(\n    arg1,\n    arg2\n)\n";
+        assert_eq!(formatted, expected);
     }
 }
