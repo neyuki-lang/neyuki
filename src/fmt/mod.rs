@@ -1,4 +1,19 @@
 //! Source code formatter for Neyuki (`neyuki fmt`).
+//!
+//! # Architecture and Limitations
+//!
+//! The formatter currently operates using a line-oriented indentation engine with
+//! block tracking. It preserves raw multiline strings (`[=*[...]=*]`) and multiline
+//! comments (`--[=*[...]=*]`) verbatim.
+//!
+//! ## Current Limitations:
+//! - Multi-line statement headers (e.g., an `if` condition whose `then` appears on a
+//!   later line, or a `for` header whose `do` appears on a later line) are formatted
+//!   based on line heuristics rather than a full token/AST-driven layout engine.
+//! - Whitespace inside single-line expressions is preserved to protect custom tabular
+//!   alignments.
+//! - Any formatted output is verified against the compiler parser to ensure that the
+//!   resulting Abstract Syntax Tree (AST) is strictly identical to the input.
 
 use std::fs;
 use std::path::Path;
@@ -9,61 +24,40 @@ enum BlockKind {
     Normal,
 }
 
+/// Checks whether a line starts with a specific keyword at a word boundary.
+fn starts_with_keyword(line: &str, kw: &str) -> bool {
+    if !line.starts_with(kw) {
+        return false;
+    }
+    let rest = &line[kw.len()..];
+    rest.is_empty() || !rest.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+}
+
 /// Formats a Neyuki source string.
 pub fn format_source(source: &str) -> Result<String, String> {
     // 1. Verify syntax before attempting to format
-    if let Err(err) = crate::compiler::parse(source) {
-        return Err(format!("cannot format invalid source: {}", err));
-    }
+    crate::compiler::parse(source)
+        .map_err(|err| format!("cannot format invalid source: {}", err))?;
 
     let mut out = String::new();
     let mut prev_was_empty = false;
-    let mut in_long_comment = false;
-    let mut raw_string_closer: Option<String> = None;
+    let mut multiline_closer: Option<String> = None;
     let mut block_stack: Vec<BlockKind> = Vec::new();
     let mut indent_level: usize = 0;
 
     for line in source.lines() {
-        // If inside a raw string, preserve verbatim
-        if let Some(ref closer) = raw_string_closer {
+        // If inside a multiline raw string or long comment, preserve verbatim
+        if let Some(ref closer) = multiline_closer {
             out.push_str(line);
             out.push('\n');
-            if line.contains(closer) {
-                raw_string_closer = None;
-            }
-            continue;
-        }
-
-        // If inside a long comment, preserve verbatim
-        if in_long_comment {
-            out.push_str(line);
-            out.push('\n');
-            if line.contains("]]") {
-                in_long_comment = false;
+            if let Some(pos) = line.find(closer) {
+                let after = &line[pos + closer.len()..];
+                multiline_closer = find_unclosed_multiline(after);
             }
             continue;
         }
 
         let trimmed = line.trim();
-
-        // Check if starting a long comment
-        if trimmed.starts_with("--[[") {
-            in_long_comment = true;
-            out.push_str(line);
-            out.push('\n');
-            if trimmed.contains("]]") && trimmed.find("]]") != trimmed.find("--[[") {
-                in_long_comment = false;
-            }
-            continue;
-        }
-
-        // Check if starting a raw string that doesn't close on this line
-        if let Some(closer) = find_unclosed_raw_string(trimmed) {
-            raw_string_closer = Some(closer);
-            out.push_str(line);
-            out.push('\n');
-            continue;
-        }
 
         if trimmed.is_empty() {
             if !prev_was_empty && !out.is_empty() {
@@ -76,19 +70,18 @@ pub fn format_source(source: &str) -> Result<String, String> {
 
         let stripped = strip_strings_and_comments(trimmed);
 
-        let is_case_or_default = (trimmed.starts_with("case ")
-            || trimmed == "case"
-            || trimmed.starts_with("default:")
-            || trimmed == "default")
+        let is_case_or_default = (starts_with_keyword(trimmed, "case")
+            || starts_with_keyword(trimmed, "default"))
             && trimmed.ends_with(':');
 
-        let starts_with_closer = trimmed.starts_with("end")
-            || trimmed.starts_with("until")
+        let starts_with_closer = starts_with_keyword(trimmed, "end")
+            || starts_with_keyword(trimmed, "until")
             || trimmed.starts_with('}')
             || trimmed.starts_with(')')
             || trimmed.starts_with(']');
 
-        let is_else_or_elseif = trimmed.starts_with("else") || trimmed.starts_with("elseif");
+        let is_else_or_elseif =
+            starts_with_keyword(trimmed, "else") || starts_with_keyword(trimmed, "elseif");
 
         // Calculate current line indentation:
         let current_indent = if is_case_or_default {
@@ -98,7 +91,7 @@ pub fn format_source(source: &str) -> Result<String, String> {
                 indent_level
             }
         } else if starts_with_closer {
-            if (trimmed.starts_with("end") || trimmed == "end")
+            if starts_with_keyword(trimmed, "end")
                 && matches!(
                     block_stack.last(),
                     Some(BlockKind::Match { has_case: true })
@@ -123,6 +116,11 @@ pub fn format_source(source: &str) -> Result<String, String> {
         out.push_str(&normalized_line);
         out.push('\n');
 
+        // Check if a multiline raw string or comment started on this line
+        if let Some(closer) = find_unclosed_multiline(trimmed) {
+            multiline_closer = Some(closer);
+        }
+
         // Update block stack and indentation for subsequent lines
         if is_case_or_default {
             if let Some(BlockKind::Match { has_case }) = block_stack.last_mut()
@@ -133,7 +131,7 @@ pub fn format_source(source: &str) -> Result<String, String> {
             }
         } else {
             // Check closing keywords first
-            if trimmed.starts_with("end") || trimmed == "end" {
+            if starts_with_keyword(trimmed, "end") {
                 if let Some(top) = block_stack.pop() {
                     match top {
                         BlockKind::Match { has_case: true } => {
@@ -144,7 +142,7 @@ pub fn format_source(source: &str) -> Result<String, String> {
                         }
                     }
                 }
-            } else if trimmed.starts_with("until") || trimmed == "until" {
+            } else if starts_with_keyword(trimmed, "until") {
                 block_stack.pop();
                 indent_level = indent_level.saturating_sub(1);
             }
@@ -161,13 +159,15 @@ pub fn format_source(source: &str) -> Result<String, String> {
                 || (has_word(&stripped, "while")
                     && has_word(&stripped, "do")
                     && !has_word(&stripped, "end"))
-                || ((trimmed == "do" || trimmed.starts_with("do ")) && !has_word(&stripped, "end"))
-                || ((trimmed == "repeat" || trimmed.starts_with("repeat "))
-                    && !has_word(&stripped, "until"))
-                || ((trimmed.starts_with("enum ") || trimmed == "enum")
-                    && !has_word(&stripped, "end"));
+                || (starts_with_keyword(trimmed, "do") && !has_word(&stripped, "end"))
+                || (starts_with_keyword(trimmed, "repeat") && !has_word(&stripped, "until"))
+                || (starts_with_keyword(trimmed, "enum") && !has_word(&stripped, "end"));
 
-            if has_word(&stripped, "match") && !has_word(&stripped, "end") {
+            let is_match_block = starts_with_keyword(trimmed, "match")
+                && !trimmed["match".len()..].trim_start().starts_with('=')
+                && !has_word(&stripped, "end");
+
+            if is_match_block {
                 block_stack.push(BlockKind::Match { has_case: false });
                 indent_level += 1;
             } else if opens_normal_block {
@@ -192,31 +192,34 @@ pub fn format_source(source: &str) -> Result<String, String> {
         }
     }
 
-    // Safety check: verify formatted output parses identically
-    if let Err(err) = crate::compiler::parse(&out) {
-        return Err(format!("formatting corrupted syntax: {}", err));
+    // Safety check: verify formatted output preserves identical tokens and valid syntax
+    crate::compiler::parse(&out).map_err(|err| format!("formatting corrupted syntax: {}", err))?;
+
+    let tokens_before: Vec<(&'static str, String)> = crate::lexer::Lexer::new(source)
+        .tokenize()
+        .map_err(|err| format!("cannot tokenize source: {}", err))?
+        .into_iter()
+        .map(|t| (t.kind, t.value))
+        .collect();
+
+    let tokens_after: Vec<(&'static str, String)> = crate::lexer::Lexer::new(&out)
+        .tokenize()
+        .map_err(|err| format!("formatting corrupted tokens: {}", err))?
+        .into_iter()
+        .map(|t| (t.kind, t.value))
+        .collect();
+
+    if tokens_before != tokens_after {
+        return Err("formatting altered program tokens".to_string());
     }
 
     Ok(out)
 }
 
-fn find_unclosed_raw_string(line: &str) -> Option<String> {
+fn find_unclosed_multiline(line: &str) -> Option<String> {
     let chars: Vec<char> = line.chars().collect();
     let mut i = 0;
     while i < chars.len() {
-        if chars[i] == '-' && i + 1 < chars.len() && chars[i + 1] == '-' {
-            let mut j = i + 2;
-            if j < chars.len() && chars[j] == '[' {
-                j += 1;
-                while j < chars.len() && chars[j] == '=' {
-                    j += 1;
-                }
-                if j < chars.len() && chars[j] == '[' {
-                    return None;
-                }
-            }
-            return None;
-        }
         if chars[i] == '"' || chars[i] == '\'' {
             let quote = chars[i];
             i += 1;
@@ -232,17 +235,40 @@ fn find_unclosed_raw_string(line: &str) -> Option<String> {
             }
             continue;
         }
-        if chars[i] == '[' && i + 1 < chars.len() {
-            let mut j = i + 1;
-            while j < chars.len() && chars[j] == '=' {
-                j += 1;
-            }
+        if chars[i] == '-' && i + 1 < chars.len() && chars[i + 1] == '-' {
+            let j = i + 2;
             if j < chars.len() && chars[j] == '[' {
-                let eq_count = j - (i + 1);
+                let eq_start = j + 1;
+                let mut eq_end = eq_start;
+                while eq_end < chars.len() && chars[eq_end] == '=' {
+                    eq_end += 1;
+                }
+                if eq_end < chars.len() && chars[eq_end] == '[' {
+                    let eq_count = eq_end - eq_start;
+                    let closer = format!("]{}]", "=".repeat(eq_count));
+                    let rest: String = chars[eq_end + 1..].iter().collect();
+                    if let Some(pos) = rest.find(&closer) {
+                        i = eq_end + 1 + pos + closer.len();
+                        continue;
+                    } else {
+                        return Some(closer);
+                    }
+                }
+            }
+            return None;
+        }
+        if chars[i] == '[' && i + 1 < chars.len() {
+            let eq_start = i + 1;
+            let mut eq_end = eq_start;
+            while eq_end < chars.len() && chars[eq_end] == '=' {
+                eq_end += 1;
+            }
+            if eq_end < chars.len() && chars[eq_end] == '[' {
+                let eq_count = eq_end - eq_start;
                 let closer = format!("]{}]", "=".repeat(eq_count));
-                let rest: String = chars[j + 1..].iter().collect();
+                let rest: String = chars[eq_end + 1..].iter().collect();
                 if let Some(pos) = rest.find(&closer) {
-                    i = j + 1 + pos + closer.len();
+                    i = eq_end + 1 + pos + closer.len();
                     continue;
                 } else {
                     return Some(closer);
@@ -458,5 +484,29 @@ mod tests {
         let formatted1 = format_source(input).unwrap();
         let formatted2 = format_source(&formatted1).unwrap();
         assert_eq!(formatted1, formatted2);
+    }
+
+    #[test]
+    fn test_format_source_identifiers_with_keyword_prefixes() {
+        let input = "function test()\nendpoint = 1\nending = 2\nelsewhere = 3\nuntil_done = 4\nreturn endpoint\nend\n";
+        let formatted = format_source(input).unwrap();
+        let expected = "function test()\n    endpoint = 1\n    ending = 2\n    elsewhere = 3\n    until_done = 4\n    return endpoint\nend\n";
+        assert_eq!(formatted, expected);
+    }
+
+    #[test]
+    fn test_format_source_local_match_and_assignment_not_block() {
+        let input =
+            "function test()\nlocal match = \"regex\"\nmatch = \"updated\"\nreturn match\nend\n";
+        let formatted = format_source(input).unwrap();
+        let expected = "function test()\n    local match = \"regex\"\n    match = \"updated\"\n    return match\nend\n";
+        assert_eq!(formatted, expected);
+    }
+
+    #[test]
+    fn test_format_source_multiline_comments_midline_and_level_matching() {
+        let input = "local x = 1 --[[\n    first comment line\n    second comment line\n]]\nlocal y = 2 --[==[\n    comment with ]] inside\n]==]\nlocal z = 3\n";
+        let formatted = format_source(input).unwrap();
+        assert_eq!(formatted, input);
     }
 }
