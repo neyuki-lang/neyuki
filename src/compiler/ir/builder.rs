@@ -7,7 +7,7 @@ use std::str::FromStr;
 use crate::ast::node_id::NodeId;
 use crate::ast::op::{BinOp, UnOp};
 use crate::ast::pattern::AssignTarget;
-use crate::ast::{Expr, InterpPart, Param, Stmt};
+use crate::ast::{Expr, InterpPart, Literal, Param, Stmt};
 use crate::compiler::ir::block::{IrFunction, IrModule, UpvalSource};
 use crate::compiler::ir::inst::{IrInst, SpreadSink, SpreadSource};
 use crate::compiler::ir::types::{IrBinaryOp, IrConstant, IrLabel, IrUnaryOp, IrVar};
@@ -807,7 +807,10 @@ impl IrBuilder {
         self.mark_line(stmt.node_id());
         match stmt {
             Stmt::Local {
-                name, initializer, ..
+                name,
+                is_global,
+                initializer,
+                ..
             } => {
                 let var = self.alloc_var();
                 if let Some(init) = initializer {
@@ -815,10 +818,18 @@ impl IrBuilder {
                 } else {
                     self.emit(IrInst::LoadNil { dst: var });
                 }
-                self.add_local(name.clone(), var);
+                if *is_global {
+                    self.emit(IrInst::SetGlobal {
+                        name: name.clone(),
+                        src: var,
+                    });
+                } else {
+                    self.add_local(name.clone(), var);
+                }
             }
             Stmt::LocalMany {
                 names,
+                is_global,
                 initializers,
                 ..
             } => {
@@ -829,7 +840,14 @@ impl IrBuilder {
                     && let Some(vars) = self.compile_call_results(&initializers[0], names.len())
                 {
                     for (name, var) in names.iter().zip(vars) {
-                        self.add_local(name.clone(), var);
+                        if *is_global {
+                            self.emit(IrInst::SetGlobal {
+                                name: name.clone(),
+                                src: var,
+                            });
+                        } else {
+                            self.add_local(name.clone(), var);
+                        }
                     }
                     return;
                 }
@@ -840,7 +858,14 @@ impl IrBuilder {
                     } else {
                         self.emit(IrInst::LoadNil { dst: var });
                     }
-                    self.add_local(name.clone(), var);
+                    if *is_global {
+                        self.emit(IrInst::SetGlobal {
+                            name: name.clone(),
+                            src: var,
+                        });
+                    } else {
+                        self.add_local(name.clone(), var);
+                    }
                 }
             }
             Stmt::Assign { target, value, .. } => {
@@ -963,14 +988,26 @@ impl IrBuilder {
                     }
                 }
             }
-            Stmt::If {
-                condition,
-                then_branch,
-                else_if_branches,
-                else_branch,
-                ..
-            } => {
-                let cond_var = self.compile_expr(condition, None);
+            Stmt::If { data, .. } => {
+                if data.else_if_branches.is_empty()
+                    && data.else_branch.is_none()
+                    && matches!(
+                        data.condition,
+                        Expr::Literal {
+                            value: Literal::Bool(true),
+                            ..
+                        }
+                    )
+                {
+                    self.enter_scope();
+                    for s in &data.then_branch {
+                        self.compile_stmt(s);
+                    }
+                    self.exit_scope();
+                    return;
+                }
+
+                let cond_var = self.compile_expr(&data.condition, None);
                 let else_label = self.alloc_label();
                 let end_label = self.alloc_label();
 
@@ -980,14 +1017,14 @@ impl IrBuilder {
                 });
 
                 self.enter_scope();
-                for s in then_branch {
+                for s in &data.then_branch {
                     self.compile_stmt(s);
                 }
                 self.exit_scope();
                 self.emit(IrInst::Jump(end_label));
 
                 self.emit(IrInst::Label(else_label));
-                for (elif_cond, elif_body) in else_if_branches {
+                for (elif_cond, elif_body) in &data.else_if_branches {
                     let next_elif_label = self.alloc_label();
                     let elif_var = self.compile_expr(elif_cond, None);
                     self.emit(IrInst::JumpIfFalse {
@@ -1003,7 +1040,7 @@ impl IrBuilder {
                     self.emit(IrInst::Label(next_elif_label));
                 }
 
-                if let Some(else_stmts) = else_branch {
+                if let Some(else_stmts) = &data.else_branch {
                     self.enter_scope();
                     for s in else_stmts {
                         self.compile_stmt(s);
@@ -1072,21 +1109,14 @@ impl IrBuilder {
 
                 self.loops.pop();
             }
-            Stmt::NumericFor {
-                var,
-                start,
-                end,
-                step,
-                body,
-                ..
-            } => {
+            Stmt::NumericFor { data, .. } => {
                 self.enter_scope();
                 let base = self.alloc_var();
-                self.compile_expr(start, Some(base));
+                self.compile_expr(&data.start, Some(base));
                 let limit = self.alloc_var();
-                self.compile_expr(end, Some(limit));
+                self.compile_expr(&data.end, Some(limit));
                 let step_var = self.alloc_var();
-                if let Some(s) = step {
+                if let Some(s) = &data.step {
                     self.compile_expr(s, Some(step_var));
                 } else {
                     self.emit(IrInst::LoadConst {
@@ -1096,7 +1126,7 @@ impl IrBuilder {
                 };
 
                 let loop_var = self.alloc_var();
-                self.add_local(var.clone(), loop_var);
+                self.add_local(data.var.clone(), loop_var);
 
                 let body_label = self.alloc_label();
                 let test_label = self.alloc_label();
@@ -1117,7 +1147,7 @@ impl IrBuilder {
 
                 self.emit(IrInst::Label(body_label));
                 self.enter_scope();
-                for s in body {
+                for s in &data.body {
                     self.compile_stmt(s);
                 }
                 self.exit_scope();

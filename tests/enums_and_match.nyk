@@ -1,0 +1,169 @@
+-- Tests for enum/sum types and pattern matching (match)
+
+-- Test 1: Simple unit enum
+enum Color
+    Red,
+    Green,
+    Blue,
+end
+
+local c = Color.Green
+local name = ""
+match c
+case Color.Red:
+        name = "red"
+    case Color.Green:
+            name = "green"
+        case Color.Blue:
+                name = "blue"
+            default:
+                    name = "unknown"
+                end
+                assert(name == "green", "simple enum match failed")
+
+                -- Test 2: Parameterized enum (Option sum type)
+                enum Option
+                    Some(value),
+                    None,
+                end
+
+                local opt1 = Option.Some(42)
+                local opt2 = Option.None
+
+                local function unwrap_or(opt, default_val)
+                match opt
+                case Option.Some(v):
+                        return v
+                    case Option.None:
+                            return default_val
+                        default:
+                                return default_val
+                            end
+                        end
+
+                        assert(unwrap_or(opt1, 0) == 42, "Some unwrap failed")
+                        assert(unwrap_or(opt2, 99) == 99, "None unwrap failed")
+
+                        -- Test 3: Algebraic Data Type for AST representation and evaluation
+                        enum AST
+                            Num(val),
+                            Var(name),
+                            Binary(op, left, right),
+                        end
+
+                        local expr = AST.Binary("+", AST.Num(15), AST.Binary("*", AST.Num(2), AST.Num(3)))
+
+                        local function evaluate(node)
+                        match node
+                        case AST.Num(n):
+                                return n
+                            case AST.Binary("+", l, r):
+                                    return evaluate(l) + evaluate(r)
+                                case AST.Binary("*", l, r):
+                                        return evaluate(l) * evaluate(r)
+                                    case AST.Binary("-", l, r):
+                                            return evaluate(l) - evaluate(r)
+                                        default:
+                                                error("unknown AST node")
+                                            end
+                                        end
+
+                                        assert(evaluate(expr) == 21, "nested AST evaluation failed")
+
+                                        -- Test 4: Pattern matching with numbers, guards, and wildcard
+                                        local function classify(n)
+                                        match n
+                                        case 0:
+                                                return "zero"
+                                            case 1:
+                                                    return "one"
+                                                case x if x > 100:
+                                                        return "huge"
+                                                    case x if x < 0:
+                                                            return "negative"
+                                                        case _:
+                                                                return "other"
+                                                            end
+                                                        end
+
+                                                        assert(classify(0) == "zero")
+                                                        assert(classify(1) == "one")
+                                                        assert(classify(250) == "huge")
+                                                        assert(classify(-10) == "negative")
+                                                        assert(classify(42) == "other")
+
+                                                        -- Test 5: Pattern matching with strings
+                                                        local function greet(s)
+                                                        match s
+                                                        case "hello":
+                                                                return "greeting"
+                                                            case "bye":
+                                                                    return "farewell"
+                                                                default:
+                                                                        return "other"
+                                                                    end
+                                                                end
+
+                                                                assert(greet("hello") == "greeting")
+                                                                assert(greet("bye") == "farewell")
+                                                                assert(greet("random") == "other")
+
+-- Test 6: Method calls, method definitions, variables with match/enum/case/default names
+local str = "hello world"
+assert(str:match("world") == "world", "str:match works as method call")
+
+local Obj = {}
+function Obj:match(pat)
+    return self.val == pat
+end
+Obj.val = "abc"
+assert(Obj:match("abc") == true, "Obj:match works as method definition")
+
+local my_enum = 456
+local enum = 789
+assert(enum == 789, "enum identifier can be used as variable")
+
+local match_fn = string.match
+local res = match_fn("test string", "test")
+assert(res == "test", "match identifier works as variable and function call")
+
+-- Test 7: Bare return in match case
+local function test_bare_return(v)
+    match v
+    case 1:
+        return
+    case 2:
+        return 42
+    default:
+        return 100
+    end
+end
+assert(test_bare_return(1) == nil, "bare return in case 1")
+assert(test_bare_return(2) == 42, "return in case 2")
+assert(test_bare_return(3) == 100, "return in default")
+
+-- Test 8: Literal patterns for true, false, nil
+local function test_lit_pat(b)
+    match b
+    case true:
+        return "yes"
+    case false:
+        return "no"
+    case nil:
+        return "nothing"
+    end
+end
+assert(test_lit_pat(true) == "yes", "case true")
+assert(test_lit_pat(false) == "no", "case false")
+assert(test_lit_pat(nil) == "nothing", "case nil")
+
+-- Test 9: checktype and asserttype globals in checked runs
+assert(checktype(42, "int") == true, "checktype int")
+assert(checktype("abc", "int") == false, "checktype mismatch")
+assert(checktype(nil, "void") == false, "void never matches")
+assert(checktype({}, "dict") == true, "checktype table/dict")
+assert(asserttype(42, "int") == 42, "asserttype int")
+assert(assert_type(42, "int") == 42, "assert_type int alias")
+
+print("[pass] all enum and match tests passed")
+

@@ -323,8 +323,9 @@ fn os_run(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     {
         // Fed from a thread so a program that writes before reading all of
         // its input cannot deadlock against us.
+        let bytes = text.as_bytes().to_vec();
         std::thread::spawn(move || {
-            let _ = stdin.write_all(text.as_bytes());
+            let _ = stdin.write_all(&bytes);
         });
     }
     let output = child

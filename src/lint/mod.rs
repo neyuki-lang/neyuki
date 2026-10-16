@@ -32,7 +32,7 @@ pub fn lint_source(source: &str) -> Vec<Diagnostic> {
 
 /// Turns a parser error such as `[line 4] expected symbol ")"` into a
 /// diagnostic on that line.
-fn syntax_error(err: &str) -> Diagnostic {
+pub fn syntax_error(err: &str) -> Diagnostic {
     let (line, message) = err
         .strip_prefix("[line ")
         .and_then(|rest| rest.split_once("] "))

@@ -52,6 +52,36 @@ pub fn builtin_typeof(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String
     Ok(vec![Value::String((val.typeof_name().to_string()).into())])
 }
 
+pub fn builtin_checktype(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let val = args.first().unwrap_or(&Value::Nil);
+    let ty_str = match args.get(1) {
+        Some(Value::String(s)) => &**s,
+        _ => return Err("checktype expects a type string as argument #2".to_string()),
+    };
+    let ty = crate::ast::ty::TypeExpr::parse(ty_str);
+    Ok(vec![Value::Bool(val.matches_type_expr(&ty))])
+}
+
+pub fn builtin_asserttype(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let val = args.first().unwrap_or(&Value::Nil);
+    let ty_str = match args.get(1) {
+        Some(Value::String(s)) => &**s,
+        _ => return Err("asserttype expects a type string as argument #2".to_string()),
+    };
+    let ty = crate::ast::ty::TypeExpr::parse(ty_str);
+    if !val.matches_type_expr(&ty) {
+        let msg = args.get(2).map(|v| v.to_string()).unwrap_or_else(|| {
+            format!(
+                "type assertion failed: expected '{}', got '{}'",
+                ty_str,
+                val.typeof_name()
+            )
+        });
+        return Err(msg);
+    }
+    Ok(vec![val.clone()])
+}
+
 /// A value as `tostring` prints it, honoring `__tostring`.
 pub fn tostring(vm: &mut VM, val: &Value) -> Result<String, String> {
     if let Value::Table(t) = val {
@@ -334,4 +364,42 @@ pub fn builtin_require(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String
         return Ok(vec![val]);
     }
     Err(format!("cannot find module '{}'", pkg))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_checktype_and_asserttype() {
+        let mut vm = VM::new();
+
+        // checktype
+        let res = builtin_checktype(&mut vm, &[Value::Int(42), Value::str("int")]).unwrap();
+        assert_eq!(res, vec![Value::Bool(true)]);
+
+        let res = builtin_checktype(&mut vm, &[Value::str("hello"), Value::str("int")]).unwrap();
+        assert_eq!(res, vec![Value::Bool(false)]);
+
+        let res =
+            builtin_checktype(&mut vm, &[Value::str("hello"), Value::str("int | string")]).unwrap();
+        assert_eq!(res, vec![Value::Bool(true)]);
+
+        // void maps to Never, so it never matches
+        let res = builtin_checktype(&mut vm, &[Value::Nil, Value::str("void")]).unwrap();
+        assert_eq!(res, vec![Value::Bool(false)]);
+
+        // unknown named type must return false, not true
+        let res = builtin_checktype(&mut vm, &[Value::Int(42), Value::str("UnknownType")]).unwrap();
+        assert_eq!(res, vec![Value::Bool(false)]);
+
+        // asserttype success
+        let res = builtin_asserttype(&mut vm, &[Value::Int(42), Value::str("int")]).unwrap();
+        assert_eq!(res, vec![Value::Int(42)]);
+
+        // asserttype failure
+        let err =
+            builtin_asserttype(&mut vm, &[Value::str("hello"), Value::str("int")]).unwrap_err();
+        assert!(err.contains("type assertion failed"));
+    }
 }

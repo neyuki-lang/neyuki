@@ -258,7 +258,7 @@ pub fn parse_table(parser: &mut Parser) -> Result<Expr, String> {
     let mut entries = Vec::new();
     if !parser.check_symbol("}") {
         loop {
-            if parser.peek().kind == "name"
+            if (parser.peek().kind == "name" || parser.peek().kind == "keyword")
                 && parser
                     .tokens
                     .get(parser.pos + 1)
@@ -347,6 +347,9 @@ pub fn peek_binary_op(parser: &Parser) -> Option<(String, u8)> {
 }
 
 pub fn check_method_call(parser: &Parser) -> bool {
+    if parser.case_colon_pos == Some(parser.pos) {
+        return false;
+    }
     parser.check_symbol(":")
         && parser
             .tokens

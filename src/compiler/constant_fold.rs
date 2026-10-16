@@ -650,6 +650,7 @@ fn fold_stmt_scoped(stmt: Stmt, shadowed: &mut HashSet<String>) -> Option<Stmt> 
         Stmt::Local {
             name,
             is_const,
+            is_global,
             type_name,
             initializer,
             id,
@@ -659,6 +660,7 @@ fn fold_stmt_scoped(stmt: Stmt, shadowed: &mut HashSet<String>) -> Option<Stmt> 
             Some(Stmt::Local {
                 name,
                 is_const,
+                is_global,
                 type_name,
                 initializer: new_init,
                 id,
@@ -667,6 +669,7 @@ fn fold_stmt_scoped(stmt: Stmt, shadowed: &mut HashSet<String>) -> Option<Stmt> 
         Stmt::LocalMany {
             names,
             is_const,
+            is_global,
             initializers,
             id,
         } => {
@@ -680,6 +683,7 @@ fn fold_stmt_scoped(stmt: Stmt, shadowed: &mut HashSet<String>) -> Option<Stmt> 
             Some(Stmt::LocalMany {
                 names,
                 is_const,
+                is_global,
                 initializers: new_inits,
                 id,
             })
@@ -724,34 +728,29 @@ fn fold_stmt_scoped(stmt: Stmt, shadowed: &mut HashSet<String>) -> Option<Stmt> 
                 id,
             })
         }
-        Stmt::If {
-            condition,
-            then_branch,
-            else_if_branches,
-            else_branch,
-            id,
-        } => {
-            let folded_cond = fold_expr_scoped(condition, shadowed);
+        Stmt::If { data, id } => {
+            let folded_cond = fold_expr_scoped(data.condition, shadowed);
 
             // If static truthy condition, dead-branch elimination can happen
             if let Some(c) = FoldVal::from_expr(&folded_cond)
                 && c.is_truthy()
             {
                 let mut child_shadowed = shadowed.clone();
-                let folded_then = fold_block(then_branch, &mut child_shadowed);
-                return Some(Stmt::If {
-                    condition: folded_cond,
-                    then_branch: folded_then,
-                    else_if_branches: Vec::new(),
-                    else_branch: None,
+                let folded_then = fold_block(data.then_branch, &mut child_shadowed);
+                return Some(Stmt::if_stmt(
+                    folded_cond,
+                    folded_then,
+                    Vec::new(),
+                    None,
                     id,
-                });
+                ));
             }
 
             let mut then_shadowed = shadowed.clone();
-            let folded_then = fold_block(then_branch, &mut then_shadowed);
+            let folded_then = fold_block(data.then_branch, &mut then_shadowed);
 
-            let folded_else_ifs = else_if_branches
+            let folded_else_ifs = data
+                .else_if_branches
                 .into_iter()
                 .map(|(cond, branch)| {
                     let c = fold_expr_scoped(cond, shadowed);
@@ -760,18 +759,18 @@ fn fold_stmt_scoped(stmt: Stmt, shadowed: &mut HashSet<String>) -> Option<Stmt> 
                 })
                 .collect();
 
-            let folded_else = else_branch.map(|eb| {
+            let folded_else = data.else_branch.map(|eb| {
                 let mut e_shadowed = shadowed.clone();
                 fold_block(eb, &mut e_shadowed)
             });
 
-            Some(Stmt::If {
-                condition: folded_cond,
-                then_branch: folded_then,
-                else_if_branches: folded_else_ifs,
-                else_branch: folded_else,
+            Some(Stmt::if_stmt(
+                folded_cond,
+                folded_then,
+                folded_else_ifs,
+                folded_else,
                 id,
-            })
+            ))
         }
         Stmt::While {
             condition,
@@ -792,27 +791,20 @@ fn fold_stmt_scoped(stmt: Stmt, shadowed: &mut HashSet<String>) -> Option<Stmt> 
                 id,
             })
         }
-        Stmt::NumericFor {
-            var,
-            start,
-            end,
-            step,
-            body,
-            id,
-        } => {
-            let f_start = fold_expr_scoped(start, shadowed);
-            let f_end = fold_expr_scoped(end, shadowed);
-            let f_step = step.map(|s| fold_expr_scoped(s, shadowed));
+        Stmt::NumericFor { data, id } => {
+            let f_start = fold_expr_scoped(data.start, shadowed);
+            let f_end = fold_expr_scoped(data.end, shadowed);
+            let f_step = data.step.map(|s| fold_expr_scoped(s, shadowed));
             let mut body_shadowed = shadowed.clone();
-            body_shadowed.insert(var.clone());
-            Some(Stmt::NumericFor {
-                var,
-                start: f_start,
-                end: f_end,
-                step: f_step,
-                body: fold_block(body, &mut body_shadowed),
+            body_shadowed.insert(data.var.clone());
+            Some(Stmt::numeric_for(
+                data.var,
+                f_start,
+                f_end,
+                f_step,
+                fold_block(data.body, &mut body_shadowed),
                 id,
-            })
+            ))
         }
         Stmt::For {
             vars,

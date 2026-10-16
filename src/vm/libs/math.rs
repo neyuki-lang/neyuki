@@ -587,7 +587,7 @@ pub fn create_math_lib() -> Value {
     table.set_str("pi", Value::Float(std::f64::consts::PI));
     table.set_str("tau", Value::Float(std::f64::consts::TAU));
     table.set_str("e", Value::Float(std::f64::consts::E));
-    table.set_str("phi", Value::Float(1.618_033_988_749_895));
+    table.set_str("phi", Value::Float(std::f64::consts::GOLDEN_RATIO));
     table.set_str("sqrt2", Value::Float(std::f64::consts::SQRT_2));
     table.set_str("huge", Value::Float(f64::INFINITY));
     table.set_str("nan", Value::Float(f64::NAN));

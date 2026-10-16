@@ -1,0 +1,52 @@
+-- Tests for `do ... end` block statements and `global` scoping.
+
+-- 1. Basic do ... end block execution
+local executed = false
+do
+    executed = true
+end
+assert(executed == true, "do block executed")
+
+-- 2. Local variables are scoped to the block
+local outer = 10
+do
+    local inner = 20
+    assert(inner == 20, "inner local accessible inside block")
+    outer = outer + inner
+end
+assert(outer == 30, "outer modified inside block")
+
+-- 3. Shadowing inside block
+local x = "outer"
+do
+    local x = "inner"
+    assert(x == "inner", "shadowed local inside block")
+end
+assert(x == "outer", "outer local restored after block end")
+
+-- 4. Global bindings declared inside block persist outside
+do
+    local temp = "secret_value"
+    global const exported_secret = temp
+    global exported_counter = 42
+end
+assert(exported_secret == "secret_value", "global const from block accessible outside")
+assert(exported_counter == 42, "global from block accessible outside")
+exported_counter = 100
+assert(exported_counter == 100, "global variable mutable outside")
+
+-- 5. Nested do blocks
+local sum = 0
+do
+    local a = 1
+    do
+        local b = 2
+        do
+            local c = 3
+            sum = a + b + c
+        end
+    end
+end
+assert(sum == 6, "nested do blocks execute cleanly")
+
+print("[pass] do ... end blocks and global scoping verified")

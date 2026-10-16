@@ -7,9 +7,9 @@ pub mod meta;
 
 pub use gc::builtin_collectgarbage;
 pub use global::{
-    builtin_assert, builtin_error, builtin_float, builtin_int, builtin_pcall, builtin_print,
-    builtin_require, builtin_tonumber, builtin_tostring, builtin_try, builtin_type, builtin_typeof,
-    builtin_xpcall,
+    builtin_assert, builtin_asserttype, builtin_checktype, builtin_error, builtin_float,
+    builtin_int, builtin_pcall, builtin_print, builtin_require, builtin_tonumber, builtin_tostring,
+    builtin_try, builtin_type, builtin_typeof, builtin_xpcall,
 };
 pub use iter::NEXT;
 pub use meta::{
@@ -25,6 +25,9 @@ pub fn register_all(vm: &mut VM) {
     vm.register_native(crate::native_def!("assert", builtin_assert));
     vm.register_native(crate::native_def!("type", builtin_type));
     vm.register_native(crate::native_def!("typeof", builtin_typeof));
+    vm.register_native(crate::native_def!("checktype", builtin_checktype));
+    vm.register_native(crate::native_def!("asserttype", builtin_asserttype));
+    vm.register_native(crate::native_def!("assert_type", builtin_asserttype));
     vm.register_native(crate::native_def!("tostring", builtin_tostring));
     vm.register_native(crate::native_def!("tonumber", builtin_tonumber));
     vm.register_native(crate::native_def!("int", builtin_int));

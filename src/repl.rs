@@ -15,7 +15,7 @@ use crate::vm::value::Value;
 pub fn is_incomplete_input(err: &str) -> bool {
     err.contains("Unfinished")
         || err.contains("unfinished")
-        || err.trim_end().ends_with("got \"\"")
+        || err.contains("got \"\"")
         || (err.contains("expected ") && !err.contains("got \""))
 }
 
@@ -130,6 +130,16 @@ mod tests {
             !is_incomplete_input(&parse_err(src)),
             "should report: {:?}",
             src
+        );
+    }
+
+    #[test]
+    fn eval_chunk_reports_incomplete_with_rendered_diagnostic() {
+        let mut vm = VM::new();
+        let err = eval_chunk(&mut vm, "function f(").unwrap_err();
+        assert!(
+            is_incomplete_input(&err),
+            "eval_chunk error must be recognized as incomplete input"
         );
     }
 

@@ -47,24 +47,18 @@ pub fn walk_stmt_mut<V: AstVisitorMut + ?Sized>(visitor: &mut V, stmt: &mut Stmt
                 visitor.visit_stmt_mut(s);
             }
         }
-        Stmt::If {
-            condition,
-            then_branch,
-            else_if_branches,
-            else_branch,
-            ..
-        } => {
-            visitor.visit_expr_mut(condition);
-            for s in then_branch {
+        Stmt::If { data, .. } => {
+            visitor.visit_expr_mut(&mut data.condition);
+            for s in &mut data.then_branch {
                 visitor.visit_stmt_mut(s);
             }
-            for (cond, branch) in else_if_branches {
+            for (cond, branch) in &mut data.else_if_branches {
                 visitor.visit_expr_mut(cond);
                 for s in branch {
                     visitor.visit_stmt_mut(s);
                 }
             }
-            if let Some(eb) = else_branch {
+            if let Some(eb) = &mut data.else_branch {
                 for s in eb {
                     visitor.visit_stmt_mut(s);
                 }
@@ -76,19 +70,13 @@ pub fn walk_stmt_mut<V: AstVisitorMut + ?Sized>(visitor: &mut V, stmt: &mut Stmt
                 visitor.visit_stmt_mut(s);
             }
         }
-        Stmt::NumericFor {
-            start,
-            end,
-            step,
-            body,
-            ..
-        } => {
-            visitor.visit_expr_mut(start);
-            visitor.visit_expr_mut(end);
-            if let Some(st) = step {
+        Stmt::NumericFor { data, .. } => {
+            visitor.visit_expr_mut(&mut data.start);
+            visitor.visit_expr_mut(&mut data.end);
+            if let Some(st) = &mut data.step {
                 visitor.visit_expr_mut(st);
             }
-            for s in body {
+            for s in &mut data.body {
                 visitor.visit_stmt_mut(s);
             }
         }
@@ -198,10 +186,10 @@ pub struct AstNormalizer {
 
 impl AstVisitorMut for AstNormalizer {
     fn visit_stmt_mut(&mut self, stmt: &mut Stmt) {
-        if let Stmt::If { else_branch, .. } = stmt
-            && else_branch.as_ref().is_some_and(|eb| eb.is_empty())
+        if let Stmt::If { data, .. } = stmt
+            && data.else_branch.as_ref().is_some_and(|eb| eb.is_empty())
         {
-            *else_branch = None;
+            data.else_branch = None;
             self.mutated_count += 1;
         }
         walk_stmt_mut(self, stmt);
