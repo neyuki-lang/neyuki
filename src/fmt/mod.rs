@@ -22,8 +22,9 @@ enum BlockKind {
     Normal,
     PendingIf,
     PendingLoop,
-    Paren,
-    Bracket,
+    Paren { adds_indent: bool },
+    Bracket { adds_indent: bool },
+    Brace { adds_indent: bool },
 }
 
 /// Checks whether a line starts with a specific keyword at a word boundary.
@@ -35,12 +36,54 @@ fn starts_with_keyword(line: &str, kw: &str) -> bool {
     rest.is_empty() || !rest.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
 }
 
+fn find_keyword_pos(s: &str, kw: &str) -> Option<usize> {
+    let mut start = 0;
+    while let Some(idx) = s[start..].find(kw) {
+        let abs_idx = start + idx;
+        let before_ok = abs_idx == 0
+            || !s[..abs_idx].ends_with(|c: char| c.is_ascii_alphanumeric() || c == '_');
+        let after_idx = abs_idx + kw.len();
+        let after_ok = after_idx == s.len()
+            || !s[after_idx..].starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_');
+        if before_ok && after_ok {
+            return Some(abs_idx);
+        }
+        start = abs_idx + kw.len();
+    }
+    None
+}
+
+fn has_word_after(s: &str, pos: usize, word: &str) -> bool {
+    if pos >= s.len() {
+        false
+    } else {
+        has_word(&s[pos..], word)
+    }
+}
+
+fn count_unmatched(s: &str, open: char, close: char) -> usize {
+    let mut depth: usize = 0;
+    for c in s.chars() {
+        if c == open {
+            depth += 1;
+        } else if c == close {
+            depth = depth.saturating_sub(1);
+        }
+    }
+    depth
+}
+
 /// Formats a Neyuki source string.
 pub fn format_source(source: &str) -> Result<String, String> {
     // 1. Verify syntax before attempting to format
     crate::compiler::parse(source)
         .map_err(|err| format!("cannot format invalid source: {}", err))?;
 
+    let newline = if source.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
     let mut out = String::new();
     let mut prev_was_empty = false;
     let mut multiline_closer: Option<String> = None;
@@ -51,7 +94,7 @@ pub fn format_source(source: &str) -> Result<String, String> {
         // If inside a multiline raw string or long comment, preserve verbatim
         if let Some(ref closer) = multiline_closer {
             out.push_str(line);
-            out.push('\n');
+            out.push_str(newline);
             if let Some(pos) = line.find(closer) {
                 let after = &line[pos + closer.len()..];
                 multiline_closer = find_unclosed_multiline(after);
@@ -63,7 +106,7 @@ pub fn format_source(source: &str) -> Result<String, String> {
 
         if trimmed.is_empty() {
             if !prev_was_empty && !out.is_empty() {
-                out.push('\n');
+                out.push_str(newline);
                 prev_was_empty = true;
             }
             continue;
@@ -93,15 +136,22 @@ pub fn format_source(source: &str) -> Result<String, String> {
                 indent_level
             }
         } else if starts_with_closer {
-            if starts_with_keyword(trimmed, "end")
-                && matches!(
-                    block_stack.last(),
-                    Some(BlockKind::Match { has_case: true })
-                )
-            {
-                indent_level.saturating_sub(2)
-            } else {
-                indent_level.saturating_sub(1)
+            match block_stack.last() {
+                Some(BlockKind::Match { has_case: true })
+                    if starts_with_keyword(trimmed, "end") =>
+                {
+                    indent_level.saturating_sub(2)
+                }
+                Some(BlockKind::Paren { adds_indent: false }) if trimmed.starts_with(')') => {
+                    indent_level
+                }
+                Some(BlockKind::Brace { adds_indent: false }) if trimmed.starts_with('}') => {
+                    indent_level
+                }
+                Some(BlockKind::Bracket { adds_indent: false }) if trimmed.starts_with(']') => {
+                    indent_level
+                }
+                _ => indent_level.saturating_sub(1),
             }
         } else if is_else_or_elseif {
             indent_level.saturating_sub(1)
@@ -116,7 +166,7 @@ pub fn format_source(source: &str) -> Result<String, String> {
         // Normalize spacing on the line
         let normalized_line = normalize_line_spacing(trimmed);
         out.push_str(&normalized_line);
-        out.push('\n');
+        out.push_str(newline);
 
         // Check if a multiline raw string or comment started on this line
         if let Some(closer) = find_unclosed_multiline(trimmed) {
@@ -161,6 +211,16 @@ pub fn format_source(source: &str) -> Result<String, String> {
                         BlockKind::Match { has_case: true } => {
                             indent_level = indent_level.saturating_sub(2);
                         }
+                        BlockKind::Match { has_case: false } | BlockKind::Normal => {
+                            indent_level = indent_level.saturating_sub(1);
+                        }
+                        BlockKind::Paren { adds_indent }
+                        | BlockKind::Brace { adds_indent }
+                        | BlockKind::Bracket { adds_indent } => {
+                            if adds_indent {
+                                indent_level = indent_level.saturating_sub(1);
+                            }
+                        }
                         _ => {
                             indent_level = indent_level.saturating_sub(1);
                         }
@@ -171,7 +231,47 @@ pub fn format_source(source: &str) -> Result<String, String> {
                 indent_level = indent_level.saturating_sub(1);
             }
 
-            // 3. Check for starting multi-line headers
+            // 3. Delimiters closed on this line
+            let open_braces = stripped.chars().filter(|&c| c == '{').count();
+            let close_braces = stripped.chars().filter(|&c| c == '}').count();
+            if close_braces > open_braces {
+                for _ in 0..(close_braces - open_braces) {
+                    if let Some(BlockKind::Brace { adds_indent }) = block_stack.last() {
+                        if *adds_indent {
+                            indent_level = indent_level.saturating_sub(1);
+                        }
+                        block_stack.pop();
+                    }
+                }
+            }
+
+            let open_parens = stripped.chars().filter(|&c| c == '(').count();
+            let close_parens = stripped.chars().filter(|&c| c == ')').count();
+            if close_parens > open_parens {
+                for _ in 0..(close_parens - open_parens) {
+                    if let Some(BlockKind::Paren { adds_indent }) = block_stack.last() {
+                        if *adds_indent {
+                            indent_level = indent_level.saturating_sub(1);
+                        }
+                        block_stack.pop();
+                    }
+                }
+            }
+
+            let open_brackets = stripped.chars().filter(|&c| c == '[').count();
+            let close_brackets = stripped.chars().filter(|&c| c == ']').count();
+            if close_brackets > open_brackets {
+                for _ in 0..(close_brackets - open_brackets) {
+                    if let Some(BlockKind::Bracket { adds_indent }) = block_stack.last() {
+                        if *adds_indent {
+                            indent_level = indent_level.saturating_sub(1);
+                        }
+                        block_stack.pop();
+                    }
+                }
+            }
+
+            // 4. Check for starting multi-line headers or blocks
             let is_if_start = starts_with_keyword(trimmed, "if")
                 || (starts_with_keyword(trimmed, "elseif") && !has_word(&stripped, "then"));
             let is_loop_start = (starts_with_keyword(trimmed, "for")
@@ -183,6 +283,7 @@ pub fn format_source(source: &str) -> Result<String, String> {
                     && let Some(BlockKind::Normal) = block_stack.last()
                 {
                     block_stack.pop();
+                    indent_level = indent_level.saturating_sub(1);
                 }
                 block_stack.push(BlockKind::PendingIf);
                 indent_level += 1;
@@ -190,81 +291,94 @@ pub fn format_source(source: &str) -> Result<String, String> {
                 block_stack.push(BlockKind::PendingLoop);
                 indent_level += 1;
             } else {
-                let opens_normal_block = (has_word(&stripped, "function")
-                    && !has_word(&stripped, "end"))
-                    || (has_word(&stripped, "if")
+                let fn_opt = find_keyword_pos(&stripped, "function");
+                let opens_fn = fn_opt.is_some_and(|pos| !has_word_after(&stripped, pos + 8, "end"));
+
+                if opens_fn {
+                    let fn_pos = fn_opt.unwrap();
+                    let before_fn = &stripped[..fn_pos];
+                    let parens_before = count_unmatched(before_fn, '(', ')');
+                    let braces_before = count_unmatched(before_fn, '{', '}');
+                    let brackets_before = count_unmatched(before_fn, '[', ']');
+
+                    // Push enclosing delimiters before callback (no extra indent)
+                    for _ in 0..braces_before {
+                        block_stack.push(BlockKind::Brace { adds_indent: false });
+                    }
+                    for _ in 0..parens_before {
+                        block_stack.push(BlockKind::Paren { adds_indent: false });
+                    }
+                    for _ in 0..brackets_before {
+                        block_stack.push(BlockKind::Bracket { adds_indent: false });
+                    }
+
+                    // Push function block
+                    block_stack.push(BlockKind::Normal);
+                    indent_level += 1;
+
+                    // Delimiters opened after function
+                    let after_fn = &stripped[fn_pos + 8..];
+                    let parens_after = count_unmatched(after_fn, '(', ')');
+                    let braces_after = count_unmatched(after_fn, '{', '}');
+                    let brackets_after = count_unmatched(after_fn, '[', ']');
+
+                    for _ in 0..braces_after {
+                        block_stack.push(BlockKind::Brace { adds_indent: true });
+                        indent_level += 1;
+                    }
+                    for _ in 0..parens_after {
+                        block_stack.push(BlockKind::Paren { adds_indent: true });
+                        indent_level += 1;
+                    }
+                    for _ in 0..brackets_after {
+                        block_stack.push(BlockKind::Bracket { adds_indent: true });
+                        indent_level += 1;
+                    }
+                } else {
+                    let opens_normal_block = (has_word(&stripped, "if")
                         && !has_word(&stripped, "elseif")
                         && has_word(&stripped, "then")
                         && !has_word(&stripped, "end"))
-                    || (has_word(&stripped, "for")
-                        && has_word(&stripped, "do")
-                        && !has_word(&stripped, "end"))
-                    || (has_word(&stripped, "while")
-                        && has_word(&stripped, "do")
-                        && !has_word(&stripped, "end"))
-                    || (starts_with_keyword(trimmed, "do") && !has_word(&stripped, "end"))
-                    || (starts_with_keyword(trimmed, "repeat") && !has_word(&stripped, "until"))
-                    || (starts_with_keyword(trimmed, "enum") && !has_word(&stripped, "end"));
+                        || (has_word(&stripped, "for")
+                            && has_word(&stripped, "do")
+                            && !has_word(&stripped, "end"))
+                        || (has_word(&stripped, "while")
+                            && has_word(&stripped, "do")
+                            && !has_word(&stripped, "end"))
+                        || (starts_with_keyword(trimmed, "do") && !has_word(&stripped, "end"))
+                        || (starts_with_keyword(trimmed, "repeat")
+                            && !has_word(&stripped, "until"))
+                        || (starts_with_keyword(trimmed, "enum") && !has_word(&stripped, "end"));
 
-                let is_match_block = starts_with_keyword(trimmed, "match")
-                    && !trimmed["match".len()..].trim_start().starts_with('=')
-                    && !has_word(&stripped, "end");
+                    let is_match_block = starts_with_keyword(trimmed, "match")
+                        && !trimmed["match".len()..].trim_start().starts_with('=')
+                        && !has_word(&stripped, "end");
 
-                if is_match_block {
-                    block_stack.push(BlockKind::Match { has_case: false });
-                    indent_level += 1;
-                } else if opens_normal_block {
-                    block_stack.push(BlockKind::Normal);
-                    indent_level += 1;
-                }
-            }
-
-            // Delimiters inside stripped code (safe from strings & comments)
-            // Braces {}
-            let open_braces = stripped.chars().filter(|&c| c == '{').count();
-            let close_braces = stripped.chars().filter(|&c| c == '}').count();
-            if open_braces > close_braces {
-                for _ in 0..(open_braces - close_braces) {
-                    block_stack.push(BlockKind::Normal);
-                    indent_level += 1;
-                }
-            } else if close_braces > open_braces {
-                for _ in 0..(close_braces - open_braces) {
-                    block_stack.pop();
-                    indent_level = indent_level.saturating_sub(1);
-                }
-            }
-
-            // Parens ()
-            let open_parens = stripped.chars().filter(|&c| c == '(').count();
-            let close_parens = stripped.chars().filter(|&c| c == ')').count();
-            if open_parens > close_parens {
-                for _ in 0..(open_parens - close_parens) {
-                    block_stack.push(BlockKind::Paren);
-                    indent_level += 1;
-                }
-            } else if close_parens > open_parens {
-                for _ in 0..(close_parens - open_parens) {
-                    if let Some(BlockKind::Paren) = block_stack.last() {
-                        block_stack.pop();
-                        indent_level = indent_level.saturating_sub(1);
+                    if is_match_block {
+                        block_stack.push(BlockKind::Match { has_case: false });
+                        indent_level += 1;
+                    } else if opens_normal_block {
+                        block_stack.push(BlockKind::Normal);
+                        indent_level += 1;
                     }
-                }
-            }
 
-            // Brackets []
-            let open_brackets = stripped.chars().filter(|&c| c == '[').count();
-            let close_brackets = stripped.chars().filter(|&c| c == ']').count();
-            if open_brackets > close_brackets {
-                for _ in 0..(open_brackets - close_brackets) {
-                    block_stack.push(BlockKind::Bracket);
-                    indent_level += 1;
-                }
-            } else if close_brackets > open_brackets {
-                for _ in 0..(close_brackets - open_brackets) {
-                    if let Some(BlockKind::Bracket) = block_stack.last() {
-                        block_stack.pop();
-                        indent_level = indent_level.saturating_sub(1);
+                    if open_braces > close_braces {
+                        for _ in 0..(open_braces - close_braces) {
+                            block_stack.push(BlockKind::Brace { adds_indent: true });
+                            indent_level += 1;
+                        }
+                    }
+                    if open_parens > close_parens {
+                        for _ in 0..(open_parens - close_parens) {
+                            block_stack.push(BlockKind::Paren { adds_indent: true });
+                            indent_level += 1;
+                        }
+                    }
+                    if open_brackets > close_brackets {
+                        for _ in 0..(open_brackets - close_brackets) {
+                            block_stack.push(BlockKind::Bracket { adds_indent: true });
+                            indent_level += 1;
+                        }
                     }
                 }
             }
@@ -611,5 +725,126 @@ mod tests {
         let formatted = format_source(input).unwrap();
         let expected = "local res = call(\n    arg1,\n    arg2\n)\n";
         assert_eq!(formatted, expected);
+    }
+
+    #[test]
+    fn test_format_source_callback_followed_by_statements() {
+        let input = "foo(function()\nprint(\"inside\")\nend)\nlocal after = 1\n";
+        let formatted = format_source(input).unwrap();
+        let expected = "foo(function()\n    print(\"inside\")\nend)\nlocal after = 1\n";
+        assert_eq!(formatted, expected);
+
+        let round_trip = format_source(&formatted).unwrap();
+        assert_eq!(round_trip, formatted);
+    }
+
+    #[test]
+    fn test_format_source_callback_in_table() {
+        let input = "local t = {\nf = function()\nreturn 1\nend,\n}\nlocal after = 2\n";
+        let formatted = format_source(input).unwrap();
+        let expected =
+            "local t = {\n    f = function()\n        return 1\n    end,\n}\nlocal after = 2\n";
+        assert_eq!(formatted, expected);
+
+        let round_trip = format_source(&formatted).unwrap();
+        assert_eq!(round_trip, formatted);
+    }
+
+    #[test]
+    fn test_format_source_pcall_callback() {
+        let input = "pcall(function()\nerror(\"err\")\nend)\nlocal after = 3\n";
+        let formatted = format_source(input).unwrap();
+        let expected = "pcall(function()\n    error(\"err\")\nend)\nlocal after = 3\n";
+        assert_eq!(formatted, expected);
+
+        let round_trip = format_source(&formatted).unwrap();
+        assert_eq!(round_trip, formatted);
+    }
+
+    #[test]
+    fn test_format_source_match_inside_function() {
+        let input = "function test(x)\nmatch x\ncase 1:\nreturn \"one\"\ncase 2:\nreturn \"two\"\ndefault:\nreturn \"other\"\nend\nend\n";
+        let formatted = format_source(input).unwrap();
+        let expected = "function test(x)\n    match x\n        case 1:\n            return \"one\"\n        case 2:\n            return \"two\"\n        default:\n            return \"other\"\n    end\nend\n";
+        assert_eq!(formatted, expected);
+
+        let round_trip = format_source(&formatted).unwrap();
+        assert_eq!(round_trip, formatted);
+    }
+
+    #[test]
+    fn test_format_source_repeat_until_multiline_condition() {
+        let input = "repeat\nwork()\nuntil (\ncond1\nand cond2\n)\n";
+        let formatted = format_source(input).unwrap();
+        let expected = "repeat\n    work()\nuntil (\n    cond1\n    and cond2\n)\n";
+        assert_eq!(formatted, expected);
+
+        let round_trip = format_source(&formatted).unwrap();
+        assert_eq!(round_trip, formatted);
+    }
+
+    #[test]
+    fn test_format_source_else_elseif_in_block() {
+        let input = "function test()\nif a then\nb()\nelseif c then\nd()\nelse\ne()\nend\nend\n";
+        let formatted = format_source(input).unwrap();
+        let expected = "function test()\n    if a then\n        b()\n    elseif c then\n        d()\n    else\n        e()\n    end\nend\n";
+        assert_eq!(formatted, expected);
+
+        let round_trip = format_source(&formatted).unwrap();
+        assert_eq!(round_trip, formatted);
+    }
+
+    #[test]
+    fn test_format_source_multiline_elseif_header() {
+        let input = "function test()\nif a then\nb()\nelseif c\nand d then\ne()\nend\nend\n";
+        let formatted = format_source(input).unwrap();
+        let expected = "function test()\n    if a then\n        b()\n    elseif c\n        and d then\n        e()\n    end\nend\n";
+        assert_eq!(formatted, expected);
+
+        let round_trip = format_source(&formatted).unwrap();
+        assert_eq!(round_trip, formatted);
+    }
+
+    #[test]
+    fn test_format_source_crlf_preservation() {
+        let input = "local x = 1\r\nif x then\r\nprint(x)\r\nend\r\n";
+        let formatted = format_source(input).unwrap();
+        let expected = "local x = 1\r\nif x then\r\n    print(x)\r\nend\r\n";
+        assert_eq!(formatted, expected);
+        assert!(formatted.contains("\r\n"));
+
+        let round_trip = format_source(&formatted).unwrap();
+        assert_eq!(round_trip, formatted);
+    }
+
+    #[test]
+    fn test_format_source_idempotency_all_files() {
+        let mut files = Vec::new();
+        collect_nyk_files(Path::new("tests"), &mut files);
+        collect_nyk_files(Path::new("examples"), &mut files);
+
+        assert!(
+            !files.is_empty(),
+            "Should find .nyk files in tests and examples"
+        );
+
+        for file in files {
+            let content = match fs::read_to_string(&file) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            if let Ok(first_format) = format_source(&content) {
+                let second_format = format_source(&first_format).unwrap_or_else(|err| {
+                    panic!("Second format failed on {}: {}", file.display(), err)
+                });
+                assert_eq!(
+                    first_format,
+                    second_format,
+                    "Formatting is not idempotent for file {}",
+                    file.display()
+                );
+            }
+        }
     }
 }
