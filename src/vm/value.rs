@@ -446,8 +446,8 @@ impl Value {
             TypeExpr::Nil => matches!(self, Value::Nil),
             TypeExpr::Named(name) => match name.to_lowercase().as_str() {
                 "any" => true,
-                "nil" | "void" => matches!(self, Value::Nil),
-                "never" => false,
+                "nil" => matches!(self, Value::Nil),
+                "never" | "void" => false,
                 "bool" | "boolean" => matches!(self, Value::Bool(_)),
                 "int" | "integer" | "i32" | "i64" | "u32" | "u64" => {
                     matches!(self, Value::Int(_) | Value::BigInt(_))
@@ -462,7 +462,30 @@ impl Value {
                     matches!(self, Value::Table(t) if t.try_borrow().is_ok_and(|t| t.co_state.is_some()))
                 }
                 "function" => matches!(self, Value::Closure(_) | Value::Native(..)),
-                _ => true,
+                other_name => {
+                    if let Value::Table(t) = self
+                        && let Ok(tbl) = t.try_borrow()
+                    {
+                        if let Value::String(e) = tbl.get_str("__enum")
+                            && e.eq_ignore_ascii_case(other_name)
+                        {
+                            return true;
+                        }
+                        if let Value::String(tp) = tbl.get_str("__type")
+                            && tp.eq_ignore_ascii_case(other_name)
+                        {
+                            return true;
+                        }
+                        if let Some(meta) = &tbl.metatable
+                            && let Ok(mt) = meta.try_borrow()
+                            && let Value::String(n) = mt.get_str("__name")
+                            && n.eq_ignore_ascii_case(other_name)
+                        {
+                            return true;
+                        }
+                    }
+                    false
+                }
             },
             TypeExpr::Optional(inner) => {
                 matches!(self, Value::Nil) || self.matches_type_expr(inner)

@@ -385,6 +385,14 @@ mod tests {
             builtin_checktype(&mut vm, &[Value::str("hello"), Value::str("int | string")]).unwrap();
         assert_eq!(res, vec![Value::Bool(true)]);
 
+        // void maps to Never, so it never matches
+        let res = builtin_checktype(&mut vm, &[Value::Nil, Value::str("void")]).unwrap();
+        assert_eq!(res, vec![Value::Bool(false)]);
+
+        // unknown named type must return false, not true
+        let res = builtin_checktype(&mut vm, &[Value::Int(42), Value::str("UnknownType")]).unwrap();
+        assert_eq!(res, vec![Value::Bool(false)]);
+
         // asserttype success
         let res = builtin_asserttype(&mut vm, &[Value::Int(42), Value::str("int")]).unwrap();
         assert_eq!(res, vec![Value::Int(42)]);

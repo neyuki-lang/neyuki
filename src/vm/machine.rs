@@ -17,7 +17,7 @@ use crate::vm::libs::{
 use crate::vm::ops;
 use crate::vm::value::{NativeDef, StrRef, Upvalue, Value, VmClosure, VmTable};
 
-pub const DEFAULT_MAX_CALL_DEPTH: usize = 16_384;
+pub const DEFAULT_MAX_CALL_DEPTH: usize = 512;
 
 /// A register of the running frame. The interpreter loop only calls this
 /// with indices below `base + max_registers` of a verified prototype, and
@@ -2847,17 +2847,21 @@ mod tests {
     }
 
     #[test]
-    fn test_vm_deep_recursion_exceeds_old_512_limit() {
-        // Deep recursion past old 512-frame limit (e.g. 1000 frames) now executes
-        // successfully without call stack overflow.
+    fn test_vm_recursion_limits_and_configurable_depth() {
         let code = "local function rec(n)\n  if n <= 1 then return 1 end\n  return rec(n - 1) + 1\nend\nreturn rec(1000)";
         let stmts = crate::compiler::compile_source(code).expect("syntax error");
         let proto = crate::compiler::compile_to_proto(&stmts);
         let mut vm = VM::new();
         assert_eq!(vm.max_call_depth(), DEFAULT_MAX_CALL_DEPTH);
+        assert_eq!(DEFAULT_MAX_CALL_DEPTH, 512);
+        let err = vm.execute(proto.clone());
+        assert!(err.is_err());
+        assert!(err.unwrap_err().contains("call stack overflow"));
+
+        vm.set_max_call_depth(2000);
         let res = vm
             .execute(proto)
-            .expect("recursion up to 1000 frames must succeed");
+            .expect("recursion up to 1000 frames must succeed with depth 2000");
         assert_eq!(res.to_string(), "1000");
     }
 

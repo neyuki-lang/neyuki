@@ -347,6 +347,9 @@ pub fn peek_binary_op(parser: &Parser) -> Option<(String, u8)> {
 }
 
 pub fn check_method_call(parser: &Parser) -> bool {
+    if parser.case_colon_pos == Some(parser.pos) {
+        return false;
+    }
     parser.check_symbol(":")
         && parser
             .tokens

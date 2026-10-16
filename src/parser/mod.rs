@@ -43,6 +43,7 @@ pub struct Parser {
     pub(crate) depth: usize,
     pub(crate) span_pool: SpanPool,
     pub(crate) statements_count: usize,
+    pub(crate) case_colon_pos: Option<usize>,
 }
 
 impl Parser {
@@ -59,6 +60,7 @@ impl Parser {
             depth: 0,
             span_pool: SpanPool::new(),
             statements_count: 0,
+            case_colon_pos: None,
         }
     }
 
@@ -76,6 +78,7 @@ impl Parser {
                 depth: 0,
                 span_pool: SpanPool::new(),
                 statements_count: 0,
+                case_colon_pos: None,
             },
             comments,
         )

@@ -16,11 +16,82 @@ pub fn parse_statement(parser: &mut Parser) -> Result<Stmt, String> {
     Ok(stmt)
 }
 
+fn is_enum_statement(parser: &Parser) -> bool {
+    if !parser.check_word("enum") {
+        return false;
+    }
+    let Some(t1) = parser.tokens.get(parser.pos + 1) else {
+        return false;
+    };
+    if t1.kind != "name" {
+        return false;
+    }
+    if let Some(t2) = parser.tokens.get(parser.pos + 2) {
+        if t2.kind == "symbol"
+            && (t2.value == "="
+                || t2.value == ","
+                || t2.value == "("
+                || t2.value == "."
+                || t2.value == "["
+                || t2.value == ":"
+                || t2.value == "++"
+                || t2.value == "--")
+        {
+            return false;
+        }
+        if t2.kind == "symbol"
+            && (ActionHelper::compound_assign_binop(&t2.value).is_some() || t2.value == "??=")
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_match_statement(parser: &Parser) -> bool {
+    if !parser.check_word("match") {
+        return false;
+    }
+    let Some(t1) = parser.tokens.get(parser.pos + 1) else {
+        return false;
+    };
+    if t1.kind == "symbol" {
+        if matches!(t1.value.as_str(), "=" | "," | "." | "[" | ":" | "++" | "--") {
+            return false;
+        }
+        if ActionHelper::compound_assign_binop(&t1.value).is_some() || t1.value == "??=" {
+            return false;
+        }
+        if t1.value == "(" {
+            let mut depth = 1;
+            let mut i = parser.pos + 2;
+            while i < parser.tokens.len() && depth > 0 {
+                let tok = &parser.tokens[i];
+                if tok.kind == "symbol" {
+                    if tok.value == "(" {
+                        depth += 1;
+                    } else if tok.value == ")" {
+                        depth -= 1;
+                    }
+                }
+                i += 1;
+            }
+            if depth == 0 && i < parser.tokens.len() {
+                let after = &parser.tokens[i];
+                return (after.kind == "name" || after.kind == "keyword")
+                    && matches!(after.value.as_str(), "case" | "default" | "end");
+            }
+            return false;
+        }
+    }
+    true
+}
+
 pub fn parse_statement_inner(parser: &mut Parser) -> Result<Stmt, String> {
-    if parser.check_word("enum") {
+    if is_enum_statement(parser) {
         return parse_enum(parser);
     }
-    if parser.check_word("match") {
+    if is_match_statement(parser) {
         return parse_match(parser);
     }
     if parser.check_keyword("do") {
@@ -65,11 +136,20 @@ pub fn parse_statement_inner(parser: &mut Parser) -> Result<Stmt, String> {
 #[inline(never)]
 fn parse_return(parser: &mut Parser) -> Result<Stmt, String> {
     parser.pos += 1;
+    let is_case_clause = parser.check_word("case");
+    let is_default_clause = parser.check_word("default")
+        && parser
+            .tokens
+            .get(parser.pos + 1)
+            .is_some_and(|t| t.value == ":");
+
     let expr = if !parser.is_eof()
         && !parser.check_keyword("end")
         && !parser.check_keyword("else")
         && !parser.check_keyword("elseif")
         && !parser.check_keyword("until")
+        && !is_case_clause
+        && !is_default_clause
     {
         let mut values = vec![parse_expr(parser)?];
         while parser.match_symbol(",") {
@@ -644,6 +724,33 @@ pub fn parse_enum(parser: &mut Parser) -> Result<Stmt, String> {
     })
 }
 
+fn find_case_colon(parser: &Parser) -> Option<usize> {
+    let mut depth: usize = 0;
+    let mut last_colon = None;
+    let mut i = parser.pos;
+    while i < parser.tokens.len() {
+        let tok = &parser.tokens[i];
+        if tok.kind == "symbol" {
+            match tok.value.as_str() {
+                "(" | "[" | "{" => depth += 1,
+                ")" | "]" | "}" => depth = depth.saturating_sub(1),
+                ":" if depth == 0 => {
+                    last_colon = Some(i);
+                }
+                _ => {}
+            }
+        }
+        if depth == 0
+            && (tok.kind == "name" || tok.kind == "keyword")
+            && (tok.value == "case" || tok.value == "default" || tok.value == "end")
+        {
+            break;
+        }
+        i += 1;
+    }
+    last_colon
+}
+
 pub fn parse_match(parser: &mut Parser) -> Result<Stmt, String> {
     parser.expect_word("match")?;
     let target_expr = parse_expr(parser)?;
@@ -679,9 +786,24 @@ pub fn parse_match(parser: &mut Parser) -> Result<Stmt, String> {
                 }
                 default_body = Some(stmts);
             } else {
-                let (condition, mut bindings) = parse_pattern_test(parser, &match_var_name)?;
+                parser.case_colon_pos = find_case_colon(parser);
+                let pattern_res = parse_pattern_test(parser, &match_var_name);
+                let (condition, mut bindings) = match pattern_res {
+                    Ok(res) => res,
+                    Err(e) => {
+                        parser.case_colon_pos = None;
+                        return Err(e);
+                    }
+                };
                 let condition = if parser.match_word("if") {
-                    let mut guard = parse_expr(parser)?;
+                    let guard_res = parse_expr(parser);
+                    let mut guard = match guard_res {
+                        Ok(g) => g,
+                        Err(e) => {
+                            parser.case_colon_pos = None;
+                            return Err(e);
+                        }
+                    };
                     for b in &bindings {
                         if let Stmt::Local {
                             name,
@@ -701,7 +823,9 @@ pub fn parse_match(parser: &mut Parser) -> Result<Stmt, String> {
                 } else {
                     condition
                 };
-                parser.expect_symbol(":")?;
+                let colon_res = parser.expect_symbol(":");
+                parser.case_colon_pos = None;
+                colon_res?;
                 let mut body = Vec::new();
                 while !parser.check_word("case")
                     && !parser.check_word("default")
@@ -765,12 +889,35 @@ fn parse_pattern_test(
         id: NodeId::next(),
     };
 
-    if parser.peek().kind == "number"
-        || parser.peek().kind == "string"
-        || parser.check_keyword("true")
-        || parser.check_keyword("false")
-        || parser.check_keyword("nil")
-    {
+    if parser.match_keyword("true") {
+        let cond = Expr::Binary {
+            left: Box::new(match_var()),
+            op: crate::ast::op::BinOp::Eq,
+            right: Box::new(Expr::bool(true)),
+            id: NodeId::next(),
+        };
+        return Ok((cond, Vec::new()));
+    }
+    if parser.match_keyword("false") {
+        let cond = Expr::Binary {
+            left: Box::new(match_var()),
+            op: crate::ast::op::BinOp::Eq,
+            right: Box::new(Expr::bool(false)),
+            id: NodeId::next(),
+        };
+        return Ok((cond, Vec::new()));
+    }
+    if parser.match_keyword("nil") {
+        let cond = Expr::Binary {
+            left: Box::new(match_var()),
+            op: crate::ast::op::BinOp::Eq,
+            right: Box::new(Expr::nil()),
+            id: NodeId::next(),
+        };
+        return Ok((cond, Vec::new()));
+    }
+
+    if parser.peek().kind == "number" || parser.peek().kind == "string" {
         let lit_expr = parse_expr(parser)?;
         let cond = Expr::Binary {
             left: Box::new(match_var()),
