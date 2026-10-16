@@ -1547,17 +1547,27 @@ impl VM {
                     let rb = &reg!(b);
                     let res = match (ra, rb) {
                         (Value::Int(x), Value::Int(y)) if *x >= 0 && *y >= 0 => {
-                            let headroom = x.leading_zeros().saturating_sub(1) as i64;
-                            if *y <= headroom {
-                                Value::Int(x << *y)
-                            } else if *y < 127 {
-                                Value::from_i128((*x as i128) << *y)
-                            } else if (*y as u64) <= ops::MAX_INT_BITS {
-                                Value::BigInt(std::rc::Rc::new(
-                                    num_bigint::BigInt::from(*x) << (*y as usize),
-                                ))
+                            if *x == 0 {
+                                Value::Int(0)
                             } else {
-                                attempt!(ops::eval_shl(ra, rb))
+                                let headroom = x.leading_zeros().saturating_sub(1) as i64;
+                                let headroom128 = (64 + x.leading_zeros() as i64).saturating_sub(1);
+                                if *y <= headroom {
+                                    Value::Int(x << *y)
+                                } else if *y <= headroom128 {
+                                    Value::from_i128((*x as i128) << *y)
+                                } else {
+                                    let x_bits = 64 - x.leading_zeros() as u64;
+                                    if (*y as u64) <= ops::MAX_INT_BITS
+                                        && x_bits.saturating_add(*y as u64) <= ops::MAX_INT_BITS
+                                    {
+                                        Value::BigInt(std::rc::Rc::new(
+                                            num_bigint::BigInt::from(*x) << (*y as usize),
+                                        ))
+                                    } else {
+                                        attempt!(ops::eval_shl(ra, rb))
+                                    }
+                                }
                             }
                         }
                         (Value::BigInt(x), Value::Int(y)) if *y >= 0 => {
@@ -3225,6 +3235,77 @@ return path .. \" \" .. params.name .. \" \" .. http.encode(\"a b\")";
     #[test]
     fn test_vm_require_caches_modules() {
         let code = "return require(\"@neyuki/io\") == require(\"@neyuki/io\")";
+        assert_eq!(run_code(code).to_string(), "true");
+    }
+
+    #[test]
+    fn test_inliner_param_reassignment_with_branches() {
+        let code = "local function abs(x)
+            if x < 0 then
+                x = -x
+            end
+            return x
+        end
+        return abs(5) + abs(-5) + abs(0)";
+        assert_eq!(run_code(code).to_string(), "10");
+    }
+
+    #[test]
+    fn test_inliner_nested_helper_resolution() {
+        let code = "local function outer(n)
+            local function helper(x)
+                return x * 2 + 1
+            end
+            return helper(n) + helper(n + 1)
+        end
+        return outer(3)";
+        assert_eq!(run_code(code).to_string(), "16");
+    }
+
+    #[test]
+    fn test_vm_shl_bit_overflow_past_i128() {
+        let code = "return ((1 << 62) << 70) == (1 << 132)";
+        assert_eq!(run_code(code).to_string(), "true");
+    }
+
+    #[test]
+    fn test_vm_bigint_mul_neg1_normalization() {
+        let code = "local prod = (1 << 63) * -1
+        local min_int = -9223372036854775807 - 1
+        local t = {}
+        t[prod] = \"found\"
+        return (prod == min_int) and (t[min_int] == \"found\")";
+        assert_eq!(run_code(code).to_string(), "true");
+    }
+
+    #[test]
+    fn test_vm_shl_huge_shift_does_not_panic() {
+        let code = "local x = 1
+        local y = 4294967296
+        local ok, err = pcall(function() return x << y end)
+        return not ok";
+        assert_eq!(run_code(code).to_string(), "true");
+    }
+
+    #[test]
+    fn test_licm_metamethod_call_count_preserved() {
+        let code = "local count = 0
+        local mt = {
+            __add = function(a, b)
+                count += 1
+                return a.val + b.val
+            end
+        }
+        local a = { val = 10 }
+        setmetatable(a, mt)
+        local b = { val = 20 }
+        setmetatable(b, mt)
+        local sum = 0
+        for i = 1, 5 do
+            local x = a + b
+            sum += x
+        end
+        return sum == 150 and count == 5";
         assert_eq!(run_code(code).to_string(), "true");
     }
 }

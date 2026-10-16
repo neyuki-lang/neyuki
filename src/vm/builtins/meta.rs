@@ -45,6 +45,9 @@ pub fn builtin_setmetatable(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, S
                     } else {
                         vm.gc.unpin_table(t);
                     }
+                    if crate::vm::gc::table_weak_values(t) {
+                        vm.gc.has_weak_tables = true;
+                    }
                     Ok(vec![tbl_val.clone()])
                 }
                 _ => Err("metatable must be a table or nil".to_string()),

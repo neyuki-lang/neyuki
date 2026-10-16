@@ -62,32 +62,12 @@ fn is_hoistable_body(inst: &IrInst) -> bool {
 }
 
 /// In the loop header, instructions before the exit test run unconditionally on loop entry.
+/// Only pure, side-effect-free instructions with no potential metamethod invocations or runtime errors can be hoisted.
 fn is_hoistable_header(inst: &IrInst) -> bool {
-    match inst {
-        IrInst::LoadConst { .. } | IrInst::LoadNil { .. } | IrInst::Move { .. } => true,
-        IrInst::BinOp { op, .. } => matches!(
-            op,
-            crate::compiler::ir::types::IrBinaryOp::Add
-                | crate::compiler::ir::types::IrBinaryOp::Sub
-                | crate::compiler::ir::types::IrBinaryOp::Mul
-                | crate::compiler::ir::types::IrBinaryOp::BitAnd
-                | crate::compiler::ir::types::IrBinaryOp::BitOr
-                | crate::compiler::ir::types::IrBinaryOp::BitXor
-                | crate::compiler::ir::types::IrBinaryOp::Eq
-                | crate::compiler::ir::types::IrBinaryOp::Ne
-                | crate::compiler::ir::types::IrBinaryOp::Lt
-                | crate::compiler::ir::types::IrBinaryOp::Le
-                | crate::compiler::ir::types::IrBinaryOp::Gt
-                | crate::compiler::ir::types::IrBinaryOp::Ge
-        ),
-        IrInst::UnOp { op, .. } => matches!(
-            op,
-            crate::compiler::ir::types::IrUnaryOp::Neg
-                | crate::compiler::ir::types::IrUnaryOp::Not
-                | crate::compiler::ir::types::IrUnaryOp::BitNot
-        ),
-        _ => false,
-    }
+    matches!(
+        inst,
+        IrInst::LoadConst { .. } | IrInst::LoadNil { .. } | IrInst::Move { .. }
+    )
 }
 
 /// Ensures the loop header has a dedicated pre-header block outside the loop.

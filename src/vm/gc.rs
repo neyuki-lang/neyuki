@@ -188,21 +188,6 @@ impl GcTracker {
         self.young.push((Rc::downgrade(rc), size, alloc_id));
     }
 
-    /// Prunes dead young tables between GC cycles to release their weak handles
-    /// and keep `bytes_allocated` tracking accurate without triggering premature cycles.
-    pub fn prune_young(&mut self) {
-        let mut dropped = 0;
-        self.young.retain(|(weak, size, _)| {
-            if weak.strong_count() == 0 {
-                dropped += *size;
-                false
-            } else {
-                true
-            }
-        });
-        self.bytes_allocated = self.bytes_allocated.saturating_sub(dropped);
-    }
-
     /// Moves the young tables that are still alive into `tables` and
     /// returns the bytes of those that already died.
     pub fn flush_young(&mut self) -> usize {
@@ -311,7 +296,6 @@ impl GcTracker {
     }
 
     pub fn mark_roots(&mut self, stack: &[Value], globals: &Globals) {
-        self.has_weak_tables = false;
         self.gray_stack.clear();
         for val in stack {
             self.mark_value(val);
@@ -665,6 +649,7 @@ impl GcTracker {
         } else {
             Vec::new()
         };
+        self.has_weak_tables = !weak_black.is_empty();
 
         self.sweep_plain = plain;
         self.sweep_buf_remove = to_remove_buffers;

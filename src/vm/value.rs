@@ -49,6 +49,12 @@ macro_rules! native {
 #[derive(Clone, Debug)]
 pub struct VmString {
     pub str: String,
+    /// Fast hash computed with `crate::vm::hash::fx_hash_bytes(str.as_bytes())`
+    /// for `FieldMap` index lookups.
+    ///
+    /// NOTE: This is distinct from `<str as std::hash::Hash>::hash` from the
+    /// standard library (which appends a `0xff` delimiter byte). The two hash
+    /// domains are separate and must never be mixed.
     pub hash: u64,
 }
 

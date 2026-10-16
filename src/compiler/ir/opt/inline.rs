@@ -43,40 +43,43 @@ fn is_inlinable_body_inst(inst: &IrInst) -> bool {
     )
 }
 
+fn build_candidates(func: &IrFunction) -> HashMap<usize, IrFunction> {
+    func.protos
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, f)| {
+            if is_inline_candidate(f) {
+                Some((idx, f.clone()))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn inline_func_tree(func: &mut IrFunction) -> bool {
+    let mut changed = false;
+    for proto in &mut func.protos {
+        if inline_func_tree(proto) {
+            changed = true;
+        }
+    }
+    let candidates = build_candidates(func);
+    if !candidates.is_empty() && inline_in_func(func, &candidates) {
+        changed = true;
+    }
+    changed
+}
+
 pub fn inline_functions(module: &mut IrModule) -> bool {
     let mut any_changed = false;
     const MAX_INLINE_ROUNDS: usize = 2;
 
     for _ in 0..MAX_INLINE_ROUNDS {
-        let candidates: HashMap<usize, IrFunction> = module
-            .main
-            .protos
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, f)| {
-                if is_inline_candidate(f) {
-                    Some((idx, f.clone()))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        if candidates.is_empty() {
-            break;
-        }
-
         let mut round_changed = false;
-        if inline_in_func(&mut module.main, &candidates, None) {
+        if inline_func_tree(&mut module.main) {
             round_changed = true;
             any_changed = true;
-        }
-
-        for (idx, proto) in module.main.protos.iter_mut().enumerate() {
-            if inline_in_func(proto, &candidates, Some(idx)) {
-                round_changed = true;
-                any_changed = true;
-            }
         }
 
         if !round_changed {
@@ -87,11 +90,7 @@ pub fn inline_functions(module: &mut IrModule) -> bool {
     any_changed
 }
 
-fn inline_in_func(
-    func: &mut IrFunction,
-    candidates: &HashMap<usize, IrFunction>,
-    self_idx: Option<usize>,
-) -> bool {
+fn inline_in_func(func: &mut IrFunction, candidates: &HashMap<usize, IrFunction>) -> bool {
     let mut def_count: HashMap<IrVar, usize> = HashMap::new();
     let mut move_alias: HashMap<IrVar, IrVar> = HashMap::new();
     let mut closure_map: HashMap<IrVar, usize> = HashMap::new();
@@ -153,9 +152,7 @@ fn inline_in_func(
                 &setglobal_srcs,
                 &def_count,
             )
-            .filter(|&idx| self_idx != Some(idx))
             .and_then(|idx| candidates.get(&idx))
-            .filter(|f| self_idx.is_none() || f.upvalue_vars.is_empty())
             .filter(|f| f.num_params as usize == args.len())
             .map(|target| (target, dsts[0], args.clone())),
             _ => None,
@@ -262,7 +259,10 @@ fn splice_call(
             IrInst::Return(ret_vars) => {
                 match ret_vars.first() {
                     Some(&ret_v) => {
-                        let resolved_ret = var_map.get(&ret_v).copied().unwrap_or(ret_v);
+                        let Some(&resolved_ret) = var_map.get(&ret_v) else {
+                            out.truncate(checkpoint);
+                            return false;
+                        };
                         out.push(IrInst::Move {
                             dst: out_dst,
                             src: resolved_ret,
@@ -408,6 +408,9 @@ fn is_inline_candidate(func: &IrFunction) -> bool {
     });
     if has_branches {
         let mut def_counts = HashMap::new();
+        for i in 0..func.num_params {
+            *def_counts.entry(IrVar(i as u32)).or_insert(0) += 1;
+        }
         for inst in &body {
             for d in inst.def_vars() {
                 *def_counts.entry(d).or_insert(0) += 1;

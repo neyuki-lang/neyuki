@@ -1,0 +1,103 @@
+-- Regression tests for PR #11 review feedback
+
+-- 1. Inliner Issue #1: Parameter reassignment across conditional branches
+local function abs_val(x)
+    if x < 0 then
+        x = -x
+    end
+    return x
+end
+assert(abs_val(5) == 5, "abs_val(5) should be 5")
+assert(abs_val(-5) == 5, "abs_val(-5) should be 5")
+assert(abs_val(0) == 0, "abs_val(0) should be 0")
+
+-- 2. Inliner Issue #2: Nested helper closure resolution inside outer function
+local function outer(n)
+    local function helper(x)
+        return x * 2 + 1
+    end
+    return helper(n) + helper(n + 1)
+end
+assert(outer(3) == 7 + 9, "outer(3) should be 16")
+assert(outer(0) == 1 + 3, "outer(0) should be 4")
+
+-- 3. Left shift silent 128-bit overflow
+-- Shifting 63-bit int (1 << 62) by 70 bits requires 133 bits: must widen to BigInt, not truncate to 0.
+assert(((1 << 62) << 70) == (1 << 132), "shl ((1 << 62) << 70) must equal 1 << 132")
+assert(((1 << 62) << 70) != 0, "shl ((1 << 62) << 70) must not be 0")
+local huge_ok = pcall(function() local x = 1; local y = 4294967296; return x << y end)
+assert(not huge_ok, "huge shift exceeding integer limit must error cleanly rather than panic")
+
+
+-- 4. BigInt * -1 normalization
+-- 1 << 63 is BigInt (i64::MAX + 1). (1 << 63) * -1 equals i64::MIN and must normalize to Value::Int.
+local min_int = -9223372036854775807 - 1
+local prod = (1 << 63) * -1
+assert(prod == min_int, "BigInt * -1 must normalize to i64::MIN")
+local prod_rev = -1 * (1 << 63)
+assert(prod_rev == min_int, "-1 * BigInt must normalize to i64::MIN")
+
+local map = {}
+map[prod] = "normalized_ok"
+assert(map[min_int] == "normalized_ok", "table lookup with normalized int key failed")
+
+-- 5. LICM semantic preservation: dynamic metamethod call count in loops
+local add_count = 0
+local mt = {
+    __add = function(a, b)
+        add_count += 1
+        return a.val + b.val
+    end
+}
+local a = { val = 10 }
+setmetatable(a, mt)
+local b = { val = 20 }
+setmetatable(b, mt)
+
+local loop_sum = 0
+for i = 1, 5 do
+    local res = a + b
+    loop_sum += res
+end
+assert(loop_sum == 150, "loop_sum should be 150")
+assert(add_count == 5, "__add metamethod must be called exactly 5 times (once per iteration)")
+
+-- 6. GC weak tables preservation and pruning
+local strong_tbl = {}
+local weak_tbl = setmetatable({}, { __mode = "v" })
+
+local function populate_weak_test()
+    local item1 = { id = 1 }
+    local item2 = { id = 2 }
+    strong_tbl.saved = item1
+    weak_tbl.survivor = item1
+    weak_tbl.victim = item2
+end
+
+pcall(populate_weak_test)
+collectgarbage("collect")
+assert(weak_tbl.survivor != nil, "alive reference held strongly should survive GC in weak table")
+assert(weak_tbl.survivor.id == 1, "survivor contents should remain intact")
+assert(weak_tbl.victim == nil, "unreferenced entry should be pruned by GC in weak table")
+
+-- Dynamic __mode set on existing metatable after setmetatable call
+local strong_tbl2 = {}
+local mt2 = {}
+local weak_tbl2 = setmetatable({}, mt2)
+mt2.__mode = "v"
+
+local function populate_weak_test2()
+    local item1 = { id = 10 }
+    local item2 = { id = 20 }
+    strong_tbl2.saved = item1
+    weak_tbl2.survivor = item1
+    weak_tbl2.victim = item2
+end
+
+pcall(populate_weak_test2)
+collectgarbage("collect")
+assert(weak_tbl2.survivor != nil, "alive reference held strongly should survive GC in weak table (dynamic __mode)")
+assert(weak_tbl2.survivor.id == 10, "survivor contents should remain intact (dynamic __mode)")
+assert(weak_tbl2.victim == nil, "unreferenced entry should be pruned by GC in weak table (dynamic __mode)")
+
+print("[pass] PR #11 review regression tests passed")

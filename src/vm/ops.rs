@@ -199,7 +199,7 @@ pub fn eval_mul(a: &Value, b: &Value) -> Result<Value, String> {
             } else if *ib == 1 {
                 Ok(Value::BigInt(ia.clone()))
             } else if *ib == -1 {
-                Ok(Value::BigInt(Rc::new(-&**ia)))
+                Ok(Value::from_bigint(-&**ia))
             } else {
                 Ok(Value::BigInt(Rc::new(&**ia * *ib)))
             }
@@ -211,7 +211,7 @@ pub fn eval_mul(a: &Value, b: &Value) -> Result<Value, String> {
             } else if *ia == 1 {
                 Ok(Value::BigInt(ib.clone()))
             } else if *ia == -1 {
-                Ok(Value::BigInt(Rc::new(-&**ib)))
+                Ok(Value::from_bigint(-&**ib))
             } else {
                 Ok(Value::BigInt(Rc::new(*ia * &**ib)))
             }
@@ -490,13 +490,18 @@ fn shift_left(ia: &Value, shift: usize) -> Result<Value, String> {
             if shift <= headroom {
                 return Ok(Value::Int(i << shift));
             }
-            if shift < 127 && (*i >= 0 || *i != i64::MIN) {
-                let val128 = (*i as i128) << shift;
-                return Ok(Value::from_i128(val128));
+            let val128 = *i as i128;
+            let headroom128 = if *i >= 0 {
+                val128.leading_zeros() - 1
+            } else {
+                val128.leading_ones() - 1
+            } as usize;
+            if shift <= headroom128 && ((val128 << shift) >> shift) == val128 {
+                return Ok(Value::from_i128(val128 << shift));
             }
             let bits = i64_bits(*i);
             check_int_bits(bits.saturating_add(shift as u64))?;
-            Ok(Value::BigInt(Rc::new(BigInt::from(*i) << shift)))
+            Ok(Value::from_bigint(BigInt::from(*i) << shift))
         }
         Value::BigInt(b) => {
             if b.is_zero() {
