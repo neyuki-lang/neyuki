@@ -557,4 +557,116 @@ return #collected * 100 + total(table.unpack(collected))";
             assert_eq!(first, again, "codegen differs between runs");
         }
     }
+
+    #[test]
+    fn test_ir_register_coalescing_eliminates_redundant_moves() {
+        let code = r#"
+            local x = 100
+            local y = x
+            local z = y
+            return z
+        "#;
+        let stmts = compile_source(code).expect("syntax error");
+        let proto = crate::compiler::try_compile_to_proto(&stmts).expect("lowering failed");
+        let move_count = proto
+            .instructions
+            .iter()
+            .filter(|i| matches!(i, crate::bytecode::instruction::Instruction::Move { .. }))
+            .count();
+        assert_eq!(
+            move_count, 0,
+            "All redundant moves should be coalesced away"
+        );
+        assert_eq!(run_via_ir(code), "100");
+    }
+
+    #[test]
+    fn test_ir_loop_invariant_code_motion_hoisting() {
+        let code = r#"
+            local sum = 0
+            for i = 1, 10 do
+                local c = 42
+                sum = sum + c
+            end
+            return sum
+        "#;
+        assert_eq!(run_via_ir(code), "420");
+    }
+
+    #[test]
+    fn test_ir_inlining_small_function_with_branches() {
+        let code = r#"
+            local function max(a, b)
+                if a > b then
+                    return a
+                else
+                    return b
+                end
+            end
+            local x = max(10, 20)
+            local y = max(50, 5)
+            return x + y
+        "#;
+        let stmts = compile_source(code).expect("syntax error");
+        let proto = crate::compiler::try_compile_to_proto(&stmts).expect("lowering failed");
+        let call_count = proto
+            .instructions
+            .iter()
+            .filter(|i| matches!(i, crate::bytecode::instruction::Instruction::Call { .. }))
+            .count();
+        assert_eq!(call_count, 0, "Calls to max should be fully inlined");
+        assert_eq!(run_via_ir(code), "70");
+    }
+
+    #[test]
+    fn test_ir_inline_function_with_while_loop_not_inlined_into_infinite_loop() {
+        let code = r#"
+            local function loop_fn(n)
+                local i = 0
+                while i < n do
+                    i = i + 1
+                end
+                return i
+            end
+            local res = loop_fn(3)
+            return res
+        "#;
+        assert_eq!(run_via_ir(code), "3");
+    }
+
+    #[test]
+    fn test_ir_inline_function_with_mutable_vars_across_branches_correctness() {
+        let code = r#"
+            local function f(cond)
+                local x = 1
+                if cond then
+                    x = 2
+                else
+                    x = 3
+                end
+                return x
+            end
+            local a = f(true)
+            local b = f(false)
+            return a .. ":" .. b
+        "#;
+        assert_eq!(run_via_ir(code), "2:3");
+    }
+
+    #[test]
+    fn test_ir_jump_threading_chained_jumps() {
+        let code = r#"
+            local x = 10
+            local y = 20
+            if x < 5 then
+                y = 100
+            elseif x < 8 then
+                y = 200
+            else
+                y = 300
+            end
+            return y
+        "#;
+        assert_eq!(run_via_ir(code), "300");
+    }
 }

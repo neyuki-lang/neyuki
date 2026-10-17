@@ -53,6 +53,8 @@ pub enum Instruction {
     // Table operations
     NewTable {
         dst: u8,
+        array_cap: u8,
+        fields_cap: u8,
     },
     GetTable {
         dst: u8,

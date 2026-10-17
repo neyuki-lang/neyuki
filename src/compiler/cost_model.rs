@@ -51,8 +51,8 @@ impl CostModel {
 
     /// Small leaf functions without varargs or nested functions.
     pub fn should_inline_ir(&self, func: &IrFunction) -> bool {
-        const MAX_INLINE_COST: u32 = 40;
-        const MAX_INLINE_INSTRUCTIONS: usize = 30;
+        const MAX_INLINE_COST: u32 = 45;
+        const MAX_INLINE_INSTRUCTIONS: usize = 32;
 
         if func.is_vararg || !func.protos.is_empty() {
             return false;

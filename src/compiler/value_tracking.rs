@@ -451,7 +451,7 @@ impl ValueTracker {
                         let res = eval_unop(*op, &s_val);
                         state.insert(*dst, res);
                     }
-                    IrInst::NewTable { dst } => {
+                    IrInst::NewTable { dst, .. } => {
                         state.insert(*dst, TrackedValue::NonNil);
                     }
                     IrInst::Phi { dst, incoming } => {

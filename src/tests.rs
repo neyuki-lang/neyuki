@@ -15,10 +15,10 @@ pub struct TestResult {
     pub error: Option<String>,
 }
 
-pub fn run_test_file(path: &Path) -> TestResult {
+pub fn run_test_file_with_options(path: &Path, options: crate::compiler::Options) -> TestResult {
     let start = Instant::now();
     let path_str = path.to_str().expect("path should be valid UTF-8");
-    let res = vm::run_file(path_str);
+    let res = vm::run_file_with_options(path_str, options);
     let duration_ms = start.elapsed().as_millis();
 
     match res {
@@ -35,6 +35,10 @@ pub fn run_test_file(path: &Path) -> TestResult {
             error: Some(err),
         },
     }
+}
+
+pub fn run_test_file(path: &Path) -> TestResult {
+    run_test_file_with_options(path, crate::compiler::Options::RUN)
 }
 
 pub fn collect_test_files(tests_dir: &Path, filter: Option<&str>) -> Vec<PathBuf> {
@@ -114,11 +118,21 @@ mod integration_tests {
         let files = collect_test_files(tests_dir, None);
         assert!(!files.is_empty(), "expected tests/*.nyk files to exist");
 
-        for path in files {
-            let result = run_test_file(&path);
+        for path in &files {
+            let result = run_test_file(path);
             assert!(
                 result.success,
                 "Test script '{}' failed: {:?}",
+                path.display(),
+                result.error
+            );
+        }
+
+        for path in &files {
+            let result = run_test_file_with_options(path, crate::compiler::Options::DEBUG);
+            assert!(
+                result.success,
+                "Test script '{}' (unoptimized) failed: {:?}",
                 path.display(),
                 result.error
             );

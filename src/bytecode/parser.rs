@@ -304,7 +304,13 @@ fn parse_instruction_line(line: &str) -> Result<Option<Instruction>, String> {
         }
         "NEWTABLE" => {
             let dst = parse_reg(parts.get(1).ok_or("NEWTABLE missing dst")?)?;
-            Ok(Some(Instruction::NewTable { dst }))
+            let array_cap = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let fields_cap = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+            Ok(Some(Instruction::NewTable {
+                dst,
+                array_cap,
+                fields_cap,
+            }))
         }
         "GETTABLE" => {
             let dst = parse_reg(parts.get(1).ok_or("GETTABLE missing dst")?)?;
@@ -769,7 +775,11 @@ mod tests {
             src: 6,
             upval_idx: 1,
         });
-        proto.instructions.push(Instruction::NewTable { dst: 7 });
+        proto.instructions.push(Instruction::NewTable {
+            dst: 7,
+            array_cap: 0,
+            fields_cap: 0,
+        });
         proto.instructions.push(Instruction::GetTable {
             dst: 8,
             table: 7,
