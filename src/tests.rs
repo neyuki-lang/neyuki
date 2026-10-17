@@ -118,8 +118,8 @@ mod integration_tests {
         let files = collect_test_files(tests_dir, None);
         assert!(!files.is_empty(), "expected tests/*.nyk files to exist");
 
-        for path in files {
-            let result = run_test_file(&path);
+        for path in &files {
+            let result = run_test_file(path);
             assert!(
                 result.success,
                 "Test script '{}' failed: {:?}",
@@ -127,16 +127,9 @@ mod integration_tests {
                 result.error
             );
         }
-    }
 
-    #[test]
-    fn test_all_nyk_integration_files_unoptimized() {
-        let tests_dir = Path::new("tests");
-        let files = collect_test_files(tests_dir, None);
-        assert!(!files.is_empty(), "expected tests/*.nyk files to exist");
-
-        for path in files {
-            let result = run_test_file_with_options(&path, crate::compiler::Options::DEBUG);
+        for path in &files {
+            let result = run_test_file_with_options(path, crate::compiler::Options::DEBUG);
             assert!(
                 result.success,
                 "Test script '{}' (unoptimized) failed: {:?}",
