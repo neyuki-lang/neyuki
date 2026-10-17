@@ -13,15 +13,13 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::compiler::ir::block::{IrFunction, IrModule};
+use crate::compiler::ir::block::{IrFunction, IrModule, UpvalSource};
 use crate::compiler::ir::inst::IrInst;
-use crate::compiler::ir::types::IrVar;
+use crate::compiler::ir::types::{IrLabel, IrVar};
 
-const MAX_INLINE_INSTRUCTIONS: usize = 16;
+const MAX_INLINE_INSTRUCTIONS: usize = 32;
 
 /// Frame-independent ops: relocating them into the caller preserves meaning.
-/// Anything else (calls, control flow, labels, upvalues, varargs, spreads,
-/// nested functions) rejects the candidate.
 fn is_inlinable_body_inst(inst: &IrInst) -> bool {
     matches!(
         inst,
@@ -37,16 +35,16 @@ fn is_inlinable_body_inst(inst: &IrInst) -> bool {
             | IrInst::GetGlobal { .. }
             | IrInst::SetGlobal { .. }
             | IrInst::AppendArray { .. }
+            | IrInst::GetUpval { .. }
+            | IrInst::SetUpval { .. }
+            | IrInst::Label(_)
+            | IrInst::Jump(_)
+            | IrInst::JumpIfFalse { .. }
     )
 }
 
-pub fn inline_functions(module: &mut IrModule) -> bool {
-    let mut changed = false;
-
-    // Collect candidate leaf functions from module protos
-    let candidates: HashMap<usize, IrFunction> = module
-        .main
-        .protos
+fn build_candidates(func: &IrFunction) -> HashMap<usize, IrFunction> {
+    func.protos
         .iter()
         .enumerate()
         .filter_map(|(idx, f)| {
@@ -56,20 +54,49 @@ pub fn inline_functions(module: &mut IrModule) -> bool {
                 None
             }
         })
-        .collect();
+        .collect()
+}
 
-    if candidates.is_empty() {
-        return false;
+fn inline_func_tree(func: &mut IrFunction) -> bool {
+    let mut changed = false;
+    for proto in &mut func.protos {
+        if inline_func_tree(proto) {
+            changed = true;
+        }
+    }
+    let candidates = build_candidates(func);
+    if !candidates.is_empty() && inline_in_func(func, &candidates) {
+        changed = true;
+    }
+    changed
+}
+
+pub fn inline_functions(module: &mut IrModule) -> bool {
+    let mut any_changed = false;
+    const MAX_INLINE_ROUNDS: usize = 2;
+
+    for _ in 0..MAX_INLINE_ROUNDS {
+        let mut round_changed = false;
+        if inline_func_tree(&mut module.main) {
+            round_changed = true;
+            any_changed = true;
+        }
+
+        if !round_changed {
+            break;
+        }
     }
 
-    // Per-variable definition sites in main: needed to follow aliases and
-    // to require single definitions before trusting them.
+    any_changed
+}
+
+fn inline_in_func(func: &mut IrFunction, candidates: &HashMap<usize, IrFunction>) -> bool {
     let mut def_count: HashMap<IrVar, usize> = HashMap::new();
     let mut move_alias: HashMap<IrVar, IrVar> = HashMap::new();
     let mut closure_map: HashMap<IrVar, usize> = HashMap::new();
     let mut getglobal_name: HashMap<IrVar, String> = HashMap::new();
     let mut setglobal_srcs: HashMap<String, Vec<IrVar>> = HashMap::new();
-    for inst in &module.main.instructions {
+    for inst in &func.instructions {
         for d in inst.def_vars() {
             *def_count.entry(d).or_insert(0) += 1;
         }
@@ -90,20 +117,27 @@ pub fn inline_functions(module: &mut IrModule) -> bool {
         }
     }
 
-    // Find max variable ID to avoid collisions during inlining
     let mut max_var_id = 0u32;
-    for inst in &module.main.instructions {
+    let mut max_label_id = 0usize;
+    for inst in &func.instructions {
         if let Some(d) = inst.def_var() {
             max_var_id = max_var_id.max(d.0);
         }
         for u in inst.use_vars() {
             max_var_id = max_var_id.max(u.0);
         }
+        for l in inst.jump_targets() {
+            max_label_id = max_label_id.max(l.0);
+        }
+        if let IrInst::Label(l) = inst {
+            max_label_id = max_label_id.max(l.0);
+        }
     }
 
+    let mut changed = false;
     let mut new_instructions = Vec::new();
 
-    for inst in module.main.instructions.drain(..) {
+    for inst in func.instructions.drain(..) {
         let inlined = match &inst {
             IrInst::Call {
                 dsts,
@@ -124,28 +158,23 @@ pub fn inline_functions(module: &mut IrModule) -> bool {
             _ => None,
         };
 
-        match inlined {
-            Some((target_func, out_dst, call_args)) => {
-                if splice_call(
-                    &mut new_instructions,
-                    target_func,
-                    out_dst,
-                    &call_args,
-                    &mut max_var_id,
-                ) {
-                    changed = true;
-                } else {
-                    // Remap hit something unexpected: keep the call.
-                    new_instructions.push(inst);
-                }
-            }
-            None => {
-                new_instructions.push(inst);
-            }
+        if let Some((target_func, out_dst, call_args)) = inlined
+            && splice_call(
+                &mut new_instructions,
+                target_func,
+                out_dst,
+                &call_args,
+                &mut max_var_id,
+                &mut max_label_id,
+            )
+        {
+            changed = true;
+        } else {
+            new_instructions.push(inst);
         }
     }
 
-    module.main.instructions = new_instructions;
+    func.instructions = new_instructions;
     changed
 }
 
@@ -200,12 +229,25 @@ fn splice_call(
     out_dst: IrVar,
     call_args: &[IrVar],
     max_var_id: &mut u32,
+    max_label_id: &mut usize,
 ) -> bool {
     let checkpoint = out.len();
+    *max_label_id += 1;
+    let exit_label = IrLabel(*max_label_id);
+
+    let mut label_map: HashMap<IrLabel, IrLabel> = HashMap::new();
+    for inst in &target_func.instructions {
+        if let IrInst::Label(l) = inst {
+            *max_label_id += 1;
+            label_map.insert(*l, IrLabel(*max_label_id));
+        }
+    }
+
     let mut var_map: HashMap<IrVar, IrVar> = HashMap::new();
     for (i, &arg) in call_args.iter().enumerate() {
         var_map.insert(IrVar(i as u32), arg);
     }
+
     // The callee's line and local markers would misattribute the rest of
     // the caller's statement, so they are left behind.
     for body_inst in target_func
@@ -213,28 +255,96 @@ fn splice_call(
         .iter()
         .filter(|inst| !inst.is_debug_marker())
     {
-        if let IrInst::Return(ret_vars) = body_inst {
-            match ret_vars.first() {
-                Some(&ret_v) => {
-                    let resolved_ret = var_map.get(&ret_v).copied().unwrap_or(ret_v);
+        match body_inst {
+            IrInst::Return(ret_vars) => {
+                match ret_vars.first() {
+                    Some(&ret_v) => {
+                        let Some(&resolved_ret) = var_map.get(&ret_v) else {
+                            out.truncate(checkpoint);
+                            return false;
+                        };
+                        out.push(IrInst::Move {
+                            dst: out_dst,
+                            src: resolved_ret,
+                        });
+                    }
+                    None => {
+                        out.push(IrInst::LoadNil { dst: out_dst });
+                    }
+                }
+                out.push(IrInst::Jump(exit_label));
+            }
+            IrInst::Label(l) => {
+                let mapped = label_map.get(l).copied().unwrap_or(*l);
+                out.push(IrInst::Label(mapped));
+            }
+            IrInst::Jump(target) => {
+                let Some(&mapped) = label_map.get(target) else {
+                    out.truncate(checkpoint);
+                    return false;
+                };
+                out.push(IrInst::Jump(mapped));
+            }
+            IrInst::JumpIfFalse { cond, target } => {
+                let mut c = *cond;
+                if !use_mapped(&mut c, &var_map) {
+                    out.truncate(checkpoint);
+                    return false;
+                }
+                let Some(&mapped) = label_map.get(target) else {
+                    out.truncate(checkpoint);
+                    return false;
+                };
+                out.push(IrInst::JumpIfFalse {
+                    cond: c,
+                    target: mapped,
+                });
+            }
+            IrInst::GetUpval { dst, index } => {
+                if let Some(UpvalSource::ParentLocal(parent_var)) =
+                    target_func.upvalue_vars.get(*index as usize)
+                {
+                    *max_var_id += 1;
+                    let fresh = IrVar(*max_var_id);
+                    var_map.insert(*dst, fresh);
                     out.push(IrInst::Move {
-                        dst: out_dst,
-                        src: resolved_ret,
+                        dst: fresh,
+                        src: *parent_var,
                     });
-                }
-                None => {
-                    out.push(IrInst::LoadNil { dst: out_dst });
+                } else {
+                    out.truncate(checkpoint);
+                    return false;
                 }
             }
-        } else {
-            let mut cloned = body_inst.clone();
-            if !remap_inline_vars(&mut cloned, &mut var_map, max_var_id) {
-                out.truncate(checkpoint);
-                return false;
+            IrInst::SetUpval { src, index } => {
+                if let Some(UpvalSource::ParentLocal(parent_var)) =
+                    target_func.upvalue_vars.get(*index as usize)
+                {
+                    let mut s = *src;
+                    if !use_mapped(&mut s, &var_map) {
+                        out.truncate(checkpoint);
+                        return false;
+                    }
+                    out.push(IrInst::Move {
+                        dst: *parent_var,
+                        src: s,
+                    });
+                } else {
+                    out.truncate(checkpoint);
+                    return false;
+                }
             }
-            out.push(cloned);
+            _ => {
+                let mut cloned = body_inst.clone();
+                if !remap_inline_vars(&mut cloned, &mut var_map, max_var_id) {
+                    out.truncate(checkpoint);
+                    return false;
+                }
+                out.push(cloned);
+            }
         }
     }
+    out.push(IrInst::Label(exit_label));
     true
 }
 
@@ -250,22 +360,68 @@ fn is_inline_candidate(func: &IrFunction) -> bool {
     if !crate::compiler::cost_model::CostModel::default().should_inline_ir(func) {
         return false;
     }
-    // Straight-line frame-independent body plus one trailing Return of
-    // exactly one value. Anything else is rejected.
-    let mut returns = 0;
-    for (i, inst) in body.iter().enumerate() {
+    if func.is_vararg || !func.protos.is_empty() {
+        return false;
+    }
+    for uv in &func.upvalue_vars {
+        if !matches!(uv, UpvalSource::ParentLocal(_)) {
+            return false;
+        }
+    }
+    for inst in &body {
         match inst {
-            IrInst::Return(vars) => {
-                if vars.len() != 1 || i + 1 != body.len() {
-                    return false;
-                }
-                returns += 1;
-            }
+            IrInst::Return(_) => {}
             _ if is_inlinable_body_inst(inst) => {}
             _ => return false,
         }
     }
-    returns == 1
+    if !body.iter().any(|inst| matches!(inst, IrInst::Return(_))) {
+        return false;
+    }
+
+    // Reject backward jumps (loops): linear splice cannot reconstruct loop SSA.
+    let mut label_indices = HashMap::new();
+    for (idx, inst) in body.iter().enumerate() {
+        if let IrInst::Label(l) = inst {
+            label_indices.insert(*l, idx);
+        }
+    }
+    for (idx, inst) in body.iter().enumerate() {
+        for target in inst.jump_targets() {
+            if let Some(&target_idx) = label_indices.get(&target) {
+                if target_idx <= idx {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+    }
+
+    // If branches/labels exist, mutable variables (assigned > 1 time) cannot be reconciled
+    // across divergent paths by linear variable remapping without phi-nodes.
+    let has_branches = body.iter().any(|inst| {
+        matches!(
+            inst,
+            IrInst::Jump(_) | IrInst::JumpIfFalse { .. } | IrInst::Label(_)
+        )
+    });
+    if has_branches {
+        let mut def_counts = HashMap::new();
+        for i in 0..func.num_params {
+            *def_counts.entry(IrVar(i as u32)).or_insert(0) += 1;
+        }
+        for inst in &body {
+            for d in inst.def_vars() {
+                *def_counts.entry(d).or_insert(0) += 1;
+            }
+        }
+        if def_counts.values().any(|&c| c > 1) {
+            return false;
+        }
+    }
+
+    true
 }
 
 /// Maps a use to its replacement; bails on uses that are neither parameters
@@ -316,7 +472,7 @@ fn remap_inline_vars(
         IrInst::LoadConst { dst, .. } | IrInst::LoadNil { dst } => {
             *dst = fresh_def(*dst, var_map, max_id);
         }
-        IrInst::NewTable { dst } => {
+        IrInst::NewTable { dst, .. } => {
             *dst = fresh_def(*dst, var_map, max_id);
         }
         IrInst::GetTable { dst, table, key } => {

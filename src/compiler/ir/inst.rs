@@ -91,6 +91,8 @@ pub enum IrInst {
     },
     NewTable {
         dst: IrVar,
+        array_cap: u8,
+        fields_cap: u8,
     },
     GetTable {
         dst: IrVar,
@@ -211,7 +213,7 @@ impl IrInst {
             | Self::Move { dst, .. }
             | Self::BinOp { dst, .. }
             | Self::UnOp { dst, .. }
-            | Self::NewTable { dst }
+            | Self::NewTable { dst, .. }
             | Self::GetTable { dst, .. }
             | Self::GetImport { dst, .. }
             | Self::GetGlobal { dst, .. }

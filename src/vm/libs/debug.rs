@@ -348,6 +348,9 @@ fn debug_setmetatable(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String>
     } else {
         vm.gc.unpin_table(t);
     }
+    if crate::vm::gc::table_weak_values(t) {
+        vm.gc.has_weak_tables = true;
+    }
     Ok(vec![args[0].clone()])
 }
 

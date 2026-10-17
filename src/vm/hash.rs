@@ -26,12 +26,42 @@ impl FxHasher {
 impl Hasher for FxHasher {
     #[inline]
     fn write(&mut self, bytes: &[u8]) {
+        let len = bytes.len();
+        if len == 0 {
+            return;
+        }
+        if len < 8 {
+            let word = match len {
+                1 => bytes[0] as u64,
+                2 => u16::from_le_bytes([bytes[0], bytes[1]]) as u64,
+                3 => (bytes[0] as u64) | ((bytes[1] as u64) << 8) | ((bytes[2] as u64) << 16),
+                4 => u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as u64,
+                5 => {
+                    let lo = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as u64;
+                    self.add_to_hash(lo);
+                    bytes[4] as u64
+                }
+                6 => {
+                    let lo = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as u64;
+                    self.add_to_hash(lo);
+                    u16::from_le_bytes([bytes[4], bytes[5]]) as u64
+                }
+                _ => {
+                    let lo = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as u64;
+                    self.add_to_hash(lo);
+                    (bytes[4] as u64) | ((bytes[5] as u64) << 8) | ((bytes[6] as u64) << 16)
+                }
+            };
+            self.add_to_hash(word);
+            return;
+        }
+
         let (chunks, rest) = bytes.as_chunks::<8>();
         for chunk in chunks {
             self.add_to_hash(u64::from_le_bytes(*chunk));
         }
         if rest.len() >= 4 {
-            self.add_to_hash(u32::from_le_bytes(rest[..4].try_into().unwrap()) as u64);
+            self.add_to_hash(u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]) as u64);
             for &b in &rest[4..] {
                 self.add_to_hash(b as u64);
             }
@@ -74,4 +104,24 @@ pub type FxHashSet<K> = std::collections::HashSet<K, FxBuildHasher>;
 /// `RandomState`; this is the equivalent constructor.
 pub fn new_map<K, V>() -> FxHashMap<K, V> {
     HashMap::with_hasher(FxBuildHasher::default())
+}
+
+/// Constructs a `FxHashMap` with preallocated capacity.
+pub fn with_capacity<K, V>(capacity: usize) -> FxHashMap<K, V> {
+    HashMap::with_capacity_and_hasher(capacity, FxBuildHasher::default())
+}
+
+pub fn new_set<K>() -> FxHashSet<K> {
+    std::collections::HashSet::with_hasher(FxBuildHasher::default())
+}
+
+pub fn set_with_capacity<K>(capacity: usize) -> FxHashSet<K> {
+    std::collections::HashSet::with_capacity_and_hasher(capacity, FxBuildHasher::default())
+}
+
+#[inline]
+pub fn fx_hash_bytes(bytes: &[u8]) -> u64 {
+    let mut h = FxHasher::default();
+    h.write(bytes);
+    h.finish()
 }

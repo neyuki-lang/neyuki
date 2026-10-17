@@ -85,7 +85,20 @@ fn format_instruction(inst: &Instruction) -> String {
         Instruction::SetUpval { src, upval_idx } => {
             format!("SETUPVAL     U{}, R{}", upval_idx, src)
         }
-        Instruction::NewTable { dst } => format!("NEWTABLE     R{}", dst),
+        Instruction::NewTable {
+            dst,
+            array_cap,
+            fields_cap,
+        } => {
+            if *array_cap == 0 && *fields_cap == 0 {
+                format!("NEWTABLE     R{}", dst)
+            } else {
+                format!(
+                    "NEWTABLE     R{} (arr={}, fields={})",
+                    dst, array_cap, fields_cap
+                )
+            }
+        }
         Instruction::GetTable { dst, table, key } => {
             format!("GETTABLE     R{}, R{}[R{}]", dst, table, key)
         }

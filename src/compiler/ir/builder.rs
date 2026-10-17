@@ -622,7 +622,22 @@ impl IrBuilder {
                 });
             }
             Expr::Table { entries, .. } => {
-                self.emit(IrInst::NewTable { dst });
+                let mut array_cap: usize = 0;
+                let mut fields_cap: usize = 0;
+                for entry in entries {
+                    if entry.is_array_element() {
+                        array_cap += 1;
+                    } else if entry.key.is_some() {
+                        fields_cap += 1;
+                    }
+                }
+                let array_cap = array_cap.min(255) as u8;
+                let fields_cap = fields_cap.min(255) as u8;
+                self.emit(IrInst::NewTable {
+                    dst,
+                    array_cap,
+                    fields_cap,
+                });
                 // A trailing call or `...` contributes every value it yields,
                 // so it is appended as a run rather than as one element.
                 let trailing = entries
