@@ -67,4 +67,12 @@ end)
 local okc, errc = coroutine.resume(crossing)
 assert(not okc and string.find(errc, "native") != nil, "yield across a native call is an error")
 
+-- a yield spread into a call receives every resume value
+local spread = coroutine.create(function(): number
+    return select("#", coroutine.yield())
+end)
+coroutine.resume(spread)
+local _, spread_count = coroutine.resume(spread, 1, 2, 3)
+assert(spread_count == 3, "yield results spread into a call")
+
 print("[pass] coroutines")

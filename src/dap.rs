@@ -551,7 +551,7 @@ fn run_program(vm: &mut VM, path: &str) -> Result<(), String> {
         std::fs::read_to_string(path).map_err(|e| format!("failed to read {}: {}", path, e))?;
     // Inlining would remove the very calls breakpoints and steps stop at.
     let proto = crate::compiler::compile_program(&source, path, crate::compiler::Options::DEBUG)?;
-    vm.execute(proto).map(|_| ())
+    vm.execute_program(proto).map(|_| ())
 }
 
 /// Called by the VM on every new line while `wants_lines` holds.

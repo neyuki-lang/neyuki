@@ -18,6 +18,7 @@ These are globals; no `require` is needed.
 | [buffer](buffer.md) | Mutable blocks of bytes for binary formats |
 | [bit](bit.md) | 32-bit bitwise operations compatible with Lua's `bit32` |
 | [coroutine](coroutine.md) | Functions that pause and resume |
+| [task](task.md) | Running tasks side by side: `spawn`, `defer`, `delay`, `wait` and `cancel` |
 | [debug](debug.md) | Stack traces, introspection and hooks |
 
 ## Bundled modules

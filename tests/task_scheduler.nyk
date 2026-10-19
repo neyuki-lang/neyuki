@@ -1,0 +1,143 @@
+-- task: spawn, defer, delay, wait and cancel. Only the order of events is
+-- checked, never exact timings.
+
+local log = {}
+local function push(entry: string)
+    table.insert(log, entry)
+end
+local function joined(): string
+    return table.concat(log, ",")
+end
+
+-- spawn runs right away, until the task first waits
+local spawned = task.spawn(function(name: string)
+    push("spawn " .. name)
+    local waited = task.wait(0.03)
+    assert(waited >= 0.03, "wait returns at least the time asked for")
+    push("woke")
+end, "a")
+assert(type(spawned) == "thread", "spawn returns the task's thread")
+assert(coroutine.status(spawned) == "suspended", "a waiting task is suspended")
+
+-- defer and delay only run once the scheduler gets control
+task.defer(function(n: number)
+    push("defer " .. tostring(n))
+end, 1)
+task.delay(0.01, function(s: string)
+    push("delay " .. s)
+end, "b")
+push("main")
+assert(joined() == "spawn a,main", "nothing else ran yet: " .. joined())
+
+-- waiting in the main chunk runs the other tasks meanwhile
+local waited = task.wait(0.06)
+assert(waited >= 0.06, "main wait returns the time waited")
+assert(joined() == "spawn a,main,defer 1,delay b,woke", "order: " .. joined())
+assert(coroutine.status(spawned) == "dead", "the task finished")
+
+-- tasks with the same deadline run in the order they started waiting
+log = {}
+for i = 1, 3 do
+    task.spawn(function(n: number)
+        task.wait(0.01)
+        push(tostring(n))
+    end, i)
+end
+task.wait(0.03)
+assert(joined() == "1,2,3", "same deadline keeps order: " .. joined())
+
+-- task.wait() with no argument resumes on the next pass
+log = {}
+task.spawn(function()
+    for i = 1, 3 do
+        task.wait()
+        push("tick " .. tostring(i))
+    end
+end)
+task.wait(0.02)
+assert(joined() == "tick 1,tick 2,tick 3", "ticks: " .. joined())
+
+-- the loop from the README stops once the task breaks out
+local count = 0
+task.spawn(function()
+    while task.wait(0.005) do
+        count += 1
+        if count == 3 then
+            break
+        end
+    end
+end)
+task.wait(0.05)
+assert(count == 3, "while task.wait() do loops")
+
+-- every value a wait hands back reaches the caller
+task.spawn(function()
+    assert(select("#", task.wait()) == 1, "wait returns one value")
+end)
+task.wait(0.01)
+
+-- spawn and defer also take an existing thread
+local resumed = nil
+local co = coroutine.create(function(v: string)
+    resumed = v
+end)
+task.defer(co, "thread")
+task.wait()
+assert(resumed == "thread", "defer resumes a thread")
+
+-- cancel
+local hits = 0
+local delayed = task.delay(0.01, function()
+    hits += 1
+end)
+task.cancel(delayed)
+local sleeper = task.spawn(function()
+    task.wait(0.01)
+    hits += 1
+end)
+task.cancel(sleeper)
+task.wait(0.03)
+assert(hits == 0, "cancelled tasks never run")
+assert(coroutine.status(sleeper) == "dead", "cancel closes the coroutine")
+task.spawn(function()
+    local me = coroutine.running()
+    assert(not try(function()
+        task.cancel(me)
+    end), "a task cannot cancel itself while running")
+end)
+
+-- a waiting task is kept alive by the scheduler alone
+local survived = false
+task.spawn(function()
+    task.wait(0.01)
+    survived = true
+end)
+collectgarbage("collect")
+task.wait(0.03)
+assert(survived, "a task nobody references still wakes up")
+
+-- under a native call a task cannot yield, so wait blocks instead
+local blocked = false
+task.spawn(function()
+    try(function()
+        task.wait(0.01)
+    end)
+    blocked = true
+end)
+assert(blocked, "wait inside try blocks the task")
+
+-- bad arguments
+assert(not try(function()
+    task.spawn(42)
+end), "spawn needs a function or thread")
+assert(not try(function()
+    task.wait(-1)
+end), "negative waits are rejected")
+assert(not try(function()
+    task.cancel({})
+end), "cancel needs a thread")
+
+-- tasks still waiting when the main chunk ends keep the program running
+task.delay(0.01, function()
+    print("[pass] task scheduler")
+end)

@@ -21,6 +21,7 @@ pub mod sql;
 pub mod string;
 pub mod strlib;
 pub mod table;
+pub mod task;
 pub mod ui;
 pub mod utf8;
 
@@ -33,6 +34,7 @@ pub use math::create_math_lib;
 pub use os::create_os_lib;
 pub use string::create_string_lib;
 pub use table::create_table_lib;
+pub use task::create_task_lib;
 pub use utf8::create_utf8_lib;
 
 use crate::vm::machine::VM;

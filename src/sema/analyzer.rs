@@ -64,6 +64,7 @@ impl<'a> SemanticAnalyzer<'a> {
             "buffer",
             "os",
             "coroutine",
+            "task",
             "utf8",
             "debug",
             "json",
