@@ -1,0 +1,70 @@
+-- Tests for `repeat ... until` loops, whose condition sees the body's locals.
+
+-- 1. The condition reads a local declared in the body
+local n = 0
+repeat
+    n = n + 1
+    local y = n
+until y >= 3
+assert(n == 3, "until sees body local")
+
+-- 2. A body local shadows an outer one inside the condition only
+local stop = true
+local count = 0
+repeat
+    count = count + 1
+    local stop = count == 4
+until stop
+assert(count == 4, "until uses the shadowing body local")
+assert(stop == true, "outer local untouched after loop")
+
+-- 3. The body local is out of scope after the loop
+local done_value = 0
+repeat
+    local done_value = 99
+until done_value == 99
+assert(done_value == 0, "body local does not leak past until")
+
+-- 4. `continue` still jumps to the condition with the body local set
+local seen = {}
+local i = 0
+repeat
+    i = i + 1
+    local last = i >= 5
+    if i % 2 == 0 then
+        continue
+    end
+    seen[#seen + 1] = i
+until last
+assert(i == 5, "continue loop ran to the end")
+assert(#seen == 3 and seen[1] == 1 and seen[2] == 3 and seen[3] == 5, "continue skipped even values")
+
+-- 5. A closure in the condition captures this iteration's local
+local fns = {}
+local k = 0
+repeat
+    k = k + 1
+    local v = k * 10
+until (function()
+    fns[#fns + 1] = function() return v end
+    return v >= 30
+end)()
+assert(#fns == 3, "condition closure ran each iteration")
+assert(fns[1]() == 10 and fns[2]() == 20 and fns[3]() == 30, "condition closures keep their own locals")
+
+-- 6. Nested repeat loops each see their own body locals
+local outer_runs = 0
+local inner_total = 0
+repeat
+    outer_runs = outer_runs + 1
+    local j = 0
+    repeat
+        j = j + 1
+        local inner_done = j == outer_runs
+        inner_total = inner_total + 1
+    until inner_done
+    local outer_done = outer_runs == 3
+until outer_done
+assert(outer_runs == 3 and inner_total == 6, "nested repeat loops scope their locals")
+
+print("repeat_until tests passed")
