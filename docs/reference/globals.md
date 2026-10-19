@@ -84,6 +84,8 @@ Returns an iterator over `t[1]`, `t[2]`, ... stopping at the first `nil`.
 
 The key and value after `key` in `t`'s iteration order, or `nil` at the end. `next(t)` returns the first entry, so `next(t) == nil` tests for an empty table.
 
+Assigning `nil` to the current key while iterating with `next` is allowed: `next(t, k)` still returns the entry after `k`. Adding new keys during the iteration is not.
+
 ## select(index: number | string, ...: any): ...any
 
 `select("#", ...)` returns the number of extra arguments; `select(n, ...)` returns the arguments from the `n`th on (negative `n` counts from the end).

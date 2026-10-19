@@ -169,6 +169,10 @@ pub struct VmTable {
     /// tables, functions and buffers. Each entry keeps its key value, so
     /// iteration can hand it back and a table key stays alive.
     pub general: Option<Box<FxHashMap<TableKey, (Value, Value)>>>,
+    /// The array's length before trailing nils were last trimmed off, so
+    /// `next` can tell a key removed from the end of the array from a
+    /// removed hash key. Zero when nothing was trimmed.
+    pub array_peak: usize,
     pub frozen: bool,
     pub metatable: Option<Rc<RefCell<VmTable>>>,
     /// Strong owner of a coroutine's execution state when this table is a
@@ -190,6 +194,7 @@ impl VmTable {
             array: Vec::new(),
             fields: crate::vm::table::FieldMap::new(),
             general: None,
+            array_peak: 0,
             frozen: false,
             metatable: None,
             co_state: None,
@@ -205,6 +210,7 @@ impl VmTable {
             },
             fields: crate::vm::table::FieldMap::with_capacity(fields),
             general: None,
+            array_peak: 0,
             frozen: false,
             metatable: None,
             co_state: None,
@@ -291,6 +297,10 @@ impl VmTable {
         if matches!(val, Value::Nil) {
             self.remove_general(&tk);
         } else {
+            // A new key inside the trimmed range would read as an array slot.
+            if matches!(tk, TableKey::Int(i) if i >= 1 && i as u64 <= self.array_peak as u64) {
+                self.array_peak = 0;
+            }
             self.general
                 .get_or_insert_with(|| Box::new(crate::vm::hash::new_map()))
                 .insert(tk, (key, val));
@@ -308,6 +318,7 @@ impl VmTable {
     }
 
     fn trim_array(&mut self) {
+        self.array_peak = self.array_peak.max(self.array.len());
         while matches!(self.array.last(), Some(Value::Nil)) {
             self.array.pop();
         }
