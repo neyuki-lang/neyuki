@@ -3,6 +3,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use crate::bytecode::instruction::MULTRET;
 use crate::vm::frame::CallFrame;
 use crate::vm::machine::{CoroutineState, VM};
 use crate::vm::value::{Value, VmTable};
@@ -103,6 +104,27 @@ fn live_coroutine(vm: &VM, val: Option<&Value>, func: &str) -> Result<Option<usi
             .is_some_and(|h| Rc::ptr_eq(&h, t))
     });
     Ok(is_handle.then_some(id))
+}
+
+/// Whether `val` is the handle of a coroutine that `resume` would start or
+/// continue.
+pub(crate) fn is_suspended(vm: &VM, val: &Value) -> bool {
+    live_coroutine(vm, Some(val), "coroutine.resume")
+        .ok()
+        .flatten()
+        .and_then(|id| vm.co_state(id))
+        .is_some_and(|co| co.borrow().status == "suspended")
+}
+
+/// The handle of the running coroutine, if `coroutine.yield` would succeed
+/// here.
+pub(crate) fn yieldable_handle(vm: &VM) -> Option<Rc<RefCell<VmTable>>> {
+    if vm.native_calls > vm.yield_floor {
+        return None;
+    }
+    vm.current_co
+        .and_then(|co_id| vm.co_state(co_id))
+        .and_then(|co| co.borrow().handle.upgrade())
 }
 
 /// `coroutine.resume(co, ...)`. Yields are only allowed at the native-call
@@ -217,7 +239,13 @@ fn resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
             let cs = co_rc.borrow();
             (cs.yield_callee, cs.yield_retc)
         };
-        let count = if retc == 0 { 1 } else { retc as usize };
+        // Same result layout as any other native call; see
+        // `store_call_results`.
+        let count = match retc {
+            MULTRET => resume_args.len(),
+            0 => 1,
+            n => n as usize,
+        };
         let base = vm.frames.last().map(|f| f.base).unwrap_or(0);
         for i in 0..count {
             let val = resume_args.get(i).cloned().unwrap_or(Value::Nil);
@@ -226,6 +254,9 @@ fn resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
                 vm.stack.resize(slot + 1, Value::Nil);
             }
             vm.stack[slot] = val;
+        }
+        if retc == MULTRET {
+            vm.top = base + callee as usize + count;
         }
     }
 
@@ -293,7 +324,7 @@ fn resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     }
 }
 
-fn coroutine_yield(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+pub(crate) fn coroutine_yield(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let Some(co_id) = vm.current_co else {
         return Err("attempt to yield from outside a coroutine".to_string());
     };
@@ -386,7 +417,7 @@ fn coroutine_isyieldable(vm: &mut VM, _args: &[Value]) -> Result<Vec<Value>, Str
 
 /// `coroutine.close(co)`: kills a suspended or finished coroutine, freeing
 /// its stack. Returns true, or false and a message for one still running.
-fn coroutine_close(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+pub(crate) fn coroutine_close(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let Some(co_id) = live_coroutine(vm, args.first(), "coroutine.close")? else {
         return Ok(vec![Value::Bool(true)]);
     };

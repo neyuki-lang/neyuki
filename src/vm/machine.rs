@@ -13,7 +13,8 @@ use crate::vm::gc::GcTracker;
 use crate::vm::hash::{FxHashMap, new_map};
 use crate::vm::libs::{
     create_bit_lib, create_buffer_lib, create_coroutine_lib, create_debug_lib, create_json_lib,
-    create_math_lib, create_os_lib, create_string_lib, create_table_lib, create_utf8_lib,
+    create_math_lib, create_os_lib, create_string_lib, create_table_lib, create_task_lib,
+    create_utf8_lib,
 };
 use crate::vm::ops;
 use crate::vm::value::{NativeDef, StrRef, Upvalue, Value, VmClosure, VmTable};
@@ -173,6 +174,8 @@ pub struct VM {
     pub error_trace: Option<Vec<TraceFrame>>,
     /// Maximum call depth allowed before raising call stack overflow.
     pub max_call_depth: usize,
+    /// Tasks queued by the `task` library.
+    pub tasks: crate::vm::libs::task::Scheduler,
 }
 
 impl Default for VM {
@@ -212,6 +215,7 @@ impl VM {
                 .ok()
                 .and_then(|s| s.parse::<usize>().ok())
                 .unwrap_or(DEFAULT_MAX_CALL_DEPTH),
+            tasks: Default::default(),
         };
         vm.register_builtins();
         vm
@@ -240,6 +244,7 @@ impl VM {
             ("os", create_os_lib()),
             ("string", create_string_lib()),
             ("table", create_table_lib()),
+            ("task", create_task_lib()),
             ("utf8", create_utf8_lib()),
         ];
         for (name, lib) in libs {
@@ -284,7 +289,23 @@ impl VM {
         self.stack.resize(max_reg + 1, Value::Nil);
 
         self.frames.push(CallFrame::new(closure, 0));
-        let run_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run()));
+        self.catch_panics(|vm| vm.run())
+    }
+
+    /// Runs a whole program: the main chunk, then every task it left
+    /// scheduled until none is waiting any more.
+    pub fn execute_program(&mut self, proto: Proto) -> Result<Value, String> {
+        let value = self.execute(proto)?;
+        self.catch_panics(crate::vm::libs::task::run_until_idle)?;
+        Ok(value)
+    }
+
+    /// Turns a panic inside `f` (an interpreter bug) into a runtime error.
+    fn catch_panics<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let run_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
         match run_res {
             Ok(res) => res,
             Err(panic_payload) => {

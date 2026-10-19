@@ -229,7 +229,7 @@ local geometry = require("geometry")
 print(geometry.area(2, 3))
 ```
 
-The standard libraries (`math`, `string`, `table`, `bit`, `buffer`, `coroutine`, `utf8`, `debug`, `json`, `os`) are always available as globals. The bundled modules are loaded with `require("@neyuki/name")`: `fs`, `io`, `http`, `sql`, `crypto`, `ui`, `hid` and `profile`.
+The standard libraries (`math`, `string`, `table`, `bit`, `buffer`, `coroutine`, `task`, `utf8`, `debug`, `json`, `os`) are always available as globals. The bundled modules are loaded with `require("@neyuki/name")`: `fs`, `io`, `http`, `sql`, `crypto`, `ui`, `hid` and `profile`.
 
 ## Limits
 

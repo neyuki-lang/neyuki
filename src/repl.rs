@@ -41,6 +41,7 @@ pub fn eval_chunk(vm: &mut VM, source: &str) -> Result<Option<String>, String> {
         let proto =
             crate::compiler::compile_program(source, "repl", crate::compiler::Options::UNCHECKED)?;
         let val = vm.execute(proto)?;
+        crate::vm::libs::task::run_due(vm);
         Ok(match val {
             Value::Nil => None,
             v => Some(v.to_string()),

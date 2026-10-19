@@ -1207,6 +1207,34 @@ pub(crate) const MATH_METHODS: &[(&str, &str, &str)] = &[
     ("nan", "math.nan: float", "NaN value."),
 ];
 
+pub(crate) const TASK_METHODS: &[(&str, &str, &str)] = &[
+    (
+        "spawn",
+        "task.spawn(f: function | thread, ...args: any): thread",
+        "Runs f as a task right away, until it first waits or yields.",
+    ),
+    (
+        "defer",
+        "task.defer(f: function | thread, ...args: any): thread",
+        "Runs f as a task on the next scheduler pass.",
+    ),
+    (
+        "delay",
+        "task.delay(seconds: number, f: function | thread, ...args: any): thread",
+        "Runs f as a task once seconds have passed.",
+    ),
+    (
+        "wait",
+        "task.wait(seconds?: number): number",
+        "Suspends the current task for seconds and returns the time actually waited.",
+    ),
+    (
+        "cancel",
+        "task.cancel(thread: thread)",
+        "Unschedules a task and closes its coroutine.",
+    ),
+];
+
 pub(crate) const COROUTINE_METHODS: &[(&str, &str, &str)] = &[
     (
         "create",
@@ -1514,6 +1542,7 @@ fn handle_completion(
             "table" => Some(TABLE_METHODS),
             "math" => Some(MATH_METHODS),
             "coroutine" => Some(COROUTINE_METHODS),
+            "task" => Some(TASK_METHODS),
             "json" => Some(JSON_METHODS),
             "fs" => Some(FS_METHODS),
             "crypto" => Some(CRYPTO_METHODS),
@@ -1550,6 +1579,7 @@ fn handle_completion(
         ("table", "module table"),
         ("math", "module math"),
         ("coroutine", "module coroutine"),
+        ("task", "module task"),
         ("json", "module json"),
         ("fs", "module fs"),
         ("crypto", "module crypto"),
@@ -1746,6 +1776,7 @@ fn lookup_docs(word: &str) -> Option<(&'static str, &'static str)> {
             "table" => Some(TABLE_METHODS),
             "math" => Some(MATH_METHODS),
             "coroutine" => Some(COROUTINE_METHODS),
+            "task" => Some(TASK_METHODS),
             "json" => Some(JSON_METHODS),
             "fs" => Some(FS_METHODS),
             "crypto" => Some(CRYPTO_METHODS),
@@ -1846,6 +1877,10 @@ fn lookup_docs(word: &str) -> Option<(&'static str, &'static str)> {
         "coroutine" => Some((
             "module coroutine",
             "Cooperative multithreading and fiber manipulation.",
+        )),
+        "task" => Some((
+            "module task",
+            "Task scheduler: spawn, defer, delay, wait and cancel coroutine tasks.",
         )),
         "json" => Some(("module json", "Fast JSON encoding and decoding.")),
         "fs" => Some((
@@ -2247,6 +2282,7 @@ mod tests {
             ("table", TABLE_METHODS),
             ("math", MATH_METHODS),
             ("coroutine", COROUTINE_METHODS),
+            ("task", TASK_METHODS),
             ("json", JSON_METHODS),
         ] {
             let global_val = vm

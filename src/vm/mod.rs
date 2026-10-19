@@ -20,7 +20,7 @@ use crate::bytecode::deserialize;
 pub fn execute_bytecode(bytes: &[u8]) -> Result<Value, String> {
     let proto = deserialize(bytes)?;
     let mut vm = VM::new();
-    vm.execute(proto)
+    vm.execute_program(proto)
 }
 
 pub fn run_file_with_options(path: &str, options: crate::compiler::Options) -> Result<(), String> {
@@ -32,7 +32,7 @@ pub fn run_file_with_options(path: &str, options: crate::compiler::Options) -> R
         .map_err(|_| format!("failed to read {}: file is not valid UTF-8", path))?;
     let proto = crate::compiler::compile_program(&source, path, options)?;
     let mut vm = VM::new();
-    vm.execute(proto)
+    vm.execute_program(proto)
         .map(|_| ())
         .map_err(|err| vm.describe_error(&err))
 }
