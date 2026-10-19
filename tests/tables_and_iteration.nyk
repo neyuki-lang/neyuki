@@ -75,6 +75,54 @@ assert(#ip == 2, "ipairs stops at the first nil")
 assert(next({}) == nil, "next on an empty table")
 local k1, v1 = next({ x = 5 })
 assert(k1 == "x" and v1 == 5, "next returns the first entry")
+
+-- removing the current key while walking with next
+local function drain(t: {any}): string
+    local out = {}
+    local k, v = next(t)
+    while k ~= nil do
+        out[#out + 1] = tostring(k) .. "=" .. tostring(v)
+        t[k] = nil
+        k, v = next(t, k)
+    end
+    return table.concat(out, " ")
+end
+local everything = { 10, 20, 30, y = 4, x = 3 }
+everything[true] = "t"
+everything[0.5] = "h"
+everything[-1] = "n"
+everything[100] = "far"
+assert(drain(everything) == "1=10 2=20 3=30 -1=n 0.5=h 100=far x=3 y=4 true=t", "every entry once")
+assert(next(everything) == nil, "drained to empty")
+local fields = { a = 1, b = 2, c = 3 }
+local seen_fields = 0
+for k in fields do
+    seen_fields += 1
+end
+assert(drain(fields) == "a=1 b=2 c=3" and seen_fields == 3, "string keys")
+-- the end of the array next to a hash key below it in order
+local tail = { 1, 2, 3 }
+tail[0.5] = "h"
+assert(drain(tail) == "1=1 2=2 3=3 0.5=h", "a trimmed array slot keeps going into the hash part")
+-- a removed far integer key next to a float before it in order
+local far = { 1, 2 }
+far[0.5] = "h"
+far[10] = "far"
+far[20] = "farther"
+assert(drain(far) == "1=1 2=2 0.5=h 10=far 20=farther", "a removed hash integer keeps its place")
+-- removing only some keys
+local some = { a = 1, b = 2, c = 3, d = 4 }
+local kept = {}
+local sk = next(some)
+while sk ~= nil do
+    if sk == "b" or sk == "c" then
+        some[sk] = nil
+    else
+        kept[#kept + 1] = sk
+    end
+    sk = next(some, sk)
+end
+assert(table.concat(kept, " ") == "a d" and some.b == nil and some.d == 4, "partial removal")
 assert(select("#", 1, nil, 3) == 3, "select counts nils")
 assert(select(2, "a", "b", "c") == "b", "select from an index")
 assert(select(-1, "a", "b", "c") == "c", "select from the end")

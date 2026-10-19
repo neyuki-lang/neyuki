@@ -149,10 +149,23 @@ pub fn raw_get(table: &VmTable, key: &Value) -> Value {
 }
 
 /// The entry after `key` in iteration order, as `next` returns it.
+///
+/// `key` does not have to be in the table any more: assigning nil to the
+/// current key while iterating is allowed, and the entry after it is still
+/// the one that follows it in iteration order.
 pub fn next_entry(table: &VmTable, key: &Value) -> Result<Option<(Value, Value)>, String> {
     let array_start = match key {
         Value::Nil => Some(0),
         Value::Int(i) if *i >= 1 && (*i as u64) <= table.array.len() as u64 => Some(*i as usize),
+        // A key trimmed off the end of the array: the array is done.
+        Value::Int(i)
+            if *i >= 1
+                && (*i as u64) <= table.array_peak as u64
+                && table.get_general(&TableKey::Int(*i)).is_none() =>
+        {
+            Some(table.array.len())
+        }
+        Value::Float(f) if f.is_nan() => return Err("invalid key to 'next'".to_string()),
         _ => None,
     };
     if let Some(start) = array_start {
@@ -164,41 +177,38 @@ pub fn next_entry(table: &VmTable, key: &Value) -> Result<Option<(Value, Value)>
         if table.fields.is_empty() && table.general.is_none() {
             return Ok(None);
         }
-        // Without a previous hash key the smallest one is next, which a
-        // scan finds without sorting.
-        let mut best: Option<Value> = None;
-        for k in table
-            .fields
-            .iter()
-            .filter(|(_, v)| !matches!(v, Value::Nil))
-            .map(|(k, _)| Value::String(k.clone()))
-            .chain(
-                table
-                    .general
-                    .iter()
-                    .flat_map(|g| g.values().map(|(k, _)| k.clone())),
-            )
-        {
-            if best
-                .as_ref()
-                .is_none_or(|b| compare_keys(&k, b) == std::cmp::Ordering::Less)
-            {
-                best = Some(k);
-            }
-        }
-        return Ok(best.map(|k| {
-            let v = table.raw_get(&k);
-            (k, v)
-        }));
     }
-    let keys = sorted_keys(table);
-    let Some(pos) = keys
-        .iter()
-        .position(|k| compare_keys(k, key) == std::cmp::Ordering::Equal && k == key)
-    else {
-        return Err("invalid key to 'next'".to_string());
+    // The smallest hash key after `key` (or the smallest one when coming
+    // from the array) is next, which a scan finds without sorting.
+    let after = if array_start.is_some() {
+        None
+    } else {
+        Some(key)
     };
-    Ok(keys.into_iter().nth(pos + 1).map(|k| {
+    let mut best: Option<Value> = None;
+    for k in table
+        .fields
+        .iter()
+        .filter(|(_, v)| !matches!(v, Value::Nil))
+        .map(|(k, _)| Value::String(k.clone()))
+        .chain(
+            table
+                .general
+                .iter()
+                .flat_map(|g| g.values().map(|(k, _)| k.clone())),
+        )
+    {
+        if after.is_some_and(|a| compare_keys(&k, a) != std::cmp::Ordering::Greater) {
+            continue;
+        }
+        if best
+            .as_ref()
+            .is_none_or(|b| compare_keys(&k, b) == std::cmp::Ordering::Less)
+        {
+            best = Some(k);
+        }
+    }
+    Ok(best.map(|k| {
         let v = table.raw_get(&k);
         (k, v)
     }))
