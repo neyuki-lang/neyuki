@@ -204,6 +204,11 @@ fn rename_inst_uses(inst: &mut IrInst, stacks: &HashMap<IrVar, Vec<IrVar>>) {
             rename(state);
             rename(ctrl);
         }
+        IrInst::CloseUpvals { vars } => {
+            for v in vars {
+                rename(v);
+            }
+        }
         _ => {}
     }
 }

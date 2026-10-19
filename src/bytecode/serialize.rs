@@ -411,6 +411,10 @@ fn write_instruction(buf: &mut Vec<u8>, inst: &Instruction) {
             write_u16(buf, *field_k);
             write_u16(buf, *site);
         }
+        Instruction::CloseUpval { reg } => {
+            write_u8(buf, 54);
+            write_u8(buf, *reg);
+        }
     }
 }
 

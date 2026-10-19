@@ -325,6 +325,17 @@ impl VM {
         }
     }
 
+    /// Closes the open upvalue for stack slot `idx`, if there is one, so the
+    /// next capture of that slot gets a fresh variable.
+    fn close_upvalue_at(&mut self, idx: usize) {
+        let pos = self.open_upvalues.partition_point(|(i, _)| *i < idx);
+        if self.open_upvalues.get(pos).is_some_and(|(i, _)| *i == idx) {
+            let (_, uv) = self.open_upvalues.remove(pos);
+            let val = self.stack.get(idx).cloned().unwrap_or(Value::Nil);
+            uv.close(val);
+        }
+    }
+
     /// Finds or creates the open upvalue for stack slot `idx`.
     fn capture_upvalue(&mut self, idx: usize) -> Rc<Upvalue> {
         if idx >= self.stack.len() {
@@ -1500,6 +1511,11 @@ impl VM {
                     } else {
                         // Update ctrl to first result, continue
                         set!(b + 2, first_var);
+                    }
+                }
+                Instruction::CloseUpval { reg } => {
+                    if !self.open_upvalues.is_empty() {
+                        self.close_upvalue_at(base + reg as usize);
                     }
                 }
                 Instruction::Add { dst, a, b } => {
