@@ -189,5 +189,6 @@ fn format_instruction(inst: &Instruction) -> String {
         }
         Instruction::TForCall { base, retc } => format!("TFORCALL     R{}, {}", base, retc),
         Instruction::TForLoop { base, jump } => format!("TFORLOOP     R{}, {}", base, jump),
+        Instruction::CloseUpval { reg } => format!("CLOSEUPVAL   R{}", reg),
     }
 }

@@ -172,6 +172,12 @@ pub enum IrInst {
         base: IrVar,
         jump: IrLabel,
     },
+    /// Detaches these captured variables from any closure made so far, so the
+    /// next closure capturing one gets a fresh variable. Emitted where each
+    /// loop iteration starts for the loop's own locals.
+    CloseUpvals {
+        vars: Vec<IrVar>,
+    },
     Jump(IrLabel),
     JumpIfFalse {
         cond: IrVar,
@@ -282,6 +288,9 @@ impl IrInst {
                 base, state, ctrl, ..
             } => vec![*base, *state, *ctrl],
             Self::Closure { captures, .. } => captures.iter().flatten().copied().collect(),
+            // Reading them keeps each variable in its register up to here,
+            // so nothing else can occupy it while a closure still holds it.
+            Self::CloseUpvals { vars } => vars.clone(),
             Self::Spread { source, sink } => {
                 let mut uses = source.use_vars();
                 match sink {

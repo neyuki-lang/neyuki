@@ -979,6 +979,12 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
                 let ip = proto.emit(Instruction::TForLoop { base: rb, jump: 0 }, 1);
                 jump_patches.push((ip, *jump));
             }
+            IrInst::CloseUpvals { vars } => {
+                for var in vars {
+                    let reg = regs.get(*var, &mut proto);
+                    proto.emit(Instruction::CloseUpval { reg }, 1);
+                }
+            }
             IrInst::Call {
                 dsts,
                 callee,

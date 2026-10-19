@@ -681,6 +681,10 @@ fn parse_instruction_line(line: &str) -> Result<Option<Instruction>, String> {
                 .map_err(|e| e.to_string())?;
             Ok(Some(Instruction::TForLoop { base, jump }))
         }
+        "CLOSEUPVAL" => {
+            let reg = parse_reg(parts.get(1).ok_or("CLOSEUPVAL missing reg")?)?;
+            Ok(Some(Instruction::CloseUpval { reg }))
+        }
         _ => Err(format!(
             "unknown or unsupported instruction mnemonic: '{}'",
             op
@@ -927,6 +931,7 @@ mod tests {
         proto
             .instructions
             .push(Instruction::TForLoop { base: 0, jump: 5 });
+        proto.instructions.push(Instruction::CloseUpval { reg: 4 });
         proto
             .instructions
             .push(Instruction::Return { base: 0, count: 1 });

@@ -384,6 +384,9 @@ fn read_instruction(bytes: &[u8], cursor: &mut usize) -> Result<Instruction, Str
             field_k: read_u16(bytes, cursor)?,
             site: read_u16(bytes, cursor)?,
         }),
+        54 => Ok(Instruction::CloseUpval {
+            reg: read_u8(bytes, cursor)?,
+        }),
         _ => Err(format!("unknown instruction tag: {}", tag)),
     }
 }

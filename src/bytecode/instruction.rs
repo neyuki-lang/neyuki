@@ -289,4 +289,10 @@ pub enum Instruction {
         base: u8,
         jump: i16,
     },
+    // Close the open upvalue on R(reg), if any, so a closure created later
+    // captures a fresh variable: emitted at each loop iteration for locals
+    // declared inside the loop that a closure captures
+    CloseUpval {
+        reg: u8,
+    },
 }

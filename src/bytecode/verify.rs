@@ -383,6 +383,9 @@ fn verify_proto_depth(proto: &Proto, depth: usize) -> Result<(), BytecodeVerifyE
                 check_reg_range(*base, 4, pc)?;
                 check_jump(*jump, pc)?;
             }
+            Instruction::CloseUpval { reg } => {
+                check_reg(*reg, pc)?;
+            }
         }
     }
 

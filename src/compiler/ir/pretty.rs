@@ -221,6 +221,10 @@ pub fn format_inst(inst: &IrInst) -> String {
             )
         }
         IrInst::TForLoop { base, jump } => format!("tfor_loop v{}, jump: L{}", base.0, jump.0),
+        IrInst::CloseUpvals { vars } => {
+            let vars_str: Vec<String> = vars.iter().map(|v| format!("v{}", v.0)).collect();
+            format!("close_upvals [{}]", vars_str.join(", "))
+        }
         IrInst::Jump(lbl) => format!("jump L{}", lbl.0),
         IrInst::JumpIfFalse { cond, target } => format!("jump_if_false v{}, L{}", cond.0, target.0),
         IrInst::Label(lbl) => format!("label L{}:", lbl.0),

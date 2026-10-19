@@ -33,4 +33,70 @@ for _ = 1, limit(3) do end
 for _, _ in { 1, 2 } do end
 assert(ticks == 1, "an empty loop still evaluates its bounds once")
 
+-- each iteration gets its own loop variable, so closures don't share it
+local fs = {}
+for i = 1, 3 do
+    table.insert(fs, function() return i end)
+end
+assert(fs[1]() == 1 and fs[2]() == 2 and fs[3]() == 3, "numeric for captures a fresh variable")
+
+local gs = {}
+for k, v in ipairs({ 10, 20, 30 }) do
+    local w = v + 1
+    table.insert(gs, function() return k + v + w end)
+end
+assert(gs[1]() == 22 and gs[2]() == 43 and gs[3]() == 64, "generic for captures fresh variables")
+
+local ws = {}
+local n = 0
+while n < 3 do
+    n = n + 1
+    local x = n
+    table.insert(ws, function() return x end)
+end
+assert(ws[1]() == 1 and ws[2]() == 2 and ws[3]() == 3, "while body locals are fresh")
+
+local rs = {}
+local m = 0
+repeat
+    m = m + 1
+    local y = m
+    table.insert(rs, function() return y end)
+until m >= 3
+assert(rs[1]() == 1 and rs[2]() == 2 and rs[3]() == 3, "repeat body locals are fresh")
+
+-- closures from the same iteration still share it
+local counters = {}
+for _ = 1, 2 do
+    local c = 0
+    table.insert(counters, { inc = function() c = c + 1 end, get = function() return c end })
+end
+counters[1].inc()
+counters[1].inc()
+counters[2].inc()
+assert(counters[1].get() == 2 and counters[2].get() == 1, "one iteration's closures share its locals")
+
+local nested = {}
+for i = 1, 2 do
+    table.insert(nested, function() return function() return i end end)
+end
+assert(nested[1]()() == 1 and nested[2]()() == 2, "nested closures capture the iteration's variable")
+
+-- break and continue still give each iteration its own variable
+local kept = {}
+for round = 1, 2 do
+    for i = 1, 10 do
+        table.insert(kept, function() return round * 10 + i end)
+        if i == 2 then break end
+    end
+end
+assert(kept[1]() == 11 and kept[2]() == 12 and kept[3]() == 21 and kept[4]() == 22, "break")
+
+local skipped = {}
+for i = 1, 4 do
+    table.insert(skipped, function() return i end)
+    if i % 2 == 0 then continue end
+end
+assert(#skipped == 4 and skipped[2]() == 2 and skipped[4]() == 4, "continue in numeric for")
+
 print("[pass] for loops and setlist")

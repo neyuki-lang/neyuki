@@ -352,6 +352,38 @@ impl IrBuilder {
         self.instructions.push(inst);
     }
 
+    /// A close of every variable created since `first_var` that a closure
+    /// emitted since instruction `from` captures, if there are any. Run where
+    /// each loop iteration starts, it gives every iteration fresh copies of
+    /// the loop's locals, so closures made in different iterations don't
+    /// share them.
+    fn loop_close(&self, from: usize, first_var: u32) -> Option<IrInst> {
+        let mut vars: Vec<IrVar> = self.instructions[from..]
+            .iter()
+            .filter_map(|inst| match inst {
+                IrInst::Closure { captures, .. } => Some(captures),
+                _ => None,
+            })
+            .flatten()
+            .flatten()
+            .copied()
+            .filter(|var| var.0 >= first_var)
+            .collect();
+        if vars.is_empty() {
+            return None;
+        }
+        vars.sort_by_key(|var| var.0);
+        vars.dedup();
+        Some(IrInst::CloseUpvals { vars })
+    }
+
+    /// Inserts `loop_close(at, first_var)` at instruction `at`.
+    fn insert_loop_close(&mut self, at: usize, first_var: u32) {
+        if let Some(close) = self.loop_close(at, first_var) {
+            self.instructions.insert(at, close);
+        }
+    }
+
     pub fn compile_expr(&mut self, expr: &Expr, target: Option<IrVar>) -> IrVar {
         let dst = target.unwrap_or_else(|| self.alloc_var());
 
@@ -1076,7 +1108,9 @@ impl IrBuilder {
                     continue_label: start_label,
                 });
 
+                let first_var = self.next_var;
                 self.emit(IrInst::Label(start_label));
+                let iteration_start = self.instructions.len();
                 let cond_var = self.compile_expr(condition, None);
                 self.emit(IrInst::JumpIfFalse {
                     cond: cond_var,
@@ -1089,6 +1123,7 @@ impl IrBuilder {
                 }
                 self.exit_scope();
 
+                self.insert_loop_close(iteration_start, first_var);
                 self.emit(IrInst::Jump(start_label));
                 self.emit(IrInst::Label(exit_label));
 
@@ -1106,7 +1141,9 @@ impl IrBuilder {
                     continue_label: cond_label,
                 });
 
+                let first_var = self.next_var;
                 self.emit(IrInst::Label(start_label));
+                let iteration_start = self.instructions.len();
 
                 self.enter_scope();
                 for s in body {
@@ -1120,12 +1157,14 @@ impl IrBuilder {
                     cond: cond_var,
                     target: start_label,
                 });
+                self.insert_loop_close(iteration_start, first_var);
                 self.emit(IrInst::Label(exit_label));
 
                 self.loops.pop();
             }
             Stmt::NumericFor { data, .. } => {
                 self.enter_scope();
+                let first_var = self.next_var;
                 let base = self.alloc_var();
                 self.compile_expr(&data.start, Some(base));
                 let limit = self.alloc_var();
@@ -1149,7 +1188,7 @@ impl IrBuilder {
 
                 self.loops.push(IrLoopContext {
                     break_label: exit_label,
-                    continue_label: body_label,
+                    continue_label: test_label,
                 });
 
                 self.emit(IrInst::ForPrep {
@@ -1161,6 +1200,7 @@ impl IrBuilder {
                 });
 
                 self.emit(IrInst::Label(body_label));
+                let body_start = self.instructions.len();
                 self.enter_scope();
                 for s in &data.body {
                     self.compile_stmt(s);
@@ -1168,6 +1208,11 @@ impl IrBuilder {
                 self.exit_scope();
 
                 self.emit(IrInst::Label(test_label));
+                // ForLoop writes the next value into the loop variable, so
+                // whatever captured this iteration's has to let go first.
+                if let Some(close) = self.loop_close(body_start, first_var) {
+                    self.emit(close);
+                }
                 self.emit(IrInst::ForLoop {
                     base,
                     jump: body_label,
@@ -1181,6 +1226,7 @@ impl IrBuilder {
                 vars, source, body, ..
             } => {
                 self.enter_scope();
+                let first_var = self.next_var;
                 let base = self.alloc_var();
                 let state_var = self.alloc_var();
                 let ctrl_var = self.alloc_var();
@@ -1228,6 +1274,7 @@ impl IrBuilder {
                 });
 
                 self.emit(IrInst::Label(call_label));
+                let iteration_start = self.instructions.len();
                 self.emit(IrInst::TForCall {
                     base,
                     state: state_var,
@@ -1245,6 +1292,8 @@ impl IrBuilder {
                 }
                 self.exit_scope();
 
+                // TForCall writes the loop variables, so close them before it.
+                self.insert_loop_close(iteration_start, first_var);
                 self.emit(IrInst::Jump(call_label));
                 self.emit(IrInst::Label(exit_label));
 
