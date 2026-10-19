@@ -16,7 +16,7 @@ neyuki dump-ir <file>             print the IR before and after optimization
 neyuki help | --version
 ```
 
-Arguments after the script path reach the script through `os.args()`. A script that fails prints the error with a stack trace and exits with status 1; `os.exit(code)` chooses the status explicitly. When the main chunk returns while tasks from the [`task` library](reference/task.md) are still waiting, the script keeps running until none is left; if any task raised an error, it then exits with status 1. The REPL runs only the tasks that are due after each line and never blocks on the rest.
+Arguments after the script path reach the script through `os.args()`. A script that fails prints the error with a stack trace and exits with status 1; `os.exit(code)` chooses the status explicitly. When the main chunk returns while tasks from the [`task` library](reference/task.md) are still waiting, the script keeps running until none is left; if any task raised an error, it then exits with status 1. The REPL keeps running tasks while it waits for input, and leaves the ones still waiting when its input ends.
 
 ### Checking without running
 

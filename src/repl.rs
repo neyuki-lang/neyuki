@@ -3,6 +3,8 @@
 // (truncated constructs, unterminated strings) continue on `>> `.
 
 use std::io::{self, BufRead, Write};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::time::Instant;
 
 use crate::vm::machine::VM;
 use crate::vm::value::Value;
@@ -53,23 +55,70 @@ pub fn eval_chunk(vm: &mut VM, source: &str) -> Result<Option<String>, String> {
     }
 }
 
+/// Runs the tasks that are due now, with the same panic guard as
+/// `eval_chunk`.
+fn run_due_tasks(vm: &mut VM) -> Result<(), String> {
+    let run = || crate::vm::libs::task::run_due(vm);
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)).map_err(panic_message)
+}
+
+/// Reads stdin lines on a separate thread so the scheduler can keep
+/// running tasks while the prompt waits. The channel closes at EOF.
+fn spawn_line_reader() -> Receiver<io::Result<String>> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let stdin = io::stdin();
+        loop {
+            let mut line = String::new();
+            let res = match stdin.lock().read_line(&mut line) {
+                Ok(0) => return,
+                Ok(_) => Ok(line),
+                Err(e) => Err(e),
+            };
+            let failed = res.is_err();
+            if tx.send(res).is_err() || failed {
+                return;
+            }
+        }
+    });
+    rx
+}
+
+/// Waits for the next input line, running tasks as they fall due in the
+/// meantime. `None` at EOF.
+fn next_line(vm: &mut VM, lines: &Receiver<io::Result<String>>) -> Option<io::Result<String>> {
+    loop {
+        let Some(at) = crate::vm::libs::task::next_due(vm) else {
+            return lines.recv().ok();
+        };
+        match lines.recv_timeout(at.saturating_duration_since(Instant::now())) {
+            Ok(line) => return Some(line),
+            Err(RecvTimeoutError::Disconnected) => return None,
+            Err(RecvTimeoutError::Timeout) => {
+                if let Err(e) = run_due_tasks(vm) {
+                    eprintln!("Error: {}", e);
+                }
+            }
+        }
+    }
+}
+
 use crate::parser::readline::ReadLineEngine;
 
 /// Runs the interactive loop on stdin/stdout until EOF.
 pub fn run_repl() -> Result<(), String> {
-    let stdin = io::stdin();
+    let lines = spawn_line_reader();
     let mut out = io::stdout();
     let mut vm = VM::new();
     let mut rl = ReadLineEngine::new();
     loop {
         write!(out, "{}", rl.prompt()).map_err(|e| format!("output error: {}", e))?;
         out.flush().map_err(|e| format!("output error: {}", e))?;
-        let mut line = String::new();
-        match stdin.lock().read_line(&mut line) {
-            Ok(0) => break,
-            Ok(_) => {}
-            Err(e) => return Err(format!("input error: {}", e)),
-        }
+        let line = match next_line(&mut vm, &lines) {
+            None => break,
+            Some(Ok(line)) => line,
+            Some(Err(e)) => return Err(format!("input error: {}", e)),
+        };
         let status = rl.feed_line(&line);
         if matches!(
             status,
@@ -163,6 +212,28 @@ mod tests {
         eval_chunk(&mut vm, "f_repl_xyz = function(x)\nreturn x * 2\nend").expect("def");
         let out = eval_chunk(&mut vm, "return f_repl_xyz(21)").expect("call");
         assert_eq!(out.as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn tasks_run_while_waiting_for_input() {
+        let mut vm = VM::new();
+        eval_chunk(
+            &mut vm,
+            "task.spawn(function()\nwhile task.wait(0.005) do\nrepl_ticks_xyz = (repl_ticks_xyz or 0) + 1\nend\nend)\n\
+             task.delay(0.01, function() repl_delayed_xyz = true end)",
+        )
+        .expect("spawn");
+        let (tx, rx) = mpsc::channel();
+        let typist = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            tx.send(Ok("next\n".to_string())).unwrap();
+        });
+        let line = next_line(&mut vm, &rx).expect("line").expect("ok");
+        typist.join().unwrap();
+        assert_eq!(line, "next\n");
+        let out =
+            eval_chunk(&mut vm, "return repl_delayed_xyz and repl_ticks_xyz >= 3").expect("check");
+        assert_eq!(out.as_deref(), Some("true"));
     }
 
     #[test]

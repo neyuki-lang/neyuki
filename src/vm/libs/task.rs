@@ -265,10 +265,19 @@ pub fn run_until_idle(vm: &mut VM) -> Result<(), String> {
 }
 
 /// Runs the tasks that are due right now without blocking (the REPL calls
-/// this after each chunk).
+/// this after each chunk and whenever a task wakes up between lines).
 pub fn run_due(vm: &mut VM) {
     run_pass(vm);
     vm.tasks.failed = 0;
+}
+
+/// When the next task is due: now if one is deferred, otherwise the
+/// earliest deadline, or `None` when no task is waiting.
+pub fn next_due(vm: &VM) -> Option<Instant> {
+    if !vm.tasks.deferred.is_empty() {
+        return Some(Instant::now());
+    }
+    vm.tasks.sleeping.first_key_value().map(|(k, _)| k.0)
 }
 
 #[cfg(test)]
