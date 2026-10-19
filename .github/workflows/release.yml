@@ -73,7 +73,11 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+      # Publish the draft by hand after review. Don't pre-create the release
+      # in the UI: the action appends generated notes to an existing release,
+      # duplicating them.
       - uses: softprops/action-gh-release@v2
         with:
           files: artifacts/*
+          draft: true
           generate_release_notes: true
