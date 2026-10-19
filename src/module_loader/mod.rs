@@ -93,27 +93,45 @@ impl ModuleLoader {
             return Ok(cached);
         }
 
-        let proto = if bytes.starts_with(crate::bytecode::MAGIC)
+        let proto = if let Some(version) = crate::bytecode::deserialize::stale_version(bytes) {
+            // Bytecode from another Neyuki: compile the source next to it
+            // instead, so upgrading does not break modules shipped compiled.
+            let source_path = path.with_extension("nyk");
+            let Ok(source) = std::fs::read(&source_path) else {
+                return Err(format!(
+                    "cannot load module '{}' from {}: {}",
+                    requested_name,
+                    path.display(),
+                    crate::bytecode::deserialize::version_error(version)
+                ));
+            };
+            Self::compile_source(&source_path, &source, requested_name)?
+        } else if bytes.starts_with(crate::bytecode::MAGIC)
             || path.extension().is_some_and(|ext| ext == "nykb")
         {
-            let p = crate::bytecode::deserialize(bytes)?;
+            let p = crate::bytecode::deserialize(bytes)
+                .map_err(|e| format!("cannot load module '{}': {}", requested_name, e))?;
             crate::bytecode::verify_proto(&p)
                 .map_err(|e| format!("bytecode verification failed: {}", e))?;
             p
         } else {
-            let src = std::str::from_utf8(bytes)
-                .map_err(|_| format!("cannot read module '{}': invalid UTF-8", requested_name))?;
-            crate::compiler::compile_program(
-                src,
-                &path.to_string_lossy(),
-                crate::compiler::Options::RUN,
-            )
-            .map_err(|err| format!("in module '{}': {}", requested_name, err))?
+            Self::compile_source(path, bytes, requested_name)?
         };
 
         let rc = Rc::new(proto);
         self.cache.insert_proto(path_buf, rc.clone());
         Ok(rc)
+    }
+
+    fn compile_source(path: &Path, bytes: &[u8], requested_name: &str) -> Result<Proto, String> {
+        let src = std::str::from_utf8(bytes)
+            .map_err(|_| format!("cannot read module '{}': invalid UTF-8", requested_name))?;
+        crate::compiler::compile_program(
+            src,
+            &path.to_string_lossy(),
+            crate::compiler::Options::RUN,
+        )
+        .map_err(|err| format!("in module '{}': {}", requested_name, err))
     }
 }
 
@@ -138,6 +156,71 @@ mod tests {
         cache.finish_loading("b");
         cache.finish_loading("a");
         assert!(cache.begin_loading("a").is_ok());
+    }
+
+    /// A directory of its own under the system temp directory.
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("neyuki_loader_{}_{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Compiled `source` as bytecode in format `version`.
+    fn bytecode_with_version(source: &str, version: u8) -> Vec<u8> {
+        let mut bytes = crate::compiler::compile_source_to_bytecode(source, "old.nykb").unwrap();
+        bytes[crate::bytecode::MAGIC.len()] = version;
+        bytes
+    }
+
+    #[test]
+    fn test_stale_bytecode_recompiles_from_source() {
+        let dir = scratch_dir("stale_with_source");
+        let compiled = dir.join("mod.nykb");
+        let old = crate::bytecode::BYTECODE_VERSION - 1;
+        std::fs::write(&compiled, bytecode_with_version("return 1", old)).unwrap();
+        std::fs::write(dir.join("mod.nyk"), "return 2").unwrap();
+
+        let mut loader = ModuleLoader::new();
+        let bytes = std::fs::read(&compiled).unwrap();
+        let proto = loader.compile_bytes(&compiled, &bytes, "mod").unwrap();
+        let source = proto.source.as_deref().unwrap_or_default();
+        assert!(source.ends_with("mod.nyk"), "compiled from {}", source);
+
+        // The recompiled module is cached under the bytecode's path.
+        let again = loader.compile_bytes(&compiled, &bytes, "mod").unwrap();
+        assert!(Rc::ptr_eq(&proto, &again));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_stale_bytecode_without_source_names_the_file() {
+        let dir = scratch_dir("stale_alone");
+        let compiled = dir.join("mod.nykb");
+        let old = crate::bytecode::BYTECODE_VERSION - 1;
+        std::fs::write(&compiled, bytecode_with_version("return 1", old)).unwrap();
+
+        let mut loader = ModuleLoader::new();
+        let bytes = std::fs::read(&compiled).unwrap();
+        let err = loader.compile_bytes(&compiled, &bytes, "mod").unwrap_err();
+        assert!(err.contains("cannot load module 'mod'"), "{}", err);
+        assert!(err.contains("mod.nykb"), "{}", err);
+        assert!(err.contains("an older Neyuki"), "{}", err);
+        assert!(loader.cache().get_proto(&compiled).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_current_bytecode_loads_without_source() {
+        let dir = scratch_dir("current");
+        let compiled = dir.join("mod.nykb");
+        let bytes = crate::compiler::compile_source_to_bytecode("return 1", "mod.nyk").unwrap();
+        std::fs::write(&compiled, &bytes).unwrap();
+
+        let mut loader = ModuleLoader::new();
+        assert!(loader.compile_bytes(&compiled, &bytes, "mod").is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
