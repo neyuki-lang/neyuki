@@ -1149,8 +1149,8 @@ impl IrBuilder {
                 for s in body {
                     self.compile_stmt(s);
                 }
-                self.exit_scope();
 
+                // The condition can see the body's locals, as in Lua.
                 self.emit(IrInst::Label(cond_label));
                 let cond_var = self.compile_expr(condition, None);
                 self.emit(IrInst::JumpIfFalse {
@@ -1158,6 +1158,7 @@ impl IrBuilder {
                     target: start_label,
                 });
                 self.insert_loop_close(iteration_start, first_var);
+                self.exit_scope();
                 self.emit(IrInst::Label(exit_label));
 
                 self.loops.pop();
