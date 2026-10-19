@@ -1,12 +1,37 @@
 //! Reads `.nyc` bytecode files and verifies what it loads.
 
-use crate::bytecode::format::BytecodeHeader;
+use crate::bytecode::format::{BYTECODE_VERSION, BytecodeHeader, MAGIC};
 use crate::bytecode::instruction::Instruction;
 use crate::bytecode::proto::{Constant, Proto, UpvalueDesc};
 use crate::bytecode::verify::verify_proto;
 use num_bigint::{BigInt, Sign};
 
+/// The format version of bytecode written for a different Neyuki, or `None`
+/// when `bytes` is current (or not bytecode at all).
+pub fn stale_version(bytes: &[u8]) -> Option<u8> {
+    if bytes.len() < BytecodeHeader::HEADER_SIZE || !bytes.starts_with(MAGIC) {
+        return None;
+    }
+    Some(bytes[MAGIC.len()]).filter(|&v| v != BYTECODE_VERSION)
+}
+
+/// Why bytecode in format `version` cannot be loaded, and what to do about it.
+pub fn version_error(version: u8) -> String {
+    let made_by = if version < BYTECODE_VERSION {
+        "an older"
+    } else {
+        "a newer"
+    };
+    format!(
+        "bytecode was compiled by {} Neyuki (format {}, this one reads format {}); recompile the source with `neyuki compile`",
+        made_by, version, BYTECODE_VERSION
+    )
+}
+
 pub fn deserialize(bytes: &[u8]) -> Result<Proto, String> {
+    if let Some(version) = stale_version(bytes) {
+        return Err(version_error(version));
+    }
     let (header, mut cursor) = BytecodeHeader::parse(bytes)?;
     let payload = &bytes[cursor..];
     let actual_checksum = crate::bytecode::format::compute_crc32(payload);
@@ -526,4 +551,60 @@ fn read_proto(
         upvalue_names,
         cache: Default::default(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bytecode::serialize::serialize;
+
+    fn with_version(version: u8) -> Vec<u8> {
+        let mut proto = Proto::new(Some("old".to_string()), 0, false);
+        proto.max_registers = 1;
+        proto.emit(Instruction::Return { base: 0, count: 0 }, 1);
+        let mut bytes = serialize(&proto);
+        bytes[MAGIC.len()] = version;
+        bytes
+    }
+
+    #[test]
+    fn test_current_bytecode_is_not_stale() {
+        assert_eq!(stale_version(&with_version(BYTECODE_VERSION)), None);
+        assert_eq!(stale_version(b"local x = 1"), None);
+        assert_eq!(stale_version(MAGIC), None);
+    }
+
+    #[test]
+    fn test_older_bytecode_names_both_versions() {
+        let old = BYTECODE_VERSION - 1;
+        let bytes = with_version(old);
+        assert_eq!(stale_version(&bytes), Some(old));
+        let err = deserialize(&bytes).unwrap_err();
+        assert!(err.contains("an older Neyuki"), "{}", err);
+        assert!(
+            err.contains(&format!(
+                "format {}, this one reads format {}",
+                old, BYTECODE_VERSION
+            )),
+            "{}",
+            err
+        );
+        assert!(err.contains("neyuki compile"), "{}", err);
+    }
+
+    #[test]
+    fn test_newer_bytecode_is_reported_as_newer() {
+        let err = deserialize(&with_version(BYTECODE_VERSION + 1)).unwrap_err();
+        assert!(err.contains("a newer Neyuki"), "{}", err);
+    }
+
+    #[test]
+    fn test_version_is_checked_before_the_checksum() {
+        // Older formats may checksum differently; the version is what to report.
+        let mut bytes = with_version(BYTECODE_VERSION - 1);
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xFF;
+        let err = deserialize(&bytes).unwrap_err();
+        assert!(err.contains("an older Neyuki"), "{}", err);
+    }
 }

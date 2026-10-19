@@ -37,8 +37,9 @@ Bytecode artifacts (`.nykb`) carry an explicit version byte in the 12-byte heade
 1. **Current Version**: Bytecode Version 4 (`0x04`).
 2. **Forward Compatibility**: The VM strictly rejects bytecode with a version byte greater than its supported `BYTECODE_VERSION` with a clean diagnostic:
    ```text
-   unsupported bytecode version: X (expected 4)
+   bytecode was compiled by a newer Neyuki (format X, this one reads format 6); recompile the source with `neyuki compile`
    ```
+   Older bytecode is rejected the same way ("an older Neyuki"). When `require` loads such a `.nykb` and its `.nyk` source sits next to it, the source is compiled instead.
 3. **Backward Compatibility**: Production releases of the VM must provide decoding pathways for the immediately preceding bytecode version or provide an automated bytecode migrator in `neyuki pkg upgrade-bytecode`.
 4. **Bytecode Freeze**: Once Version 1.0 of Neyuki is tagged, Bytecode Version 4 enters Long-Term Support (LTS) status.
 
