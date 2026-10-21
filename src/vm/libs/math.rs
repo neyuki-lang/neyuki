@@ -488,7 +488,10 @@ fn perlin_grad(hash: i64, x: f64, y: f64, z: f64) -> f64 {
 }
 
 pub(crate) fn perlin_noise(x: f64, y: f64, z: f64) -> f64 {
-    let (xi, yi, zi) = (x.floor() as i64, y.floor() as i64, z.floor() as i64);
+    // The permutation repeats every 256 cells, so reducing the cell indices
+    // first changes no result and keeps the sums below from overflowing.
+    let cell = |c: f64| c.floor().rem_euclid(256.0) as i64;
+    let (xi, yi, zi) = (cell(x), cell(y), cell(z));
     let (x, y, z) = (x - x.floor(), y - y.floor(), z - z.floor());
     let (u, v, w) = (perlin_fade(x), perlin_fade(y), perlin_fade(z));
     let a = perlin_hash(xi) + yi;

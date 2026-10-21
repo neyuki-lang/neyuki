@@ -172,6 +172,25 @@ fn size_arg(args: &[Value], index: usize, name: &str) -> Result<usize, String> {
     usize::try_from(value).map_err(|_| format!("{} must not be negative", name))
 }
 
+/// The most bytes a script may ask `randomBytes`, `pbkdf2` or `hkdf` for. A
+/// larger request would abort the process when the allocation fails.
+const MAX_OUTPUT_LENGTH: usize = 64 * 1024 * 1024;
+
+/// The most memory, in KiB, argon2 may be asked to use (1 GiB).
+const MAX_ARGON2_MEMORY: usize = 1024 * 1024;
+
+/// An output length in bytes, at most `MAX_OUTPUT_LENGTH`.
+fn length_arg(args: &[Value], index: usize, name: &str) -> Result<usize, String> {
+    let length = size_arg(args, index, name)?;
+    if length > MAX_OUTPUT_LENGTH {
+        return Err(format!(
+            "{} must be at most {} bytes",
+            name, MAX_OUTPUT_LENGTH
+        ));
+    }
+    Ok(length)
+}
+
 fn string_value(text: String) -> Vec<Value> {
     vec![Value::string(text)]
 }
@@ -378,7 +397,7 @@ fn builtin_pbkdf2(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let password = string_arg(args, 1, "password")?;
     let salt = string_arg(args, 2, "salt")?;
     let iterations = size_arg(args, 3, "iterations")?;
-    let length = size_arg(args, 4, "length")?;
+    let length = length_arg(args, 4, "length")?;
     let encoding = encoding_arg(args, 5)?;
     if iterations == 0 {
         return Err("iterations must be at least 1".to_string());
@@ -397,7 +416,7 @@ fn builtin_hkdf(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let key = string_arg(args, 1, "key")?;
     let salt = optional_string_arg(args, 2, "salt")?;
     let info = optional_string_arg(args, 3, "info")?;
-    let length = size_arg(args, 4, "length")?;
+    let length = length_arg(args, 4, "length")?;
     let encoding = encoding_arg(args, 5)?;
     // The input is key material (a shared secret, a master key), which is
     // binary and so arrives encoded like every other key.
@@ -424,6 +443,12 @@ fn builtin_password_hash(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, Str
     let parallelism = size_arg(args, 4, "parallelism")?;
     let hash = match algorithm.as_str() {
         "argon2id" => {
+            if memory > MAX_ARGON2_MEMORY {
+                return Err(format!(
+                    "argon2 memory must be at most {} KiB",
+                    MAX_ARGON2_MEMORY
+                ));
+            }
             let params = argon2::Params::new(
                 u32::try_from(memory).map_err(|_| "memory is too large".to_string())?,
                 u32::try_from(cost).map_err(|_| "cost is too large".to_string())?,
@@ -956,7 +981,7 @@ fn builtin_shared_secret(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, Str
 // ---------------------------------------------------------------------------
 
 fn builtin_random_bytes(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let length = size_arg(args, 0, "n")?;
+    let length = length_arg(args, 0, "n")?;
     let encoding = encoding_arg(args, 1)?;
     let mut bytes = vec![0u8; length];
     OsRng.fill_bytes(&mut bytes);
