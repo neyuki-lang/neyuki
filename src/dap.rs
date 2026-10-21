@@ -171,7 +171,9 @@ fn obj(pairs: Vec<(&str, Json)>) -> Json {
 }
 
 fn session(vm: &mut VM) -> &mut DapSession {
-    vm.dap.as_mut().expect("debug session")
+    vm.dap
+        .as_mut()
+        .expect("DAP handlers run only while a debug session is attached")
 }
 
 /// Sends program output to the client instead of stdout, which carries the

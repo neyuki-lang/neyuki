@@ -607,4 +607,16 @@ mod tests {
         let err = deserialize(&bytes).unwrap_err();
         assert!(err.contains("an older Neyuki"), "{}", err);
     }
+
+    #[test]
+    fn test_parameters_outside_the_register_window_are_rejected() {
+        // Calling a function clears the parameters the caller did not pass;
+        // with more parameters than registers that wrote past the stack.
+        let mut proto = Proto::new(Some("params".to_string()), 0, false);
+        proto.max_registers = 1;
+        proto.emit(Instruction::Return { base: 0, count: 0 }, 1);
+        proto.num_params = 200;
+        let err = deserialize(&serialize(&proto)).unwrap_err();
+        assert!(err.contains("parameter count 200 exceeds"), "{}", err);
+    }
 }

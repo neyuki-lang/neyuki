@@ -295,7 +295,7 @@ pub fn format_source(source: &str) -> Result<String, String> {
                 let opens_fn = fn_opt.is_some_and(|pos| !has_word_after(&stripped, pos + 8, "end"));
 
                 if opens_fn {
-                    let fn_pos = fn_opt.unwrap();
+                    let fn_pos = fn_opt.expect("opens_fn implies a `function` keyword");
                     let before_fn = &stripped[..fn_pos];
                     let parens_before = count_unmatched(before_fn, '(', ')');
                     let braces_before = count_unmatched(before_fn, '{', '}');

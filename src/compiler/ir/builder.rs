@@ -468,12 +468,9 @@ impl IrBuilder {
                 self.emit(IrInst::Vararg { dst, count: 1 });
             }
             Expr::Variable { name, .. } => {
-                let (is_local, upval, local_var) = self.resolve_variable(name);
-                if is_local {
-                    self.emit(IrInst::Move {
-                        dst,
-                        src: local_var.unwrap(),
-                    });
+                let (_, upval, local_var) = self.resolve_variable(name);
+                if let Some(src) = local_var {
+                    self.emit(IrInst::Move { dst, src });
                 } else if let Some(upval_idx) = upval {
                     self.emit(IrInst::GetUpval {
                         dst,
@@ -999,7 +996,11 @@ impl IrBuilder {
                         let mut table = self.compile_expr(
                             &Expr::Variable {
                                 id: NodeId::next(),
-                                name: path.split('.').next().unwrap().to_string(),
+                                name: path
+                                    .split('.')
+                                    .next()
+                                    .expect("split yields at least one piece")
+                                    .to_string(),
                             },
                             None,
                         );
@@ -1344,12 +1345,9 @@ impl IrBuilder {
     fn compile_assign(&mut self, target: &AssignTarget, val_var: IrVar) {
         match target {
             AssignTarget::Variable(name) => {
-                let (is_local, upval, local_var) = self.resolve_variable(name);
-                if is_local {
-                    self.emit(IrInst::Move {
-                        dst: local_var.unwrap(),
-                        src: val_var,
-                    });
+                let (_, upval, local_var) = self.resolve_variable(name);
+                if let Some(dst) = local_var {
+                    self.emit(IrInst::Move { dst, src: val_var });
                 } else if let Some(upval_idx) = upval {
                     self.emit(IrInst::SetUpval {
                         index: upval_idx,

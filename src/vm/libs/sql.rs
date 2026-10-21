@@ -471,7 +471,7 @@ fn pg_error(err: postgres::Error) -> String {
     let mut message = err.to_string();
     let mut cause = err.source();
     while let Some(inner) = cause {
-        write!(message, ": {}", inner).unwrap();
+        write!(message, ": {}", inner).expect("writing to a String cannot fail");
         cause = inner.source();
     }
     message
@@ -685,9 +685,9 @@ fn numeric_from_sql(mut buf: &[u8]) -> Result<String, Box<dyn Error + Sync + Sen
     } else {
         for index in 0..=weight {
             if index == 0 {
-                write!(out, "{}", digit(index)).unwrap();
+                write!(out, "{}", digit(index)).expect("writing to a String cannot fail");
             } else {
-                write!(out, "{:04}", digit(index)).unwrap();
+                write!(out, "{:04}", digit(index)).expect("writing to a String cannot fail");
             }
         }
     }
@@ -695,7 +695,7 @@ fn numeric_from_sql(mut buf: &[u8]) -> Result<String, Box<dyn Error + Sync + Sen
         let mut fraction = String::new();
         let mut index = weight + 1;
         while fraction.len() < dscale {
-            write!(fraction, "{:04}", digit(index)).unwrap();
+            write!(fraction, "{:04}", digit(index)).expect("writing to a String cannot fail");
             index += 1;
         }
         fraction.truncate(dscale);
@@ -752,7 +752,7 @@ fn format_time_of_day(micros: i64) -> String {
         seconds % 60
     );
     if fraction != 0 {
-        write!(out, ".{:06}", fraction).unwrap();
+        write!(out, ".{:06}", fraction).expect("writing to a String cannot fail");
         while out.ends_with('0') {
             out.pop();
         }
@@ -921,9 +921,10 @@ fn my_value(value: &mysql::Value, column: &mysql::Column) -> Value {
         mysql::Value::Date(year, month, day, hour, minute, second, micros) => {
             let mut out = format!("{:04}-{:02}-{:02}", year, month, day);
             if column.column_type() != ColumnType::MYSQL_TYPE_DATE {
-                write!(out, " {:02}:{:02}:{:02}", hour, minute, second).unwrap();
+                write!(out, " {:02}:{:02}:{:02}", hour, minute, second)
+                    .expect("writing to a String cannot fail");
                 if *micros != 0 {
-                    write!(out, ".{:06}", micros).unwrap();
+                    write!(out, ".{:06}", micros).expect("writing to a String cannot fail");
                     while out.ends_with('0') {
                         out.pop();
                     }
@@ -940,7 +941,7 @@ fn my_value(value: &mysql::Value, column: &mysql::Column) -> Value {
                 seconds
             );
             if *micros != 0 {
-                write!(out, ".{:06}", micros).unwrap();
+                write!(out, ".{:06}", micros).expect("writing to a String cannot fail");
                 while out.ends_with('0') {
                     out.pop();
                 }

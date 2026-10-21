@@ -990,8 +990,10 @@ fn format_unsigned(spec: &FormatSpec, value: BigInt, radix: u32, upper: bool) ->
 
 fn exponent_form(value: f64, precision: usize, upper: bool) -> String {
     let formatted = format!("{:.*e}", precision, value);
-    let (mantissa, exponent) = formatted.split_once('e').unwrap();
-    let exponent: i32 = exponent.parse().unwrap();
+    let (mantissa, exponent) = formatted
+        .split_once('e')
+        .expect("`{:e}` output has an exponent");
+    let exponent: i32 = exponent.parse().expect("`{:e}` exponent is an integer");
     let e = if upper { 'E' } else { 'e' };
     format!(
         "{}{}{}{:02}",
@@ -1125,7 +1127,7 @@ fn format_float(spec: &FormatSpec, value: f64, conv: u8) -> String {
             }
         }
         b'a' => hex_float(magnitude, spec.precision, upper),
-        _ => unreachable!(),
+        _ => unreachable!("only float conversions reach format_float"),
     };
     spec.pad(format!("{}{}", sign, body), sign.len(), true)
 }
@@ -1666,7 +1668,7 @@ pub(crate) fn builtin_unpack(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>,
                 )));
             }
             PackKind::Float => {
-                let bytes: [u8; 4] = data[pos..pos + 4].try_into().unwrap();
+                let bytes: [u8; 4] = data[pos..pos + 4].try_into().expect("slice is 4 bytes");
                 let value = if state.little {
                     f32::from_le_bytes(bytes)
                 } else {
@@ -1675,7 +1677,7 @@ pub(crate) fn builtin_unpack(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>,
                 values.push(Value::Float(value as f64));
             }
             PackKind::Double => {
-                let bytes: [u8; 8] = data[pos..pos + 8].try_into().unwrap();
+                let bytes: [u8; 8] = data[pos..pos + 8].try_into().expect("slice is 8 bytes");
                 let value = if state.little {
                     f64::from_le_bytes(bytes)
                 } else {

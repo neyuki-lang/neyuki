@@ -50,7 +50,10 @@ impl ScopeManager {
 
     pub fn exit_scope(&mut self) -> Vec<Symbol> {
         if self.scopes.len() > 1 {
-            let scope = self.scopes.pop().unwrap();
+            let scope = self
+                .scopes
+                .pop()
+                .expect("checked above: more than one scope");
             scope.symbols.into_values().collect()
         } else {
             Vec::new()

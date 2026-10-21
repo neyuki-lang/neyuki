@@ -35,7 +35,7 @@ Compares two strings in constant time. Use it for MACs and tokens so the compari
 
 ## crypto.hashPassword(password: string, options: table?): string
 
-A salted, self-describing password hash. `options.algorithm` is `"argon2id"` (default; `cost`, `memory` in KiB and `parallelism` default to 2, 19456 and 1) or `"bcrypt"` (`cost` defaults to 12; passwords over 72 bytes are refused).
+A salted, self-describing password hash. `options.algorithm` is `"argon2id"` (default; `cost`, `memory` in KiB, at most 1 GiB, and `parallelism` default to 2, 19456 and 1) or `"bcrypt"` (`cost` defaults to 12; passwords over 72 bytes are refused).
 
 ## crypto.verifyPassword(password: string, hash: string): boolean
 
@@ -43,7 +43,7 @@ Whether `password` matches a hash from `hashPassword` (either algorithm).
 
 ## crypto.pbkdf2(password: string, salt: string, options: table?): string
 
-Derives a key from a password with PBKDF2. `options` may set `algorithm`, `iterations` (default 600000), `length` in bytes (default 32) and `encoding`.
+Derives a key from a password with PBKDF2. `options` may set `algorithm`, `iterations` (default 600000), `length` in bytes (default 32, at most 64 MiB) and `encoding`.
 
 ## crypto.hkdf(key: string, options: table?): string
 
@@ -99,7 +99,7 @@ X25519 key agreement: both sides compute the same secret from their own private 
 
 ## crypto.randomBytes(n: number, encoding: string?): string
 
-`n` random bytes from the operating system's secure generator.
+`n` random bytes (at most 64 MiB) from the operating system's secure generator.
 
 ## crypto.randomInt(min: number, max: number?): number
 
