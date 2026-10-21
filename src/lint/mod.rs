@@ -162,6 +162,115 @@ mod tests {
         assert!(diags[0].primary_label.as_ref().unwrap().span.start.line >= 2);
     }
 
+    fn codes(source: &str) -> Vec<ErrorCode> {
+        lint_source(source).iter().filter_map(|d| d.code).collect()
+    }
+
+    #[test]
+    fn methods_and_fields_declare_no_locals() {
+        let source = "local t = {}\n\
+            function t.f(self: any): number return 1 end\n\
+            function t:g() return 2 end\n\
+            return t";
+        assert!(codes(source).is_empty(), "{:?}", lint_source(source));
+        // The table a method is stored into must still exist.
+        assert!(codes("function missing.f() end").contains(&ErrorCode::E0001));
+    }
+
+    #[test]
+    fn varargs_read_in_an_expression_are_used() {
+        assert!(codes("local function f(...: string) return {...} end\nf()").is_empty());
+        assert!(codes("local function f(...: any) return 1 end\nf()").contains(&ErrorCode::W0002));
+    }
+
+    #[test]
+    fn empty_tuple_return_type_allows_bare_return() {
+        assert!(codes("local function f(): () return end\nf()").is_empty());
+    }
+
+    #[test]
+    fn named_types_accept_tables_and_defaults() {
+        let source = "local function f(options: Options?): Options\n\
+            options = options ?? {}\n\
+            return options\n\
+            end\nf()";
+        assert!(codes(source).is_empty(), "{:?}", lint_source(source));
+        // Two different names still don't match.
+        let source = "local function f(r: Request): Response return r end\nf({})";
+        assert!(codes(source).contains(&ErrorCode::E0003));
+        // Nor does a possibly-nil value where nil isn't accepted.
+        let source = "local function f(o: Options?): number return o end\nf()";
+        assert!(codes(source).contains(&ErrorCode::E0003));
+    }
+
+    #[test]
+    fn nested_unions_are_flattened_for_assignment() {
+        let source = "local function f(x: string | number | nil): string | number\n\
+            x = x ?? \"l\"\n\
+            return x\n\
+            end\nf()";
+        assert!(codes(source).is_empty(), "{:?}", lint_source(source));
+        let source = "local function f(x: string | number | nil): string | number\n\
+            return x\n\
+            end\nf()";
+        assert!(codes(source).contains(&ErrorCode::E0003));
+    }
+
+    #[test]
+    fn function_expressions_have_their_own_returns() {
+        let source = "local function f(): string\n\
+            local cmp = function(a: string, b: string): boolean return a < b end\n\
+            cmp(\"a\", \"b\")\n\
+            return \"s\"\n\
+            end\nf()";
+        assert!(codes(source).is_empty(), "{:?}", lint_source(source));
+    }
+
+    #[test]
+    fn function_expressions_have_their_parameter_types() {
+        let ok = "local function f(): (number) -> number\n\
+            return function(n: number): number return n end\n\
+            end\nf()";
+        assert!(codes(ok).is_empty(), "{:?}", lint_source(ok));
+        let variadic = "local function f(): (...any) -> number\n\
+            return function(...: any): number return select(\"#\", ...) end\n\
+            end\nf()";
+        assert!(codes(variadic).is_empty(), "{:?}", lint_source(variadic));
+        let wrong = "local function f(): (number) -> number\n\
+            return function(a: number, b: number): number return a + b end\n\
+            end\nf()";
+        assert!(codes(wrong).contains(&ErrorCode::E0003));
+    }
+
+    #[test]
+    fn trailing_optional_arguments_may_be_left_out() {
+        let decl = "local function f(a: string, b: string?) return a .. (b ?? \"\") end\n";
+        assert!(codes(&format!("{}f(\"x\")", decl)).is_empty());
+        assert!(codes(&format!("{}f(\"x\", \"y\")", decl)).is_empty());
+        assert!(codes(&format!("{}f()", decl)).contains(&ErrorCode::E0004));
+        assert!(codes(&format!("{}f(\"x\", \"y\", \"z\")", decl)).contains(&ErrorCode::E0004));
+    }
+
+    #[test]
+    fn bundled_libraries_lint_clean() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/lib");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|e| e == "nyk") {
+                let source = std::fs::read_to_string(&path).unwrap();
+                let diags = lint_source(&source);
+                assert!(
+                    diags.is_empty(),
+                    "{}",
+                    render_report(&path.display().to_string(), &source, &diags)
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 0);
+    }
+
     #[test]
     fn json_output_is_an_array_of_positions() {
         let json = diagnostics_json(&lint_source("local unused = 1"));

@@ -21,6 +21,9 @@ pub struct Symbol {
     pub used: bool,
     pub assigned_count: usize,
     pub num_params: Option<usize>,
+    /// Arguments a call must pass; trailing optional parameters may be left
+    /// out.
+    pub min_params: Option<usize>,
     pub is_vararg: bool,
 }
 
@@ -43,6 +46,7 @@ impl Symbol {
             used: false,
             assigned_count: 0,
             num_params: None,
+            min_params: None,
             is_vararg: false,
         }
     }

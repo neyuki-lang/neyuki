@@ -56,3 +56,76 @@ jobs:
         run: cargo build --verbose
       - name: Run tests
         run: cargo test --verbose
+
+  fuzz:
+    name: Fuzz (time-boxed)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      # A debug build keeps overflow checks and debug assertions on, so
+      # arithmetic bugs surface as panics.
+      - name: Build
+        run: cargo build
+      # About 4.5 minutes in all. The bytecode loader and verifier go first
+      # and get the most time: they read untrusted .nykb files. Any panic,
+      # even one the VM would catch, or a case hanging for 20s fails the job.
+      # The seed is printed; a crashing input is saved to fuzz-artifacts/.
+      # Address space is capped so a runaway allocation aborts the run, with
+      # the input that caused it left in fuzz-artifacts/<target>-current.*.
+      - name: Fuzz
+        run: |
+          ulimit -v 6000000
+          seed=$(( GITHUB_RUN_ID % 1000000007 ))
+          ./target/debug/neyuki fuzz file --seconds 90 --seed "$seed" --keep-going
+          ./target/debug/neyuki fuzz tree --seconds 60 --seed "$seed" --keep-going
+          ./target/debug/neyuki fuzz vm --seconds 60 --seed "$seed" --keep-going
+          ./target/debug/neyuki fuzz libs --seconds 45 --seed "$seed" --keep-going
+          ./target/debug/neyuki fuzz memory --seconds 30 --seed "$seed" --keep-going
+      - name: Upload crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz-artifacts/
+          if-no-files-found: ignore
+
+  deny:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check advisories, licenses, bans and sources
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories licenses bans sources
+
+  lint-libs:
+    name: Lint bundled libraries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build
+      # Warnings fail the job too, not only errors.
+      - name: Lint lib/*.nyk
+        run: |
+          status=0
+          for file in lib/*.nyk; do
+            if [ "$(./target/debug/neyuki lint --json "$file")" != "[]" ]; then
+              ./target/debug/neyuki lint "$file" || true
+              echo "::error file=$file::neyuki lint reported issues"
+              status=1
+            else
+              echo "$file: clean"
+            fi
+          done
+          exit $status

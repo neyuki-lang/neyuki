@@ -1,0 +1,68 @@
+# cargo-deny configuration, run in CI as `cargo deny check`.
+# https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# Check every platform the release builds for, so Windows- and macOS-only
+# crates (schannel, security-framework, windows-*) are audited as well.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "x86_64-pc-windows-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
+all-features = true
+
+[advisories]
+# Unmaintained crates fail the check unless they are listed below; yanked
+# crates always do.
+unmaintained = "all"
+yanked = "deny"
+ignore = [
+    # Marvin Attack: `rsa` decryption and signing leak timing that a remote
+    # attacker can use to recover the private key. There is no fixed release
+    # (0.10 is still in prerelease). lib/crypto.nyk and
+    # docs/reference/crypto.md warn against RSA decryption and signing in a
+    # network service and point to ed25519/x25519. Remove once a fixed `rsa`
+    # ships.
+    { id = "RUSTSEC-2023-0071", reason = "no fixed rsa release yet; RSA private-key ops are documented as unsuitable for network-facing use" },
+    # `ttf-parser` is unmaintained. It parses only the fonts bundled in
+    # lib/fonts or chosen by the script author, through `fontdue` and through
+    # winit's `sctk-adwaita` window decorations; neither has moved off it yet.
+    { id = "RUSTSEC-2026-0192", reason = "unmaintained, no replacement in fontdue/winit yet; parses trusted fonts only" },
+]
+
+[licenses]
+# Licenses compatible with distributing Neyuki under MIT. Crates offered
+# under several licenses (e.g. `MIT OR LGPL-2.1-or-later`) pass as long as
+# one of them is listed here.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "Unlicense",
+    "BSL-1.0",
+    "Unicode-3.0",
+    # webpki-root-certs: the Mozilla root store data.
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Duplicate versions (windows-sys, rand_core, digest generations, ...) come
+# from the GUI and crypto stacks moving at different speeds. Report them, but
+# don't fail on them.
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

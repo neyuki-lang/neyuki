@@ -208,7 +208,7 @@ function ui.open(options: WindowOptions?): Window
     if (width <= 0 or height <= 0) then error("width and height must be positive") end
 
     local title = options.title ?? "Neyuki"
-    local id, scale = __ui_open(title, width, height, options.resizable ?? true, options.visible ?? true)
+    local id = __ui_open(title, width, height, options.resizable ?? true, options.visible ?? true)
     local closed = false
     local window = {}
     window.id = id

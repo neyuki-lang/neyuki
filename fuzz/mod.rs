@@ -1,6 +1,9 @@
 //! Fuzzers for `neyuki fuzz`: syntax trees, bytecode files, memory, the VM
-//! and the standard libraries.
+//! and the standard libraries. Each target has fixed regression cases and a
+//! time-boxed random mode (see `driver`).
 
+pub mod corpus;
+pub mod driver;
 pub mod file;
 pub mod libs;
 pub mod memory;

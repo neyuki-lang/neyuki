@@ -287,7 +287,10 @@ function crypto.publicEncrypt(s: string, publicKey: string, options: {[string]: 
     )
 end
 
--- Reverses `publicEncrypt` with the matching private key.
+-- Reverses `publicEncrypt` with the matching private key. RSA private-key
+-- operations here are not constant-time (RUSTSEC-2023-0071): don't decrypt
+-- or sign with RSA in a service that answers requests an attacker can time.
+-- Prefer ed25519 and x25519 there.
 function crypto.privateDecrypt(s: string, privateKey: string, options: {[string]: any}?): string
     checkString(s, "s")
     checkString(privateKey, "privateKey")

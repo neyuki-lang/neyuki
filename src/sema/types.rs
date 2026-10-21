@@ -59,6 +59,8 @@ impl NeyukiType {
             },
             TypeExpr::Optional(inner) => NeyukiType::Optional(Box::new(Self::from_ast_type(inner))),
             TypeExpr::Array(inner) => NeyukiType::Array(Box::new(Self::from_ast_type(inner))),
+            // `()` is the return type of a function that returns nothing.
+            TypeExpr::Tuple(elems) if elems.is_empty() => NeyukiType::Nil,
             TypeExpr::Tuple(elems) => NeyukiType::Record(
                 elems
                     .iter()
@@ -104,14 +106,33 @@ impl NeyukiType {
             return true;
         }
 
+        // A named type such as `RequestOptions` has no declaration the
+        // checker can see, so its structure is unknown: it may stand for a
+        // table, a number or a union of them. Only two different names are
+        // known not to match.
+        // Unions and optionals around a name are split up below first.
+        let is_compound =
+            |t: &NeyukiType| matches!(t, NeyukiType::Union(_) | NeyukiType::Optional(_));
+        match (self, target) {
+            (NeyukiType::Custom(a), NeyukiType::Custom(b)) => return a == b,
+            (NeyukiType::Custom(_), other) | (other, NeyukiType::Custom(_))
+                if !is_compound(other) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+
+        // Union source: A | B is assignable to T if all variants are
+        // assignable to T. Checked before a union target, so that
+        // `(A | B) | C` is assignable to `A | B | C`.
+        if let NeyukiType::Union(variants) = self {
+            return !variants.is_empty() && variants.iter().all(|v| v.is_assignable_to(target));
+        }
+
         // Union target: A is assignable to A | B if A is assignable to any variant
         if let NeyukiType::Union(variants) = target {
             return variants.iter().any(|v| self.is_assignable_to(v));
-        }
-
-        // Union source: A | B is assignable to T if all variants are assignable to T
-        if let NeyukiType::Union(variants) = self {
-            return !variants.is_empty() && variants.iter().all(|v| v.is_assignable_to(target));
         }
 
         // Optional target: T? accepts T or Nil
@@ -174,7 +195,15 @@ impl NeyukiType {
                     is_vararg: v2,
                 },
             ) => {
-                if v1 != v2 || p1.len() != p2.len() {
+                // A variadic function accepts any arguments past its fixed
+                // ones, so it fits any signature with at least as many.
+                // (`...any` in a signature is parsed as one `any` parameter.)
+                let arity_fits = if *v1 {
+                    p1.len() <= p2.len() || *v2
+                } else {
+                    !*v2 && p1.len() == p2.len()
+                };
+                if !arity_fits {
                     return false;
                 }
                 for (a, b) in p1.iter().zip(p2.iter()) {
@@ -184,7 +213,6 @@ impl NeyukiType {
                 }
                 r1.is_assignable_to(r2)
             }
-            (NeyukiType::Custom(a), NeyukiType::Custom(b)) => a == b,
             _ => false,
         }
     }

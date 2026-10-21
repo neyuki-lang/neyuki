@@ -51,7 +51,7 @@ fn byte_range(s: &str, i: i64, j: i64) -> Result<(usize, usize), String> {
     if start > s.len() {
         return Err(format!("byte position {} is out of bounds", i));
     }
-    if start < end && !s.is_char_boundary(start) {
+    if !s.is_char_boundary(start) {
         return Err(format!("byte position {} is inside a character", start + 1));
     }
     Ok((start, end.max(start)))

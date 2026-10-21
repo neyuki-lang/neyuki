@@ -45,7 +45,10 @@ Commands:
   disasm <file>           Print the bytecode the compiler emits
   dump-ir <file>          Print the IR before and after optimization
   assemble <file> [out]   Assemble bytecode from its text form
-  bench, fuzz             Run the built-in benchmarks or fuzzers
+  bench                   Run the built-in benchmarks
+  fuzz [target] [--seconds N]
+                          Run the fuzzers' regression cases, or fuzz a
+                          target (file, tree, vm, libs, memory, all)
   help, version";
 
 fn run_cli() {
@@ -197,7 +200,10 @@ fn run_cli() {
     } else if action == "test" {
         tests::run_all_tests();
     } else if action == "fuzz" {
-        fuzz::run_all_fuzz_tests();
+        if let Err(err) = fuzz::driver::run_cli(&args[2..]) {
+            eprintln!("{}", err);
+            process::exit(1);
+        }
     } else if action == "bench" {
         bench::run_all_benchmarks();
     } else if action == "repl" {
