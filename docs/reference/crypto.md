@@ -91,6 +91,8 @@ Encrypts a short message, such as a symmetric key, with RSA-OAEP.
 
 Reverses `publicEncrypt`.
 
+RSA private-key operations (`privateDecrypt`, and `sign` with an RSA key) are not constant-time ([RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071)): an attacker who can time many of them over a network may recover the key. Use them for local tools, not in a server that decrypts or signs on request; prefer Ed25519 and X25519 there.
+
 ## crypto.sharedSecret(privateKey: string, publicKey: string, options: table?): string
 
 X25519 key agreement: both sides compute the same secret from their own private key and the other's public key. Run it through `hkdf` with an `info` before using it as a key.
