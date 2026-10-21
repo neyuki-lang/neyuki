@@ -2,3 +2,4 @@
 //! bad opcodes, registers and jump targets.
 
 pub mod bytecode_fuzz;
+pub mod random;

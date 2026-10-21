@@ -2,3 +2,4 @@
 //! tokens.
 
 pub mod ast_fuzz;
+pub mod random;
