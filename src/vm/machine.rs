@@ -137,6 +137,10 @@ pub struct VM {
     /// happen at that level; deeper, it would unwind native frames that
     /// cannot be saved and resumed.
     pub yield_floor: usize,
+    /// Frames of the callers that resumed the running coroutine, put aside
+    /// while it runs. Each resume nests the Rust stack like a call does, so
+    /// they count toward `max_call_depth`.
+    pub frames_below: usize,
     /// Active `debug.sethook` hook, if any.
     pub hook: Option<DebugHook>,
     /// True while a hook function itself runs: hooks never trigger hooks.
@@ -199,6 +203,7 @@ impl VM {
             is_yielding: false,
             native_calls: 0,
             yield_floor: 0,
+            frames_below: 0,
             hook: None,
             in_hook: false,
             hook_countdown: 0,
@@ -227,6 +232,13 @@ impl VM {
 
     pub fn set_max_call_depth(&mut self, depth: usize) {
         self.max_call_depth = depth;
+    }
+
+    /// Frames on the call stack, counting those of suspended coroutine
+    /// callers.
+    #[inline]
+    pub(crate) fn call_depth(&self) -> usize {
+        self.frames.len() + self.frames_below
     }
 
     fn register_builtins(&mut self) {
@@ -280,6 +292,7 @@ impl VM {
         // leave these mid-call; a new top-level run starts outside any.
         self.native_calls = 0;
         self.yield_floor = 0;
+        self.frames_below = 0;
         self.current_co = None;
         self.is_yielding = false;
         self.error_trace = None;
@@ -468,7 +481,7 @@ impl VM {
     }
 
     fn call_function_inner(&mut self, func: Value, args: &[Value]) -> Result<Vec<Value>, String> {
-        if self.frames.len() >= self.max_call_depth {
+        if self.call_depth() >= self.max_call_depth {
             return Err(format!(
                 "call stack overflow: exceeded maximum call depth of {}",
                 self.max_call_depth
@@ -1987,7 +2000,7 @@ impl VM {
                                         count: MULTRET,
                                     }) if *ret == callee
                                 );
-                            if !tail && self.frames.len() >= self.max_call_depth {
+                            if !tail && self.call_depth() >= self.max_call_depth {
                                 throw!(
                                     "call stack overflow: exceeded maximum call depth of {}",
                                     self.max_call_depth
@@ -3066,6 +3079,39 @@ mod tests {
             .execute(proto)
             .expect("recursion up to 1000 frames must succeed with depth 2000");
         assert_eq!(res.to_string(), "1000");
+    }
+
+    #[test]
+    fn test_nested_coroutine_resumes_count_toward_the_call_depth() {
+        // Each coroutine runs on its own frame stack, so a coroutine that
+        // resumes a new one forever overflowed the Rust stack and aborted.
+        // Every resume nests the interpreter, whose debug-build frames are
+        // large, so this runs on a stack as big as the CLI's.
+        let run = || {
+            for code in [
+                "local function f() return select(2, coroutine.resume(coroutine.create(f))) end\nreturn f()",
+                "local function f() return coroutine.wrap(f)() end\nreturn f()",
+            ] {
+                let stmts = crate::compiler::compile_source(code).expect("syntax error");
+                let proto = crate::compiler::compile_to_proto(&stmts);
+                let mut vm = VM::new();
+                let text = match vm.execute(proto) {
+                    Ok(v) => v.to_string(),
+                    Err(e) => e,
+                };
+                assert!(
+                    text.contains("call stack overflow: exceeded maximum call depth of 512"),
+                    "{}",
+                    text
+                );
+            }
+        };
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(run)
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

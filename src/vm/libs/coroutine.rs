@@ -130,8 +130,19 @@ pub(crate) fn yieldable_handle(vm: &VM) -> Option<Rc<RefCell<VmTable>>> {
 /// `coroutine.resume(co, ...)`. Yields are only allowed at the native-call
 /// level the coroutine is resumed from; see `VM::yield_floor`.
 pub(crate) fn coroutine_resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    // The caller's frames are put aside while the coroutine runs, but the
+    // Rust stack still nests, so they keep counting toward the call depth.
+    if vm.call_depth() >= vm.max_call_depth() {
+        return Err(format!(
+            "call stack overflow: exceeded maximum call depth of {}",
+            vm.max_call_depth()
+        ));
+    }
     let saved_floor = std::mem::replace(&mut vm.yield_floor, vm.native_calls);
+    let saved_below = vm.frames_below;
+    vm.frames_below += vm.frames.len();
     let res = resume(vm, args);
+    vm.frames_below = saved_below;
     vm.yield_floor = saved_floor;
     res
 }
