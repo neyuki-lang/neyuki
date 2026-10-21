@@ -520,7 +520,7 @@ fn parse_instruction_line(line: &str) -> Result<Option<Instruction>, String> {
                     b,
                     jump_if_false,
                 },
-                _ => unreachable!(),
+                _ => unreachable!("the outer match only lets comparison names through"),
             };
             Ok(Some(inst))
         }

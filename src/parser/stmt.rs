@@ -272,7 +272,11 @@ pub fn parse_binding(parser: &mut Parser) -> Result<Stmt, String> {
         parser.expect_symbol("=")?;
         let mut target = Expr::Variable {
             id: NodeId::next(),
-            name: name.split('.').next().unwrap().to_string(),
+            name: name
+                .split('.')
+                .next()
+                .expect("split yields at least one piece")
+                .to_string(),
         };
         for field in name.split('.').skip(1) {
             target = Expr::Member {

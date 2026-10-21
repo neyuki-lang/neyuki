@@ -189,7 +189,7 @@ ints! {
 fn buf_readf32(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let b = buffer_arg(args, 0, "b")?.borrow();
     let range = b.range(size_arg(args, 1, "offset")?, 4)?;
-    let raw: [u8; 4] = b.data[range].try_into().unwrap();
+    let raw: [u8; 4] = b.data[range].try_into().expect("range() returned 4 bytes");
     let value = if bool_arg(args, 2, "bigEndian")? {
         f32::from_be_bytes(raw)
     } else {
@@ -214,7 +214,7 @@ fn buf_writef32(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 fn buf_readf64(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let b = buffer_arg(args, 0, "b")?.borrow();
     let range = b.range(size_arg(args, 1, "offset")?, 8)?;
-    let raw: [u8; 8] = b.data[range].try_into().unwrap();
+    let raw: [u8; 8] = b.data[range].try_into().expect("range() returned 8 bytes");
     let value = if bool_arg(args, 2, "bigEndian")? {
         f64::from_be_bytes(raw)
     } else {

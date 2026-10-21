@@ -155,7 +155,7 @@ fn resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         ]);
     };
 
-    let co_rc = vm.co_state(co_id).expect("live coroutine state vanished");
+    let co_rc = vm.co_state(co_id).expect("live_coroutine found its state");
 
     let current_status = co_rc.borrow().status.clone();
     if current_status != "suspended" {
@@ -402,7 +402,10 @@ fn wrapped_coroutine_call(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, Str
 
 fn coroutine_wrap(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let create_res = coroutine_create(vm, args)?;
-    let co_table = create_res.into_iter().next().unwrap();
+    let co_table = create_res
+        .into_iter()
+        .next()
+        .expect("coroutine.create returns the coroutine");
 
     let wrapper_table = Rc::new(RefCell::new(VmTable::new()));
     wrapper_table.borrow_mut().set_str("_co", co_table);
@@ -432,7 +435,7 @@ pub(crate) fn coroutine_close(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>,
     let Some(co_id) = live_coroutine(vm, args.first(), "coroutine.close")? else {
         return Ok(vec![Value::Bool(true)]);
     };
-    let co = vm.co_state(co_id).expect("live coroutine state vanished");
+    let co = vm.co_state(co_id).expect("live_coroutine found its state");
     let status = co.borrow().status.clone();
     if status != "suspended" {
         return Ok(vec![

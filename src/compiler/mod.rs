@@ -60,6 +60,8 @@ impl Options {
 
 /// Parses source, keeping the line of each statement.
 pub fn parse(source: &str) -> Result<Parsed, String> {
+    // The parser reports bad input as `Err`; the guard only keeps a parser
+    // bug from taking the host down with it.
     let (mut stmts, pool) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut parser = Parser::new(source);
         parser.parse_program()

@@ -21,6 +21,10 @@ use crate::vm::value::{NativeDef, StrRef, Upvalue, Value, VmClosure, VmTable};
 
 pub const DEFAULT_MAX_CALL_DEPTH: usize = 512;
 
+/// The interpreter loop only runs while the frame stack is deeper than its
+/// target depth, so there is always a running frame inside it.
+const RUNNING_FRAME: &str = "the interpreter loop has a running frame";
+
 /// A register of the running frame. The interpreter loop only calls this
 /// with indices below `base + max_registers` of a verified prototype, and
 /// sizes the stack to cover that window before dispatching, so the bounds
@@ -313,7 +317,9 @@ impl VM {
         Ok(value)
     }
 
-    /// Turns a panic inside `f` (an interpreter bug) into a runtime error.
+    /// Turns a panic inside `f` into a runtime error. This is a last resort:
+    /// script and bytecode input reach errors through `Result`, so a panic
+    /// here is an interpreter bug, and the VM may be left mid-instruction.
     fn catch_panics<T>(
         &mut self,
         f: impl FnOnce(&mut Self) -> Result<T, String>,
@@ -353,7 +359,10 @@ impl VM {
             if *idx < from {
                 break;
             }
-            let (idx, uv) = self.open_upvalues.pop().unwrap();
+            let (idx, uv) = self
+                .open_upvalues
+                .pop()
+                .expect("the loop condition saw an open upvalue");
             let val = self.stack.get(idx).cloned().unwrap_or(Value::Nil);
             uv.close(val);
         }
@@ -633,7 +642,7 @@ impl VM {
         if self.in_hook || self.in_eval {
             return Ok(());
         }
-        let frame = self.frames.last_mut().unwrap();
+        let frame = self.frames.last_mut().expect(RUNNING_FRAME);
         let line = frame.closure.proto.lines.get(ip).copied().unwrap_or(0);
         // A new line, or a jump back into the same one (a loop), starts a
         // new line event.
@@ -913,7 +922,7 @@ impl VM {
             return Ok(Some(Value::Nil));
         }
         let (closure, mut base, mut ip) = {
-            let f = self.frames.last().unwrap();
+            let f = self.frames.last().expect(RUNNING_FRAME);
             (f.closure.clone(), f.base, f.ip)
         };
         // Verified once per prototype: afterwards every register operand
@@ -962,7 +971,7 @@ impl VM {
         }
         macro_rules! sync_ip {
             () => {
-                self.frames.last_mut().unwrap().ip = ip;
+                self.frames.last_mut().expect(RUNNING_FRAME).ip = ip;
             };
         }
         macro_rules! jump {
@@ -1109,7 +1118,7 @@ impl VM {
                 if self.hook.is_some() {
                     self.fire_hook(HookEvent::Return)?;
                 }
-                let frame = self.frames.pop().unwrap();
+                let frame = self.frames.pop().expect(RUNNING_FRAME);
                 if !self.open_upvalues.is_empty() {
                     self.close_upvalues(frame.base);
                 }
@@ -1117,7 +1126,7 @@ impl VM {
                     self.returned.clear();
                     return Ok(Some(Value::Nil));
                 }
-                let caller_frame = self.frames.last().unwrap();
+                let caller_frame = self.frames.last().expect(RUNNING_FRAME);
                 current_closure = caller_frame.closure.clone();
                 base = caller_frame.base;
                 ip = caller_frame.ip;
@@ -1132,7 +1141,7 @@ impl VM {
             if TRAP {
                 // The frame's ip points past the instruction about to run,
                 // as it does while that instruction executes.
-                self.frames.last_mut().unwrap().ip = ip + 1;
+                self.frames.last_mut().expect(RUNNING_FRAME).ip = ip + 1;
                 self.instruction_hook(ip)?;
                 if !self.trap {
                     sync_ip!();
@@ -2013,7 +2022,7 @@ impl VM {
                             // call from our caller would put it, and the
                             // callee inherits our return obligation.
                             let (new_base, want_ret) = if tail {
-                                let cur = self.frames.pop().unwrap();
+                                let cur = self.frames.pop().expect(RUNNING_FRAME);
                                 if !self.open_upvalues.is_empty() {
                                     self.close_upvalues(cur.base);
                                 }
@@ -2160,7 +2169,7 @@ impl VM {
                     if self.hook.is_some() {
                         self.fire_hook(HookEvent::Return)?;
                     }
-                    let frame = self.frames.pop().unwrap();
+                    let frame = self.frames.pop().expect(RUNNING_FRAME);
                     if !self.open_upvalues.is_empty() {
                         self.close_upvalues(frame.base);
                     }
@@ -2256,7 +2265,7 @@ impl VM {
                     if frame.want_ret == MULTRET {
                         self.top = caller_dest + nret;
                     }
-                    let caller_frame = self.frames.last().unwrap();
+                    let caller_frame = self.frames.last().expect(RUNNING_FRAME);
                     if !Rc::ptr_eq(&current_closure, &caller_frame.closure) {
                         current_closure = caller_frame.closure.clone();
                         code = &current_closure.proto.instructions;
@@ -2272,7 +2281,7 @@ impl VM {
                 }
                 Instruction::Vararg { dst, count } => {
                     let all = count == 0 || count == MULTRET;
-                    let frame = self.frames.last().unwrap();
+                    let frame = self.frames.last().expect(RUNNING_FRAME);
                     let cnt = if all {
                         frame.varargs.len()
                     } else {
@@ -2282,7 +2291,7 @@ impl VM {
                     if dest + cnt > self.stack.len() {
                         self.stack.resize(dest + cnt, Value::Nil);
                     }
-                    let frame = self.frames.last().unwrap();
+                    let frame = self.frames.last().expect(RUNNING_FRAME);
                     for i in 0..cnt {
                         let val = frame.varargs.get(i).cloned().unwrap_or(Value::Nil);
                         self.stack[dest + i] = val;
@@ -2307,7 +2316,7 @@ impl VM {
             && let Some(mm) = self.get_binop_metamethod(va, vb, "__eq")
         {
             let (va, vb) = (va.clone(), vb.clone());
-            self.frames.last_mut().unwrap().ip = ip;
+            self.frames.last_mut().expect(RUNNING_FRAME).ip = ip;
             return self.call_cmp_mm(mm, va, vb);
         }
         Ok(false)
