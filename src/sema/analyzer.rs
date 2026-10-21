@@ -164,6 +164,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 return_type,
                 ..
             } = stmt
+                && !fn_name.contains('.')
             {
                 self.hoist_function(stmt, fn_name, *is_const, params, return_type.as_deref());
             }
@@ -222,6 +223,7 @@ impl<'a> SemanticAnalyzer<'a> {
             span,
         );
         sym.num_params = Some(params.iter().filter(|p| !p.variadic).count());
+        sym.min_params = Some(required_params(params));
         sym.is_vararg = is_vararg;
         let _ = self.scope_mgr.define(sym);
     }
@@ -285,7 +287,11 @@ impl<'a> SemanticAnalyzer<'a> {
                 ..
             } => {
                 let ret_ty = return_type.as_deref().map(NeyukiType::parse);
-                if let Some(fn_name) = name {
+                if let Some((object, _)) = name.as_deref().and_then(|n| n.split_once('.')) {
+                    // `function t.f()` and `function t:m()` store into a
+                    // field of `t`; they read `t` and declare nothing.
+                    self.read_variable(object);
+                } else if let Some(fn_name) = name {
                     let span = self.find_ident_span(fn_name);
                     self.check_shadowing(fn_name, span);
 
@@ -314,6 +320,7 @@ impl<'a> SemanticAnalyzer<'a> {
                         span,
                     );
                     sym.num_params = Some(params.iter().filter(|p| !p.variadic).count());
+                    sym.min_params = Some(required_params(params));
                     sym.is_vararg = is_vararg;
                     let _ = self.scope_mgr.define(sym);
                 }
@@ -464,15 +471,13 @@ impl<'a> SemanticAnalyzer<'a> {
                         // optional variable (`x = x ?? default`) until the
                         // next assignment. Branches are not merged, so this
                         // only ever removes diagnostics.
-                        sym.inferred_type = match decl_type {
-                            NeyukiType::Optional(inner)
-                                if val_type != NeyukiType::Any
-                                    && val_type.is_assignable_to(inner) =>
-                            {
-                                (**inner).clone()
-                            }
-                            _ => decl_type.clone(),
-                        };
+                        let non_nil = decl_type.narrow_non_nil();
+                        sym.inferred_type =
+                            if val_type != NeyukiType::Any && val_type.is_assignable_to(&non_nil) {
+                                non_nil
+                            } else {
+                                decl_type.clone()
+                            };
                     }
                 } else if !self.is_known_global(name) {
                     let diag = Diagnostic::error(format!(
@@ -495,22 +500,24 @@ impl<'a> SemanticAnalyzer<'a> {
         }
     }
 
+    /// Marks `name` used, or reports it when nothing by that name exists.
+    fn read_variable(&mut self, name: &str) {
+        let span = self.find_ident_span(name);
+        if !self.scope_mgr.mark_used(name) && !self.is_known_global(name) {
+            let diag = Diagnostic::error(format!("cannot find variable '{}' in this scope", name))
+                .with_code(ErrorCode::E0001)
+                .with_label(span, "not found in this scope")
+                .with_help(format!(
+                    "declare 'local {} = ...' before accessing it",
+                    name
+                ));
+            self.diagnostics.push(diag);
+        }
+    }
+
     fn analyze_expr(&mut self, expr: &Expr) {
         match expr {
-            Expr::Variable { name, .. } => {
-                let span = self.find_ident_span(name);
-                if !self.scope_mgr.mark_used(name) && !self.is_known_global(name) {
-                    let diag =
-                        Diagnostic::error(format!("cannot find variable '{}' in this scope", name))
-                            .with_code(ErrorCode::E0001)
-                            .with_label(span, "not found in this scope")
-                            .with_help(format!(
-                                "declare 'local {} = ...' before accessing it",
-                                name
-                            ));
-                    self.diagnostics.push(diag);
-                }
-            }
+            Expr::Variable { name, .. } => self.read_variable(name),
             Expr::Call { callee, args, .. } => {
                 self.analyze_expr(callee);
                 for a in args {
@@ -521,7 +528,7 @@ impl<'a> SemanticAnalyzer<'a> {
                     && let Some(sym) = self.scope_mgr.lookup(fn_name)
                     && let Some(expected) = sym.num_params
                     && !sym.is_vararg
-                    && args.len() != expected
+                    && (args.len() > expected || args.len() < sym.min_params.unwrap_or(expected))
                 {
                     let span = self.find_ident_span(fn_name);
                     let diag = Diagnostic::warning(format!(
@@ -565,6 +572,9 @@ impl<'a> SemanticAnalyzer<'a> {
                 }
             }
             Expr::Function { params, body, .. } => {
+                // A function expression keeps no return annotation, so its
+                // returns are not checked against the enclosing function's.
+                let prev_ret = self.current_return_type.take();
                 self.scope_mgr.enter_scope(ScopeKind::Function);
                 for param in params {
                     let span = self.find_ident_span(&param.name);
@@ -580,6 +590,7 @@ impl<'a> SemanticAnalyzer<'a> {
                 }
                 self.analyze_block(body);
                 self.check_unused_symbols();
+                self.current_return_type = prev_ret;
             }
             Expr::Interp { parts, .. } => {
                 for part in parts {
@@ -588,7 +599,10 @@ impl<'a> SemanticAnalyzer<'a> {
                     }
                 }
             }
-            Expr::Literal { .. } | Expr::Vararg { .. } => {}
+            Expr::Vararg { .. } => {
+                self.scope_mgr.mark_used("...");
+            }
+            Expr::Literal { .. } => {}
         }
     }
 
@@ -613,10 +627,19 @@ impl<'a> SemanticAnalyzer<'a> {
                     NeyukiType::Table
                 }
             }
-            Expr::Function { .. } => NeyukiType::Function {
-                params: Vec::new(),
+            Expr::Function { params, .. } => NeyukiType::Function {
+                params: params
+                    .iter()
+                    .filter(|p| !p.variadic)
+                    .map(|p| {
+                        p.type_name
+                            .as_deref()
+                            .map(NeyukiType::parse)
+                            .unwrap_or(NeyukiType::Any)
+                    })
+                    .collect(),
                 return_type: Box::new(NeyukiType::Any),
-                is_vararg: false,
+                is_vararg: params.iter().any(|p| p.variadic),
             },
             Expr::Variable { name, .. } => {
                 if let Some(sym) = self.scope_mgr.lookup(name) {
@@ -704,7 +727,10 @@ impl<'a> SemanticAnalyzer<'a> {
     fn check_unused_symbols(&mut self) {
         let symbols = self.scope_mgr.exit_scope();
         for sym in symbols {
-            if !sym.used && !sym.name.starts_with('_') {
+            // `self` is part of the method calling convention, even in a
+            // method that doesn't read it.
+            let is_self = sym.kind == SymbolKind::Parameter && sym.name == "self";
+            if !sym.used && !sym.name.starts_with('_') && !is_self {
                 let (code, msg, label_msg) = if sym.kind == SymbolKind::Parameter {
                     (
                         ErrorCode::W0002,
@@ -1002,4 +1028,18 @@ impl<'a> SemanticAnalyzer<'a> {
             }
         }
     }
+}
+
+/// How many arguments a call must pass: the fixed parameters up to the last
+/// one that doesn't accept nil, since trailing optional ones may be left out.
+fn required_params(params: &[Param]) -> usize {
+    let fixed: Vec<&Param> = params.iter().filter(|p| !p.variadic).collect();
+    fixed
+        .iter()
+        .rposition(|p| match p.type_name.as_deref().map(NeyukiType::parse) {
+            Some(NeyukiType::Any) => true,
+            Some(ty) => !NeyukiType::Nil.is_assignable_to(&ty),
+            None => true,
+        })
+        .map_or(0, |i| i + 1)
 }
