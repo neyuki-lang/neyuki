@@ -1,6 +1,6 @@
 # @neyuki/hid
 
-Keyboard and mouse automation, screen size and the clipboard. Input goes to whichever window has focus, exactly as if a person typed or clicked. It works on Windows, macOS and X11 (Wayland sessions need XWayland); macOS asks for accessibility permission the first time.
+Keyboard and mouse automation, screen size and the clipboard. Input goes to whichever window has focus, exactly as if a person typed or clicked. It works on Windows, macOS, X11 and Wayland compositors that support the virtual keyboard and pointer protocols (wlroots-based ones such as Sway and Hyprland, and niri); on other Wayland compositors, such as GNOME, it falls back to XWayland and only reaches XWayland windows. macOS asks for accessibility permission the first time.
 
 Keys are single characters (`"a"`, `"7"`, `"/"`) or case-insensitive names: `enter`, `tab`, `space`, `backspace`, `delete`, `escape`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`, `shift`, `ctrl`, `alt`, `meta` (also `win`, `cmd`, `super`), `capslock`, `f1` to `f20`, `numpad0` to `numpad9`, `volumeup`, `volumedown`, `mute`, `playpause`, `nexttrack` and `prevtrack`. Mouse buttons are `"left"` (the default), `"right"`, `"middle"`, `"back"` and `"forward"`. Coordinates are pixels from the top-left corner of the main display.
 
@@ -65,7 +65,7 @@ Moves the pointer to a position in a straight line over `seconds` (default 0.25)
 
 ## hid.mouse.position(): (number, number)
 
-The pointer position.
+The pointer position. Wayland does not let programs read it, so there it is where the last `move`, `moveBy` or `glide` put the pointer (it does not see a person moving the mouse), and an error until the pointer has been moved to a position. Until then `glide` and `drag` jump instead of gliding.
 
 ## hid.mouse.click(button: string?, count: number?): ()
 

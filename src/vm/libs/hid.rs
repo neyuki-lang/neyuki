@@ -59,19 +59,135 @@ pub(crate) const NATIVES: &[NativeDef] = &[
     },
 ];
 
+#[cfg(all(unix, not(target_os = "macos")))]
+mod wayland;
+
 thread_local! {
-    static ENIGO: RefCell<Option<Enigo>> = const { RefCell::new(None) };
+    static DEVICE: RefCell<Option<Device>> = const { RefCell::new(None) };
     static CLIPBOARD: RefCell<Option<Clipboard>> = const { RefCell::new(None) };
 }
 
+/// What sends the input: `enigo` (SendInput on Windows, CoreGraphics on
+/// macOS, XTest on X11), or the Wayland virtual keyboard and pointer.
+///
+/// Both are boxed: each is hundreds of bytes and which is larger depends on
+/// the platform.
+enum Backend {
+    Enigo(Box<Enigo>),
+    #[cfg(all(unix, not(target_os = "macos")))]
+    Wayland(Box<wayland::Input>),
+}
+
+/// The input device and where the library last put the pointer.
+struct Device {
+    backend: Backend,
+    /// Where the last absolute move put the pointer, kept up to date by
+    /// relative moves. Wayland gives clients no way to read the pointer
+    /// position, so this is the best answer `position` has there.
+    pointer: Option<(i32, i32)>,
+}
+
+/// Opens the input device for this session.
+///
+/// In a Wayland session XTest only reaches XWayland windows, so input goes
+/// through the compositor's virtual devices when it offers them and falls
+/// back to XTest otherwise (GNOME, for one, has no such protocols).
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_backend() -> Result<Backend, String> {
+    let mut wayland_error = None;
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        match wayland::Input::connect() {
+            Ok(input) => return Ok(Backend::Wayland(Box::new(input))),
+            Err(err) => wayland_error = Some(err),
+        }
+    }
+    Enigo::new(&Settings::default())
+        .map(|enigo| Backend::Enigo(Box::new(enigo)))
+        .map_err(|err| match wayland_error {
+            Some(wayland) => format!("cannot open the input device: {}; {}", wayland, err),
+            None => format!("cannot open the input device: {}", err),
+        })
+}
+
+#[cfg(not(all(unix, not(target_os = "macos"))))]
+fn open_backend() -> Result<Backend, String> {
+    Enigo::new(&Settings::default())
+        .map(|enigo| Backend::Enigo(Box::new(enigo)))
+        .map_err(|err| format!("cannot open the input device: {}", err))
+}
+
+impl Device {
+    fn key(&mut self, key: Key, direction: Direction) -> Result<(), String> {
+        match &mut self.backend {
+            Backend::Enigo(enigo) => enigo.key(key, direction).map_err(input_error),
+            #[cfg(all(unix, not(target_os = "macos")))]
+            Backend::Wayland(input) => input.key(key, direction),
+        }
+    }
+
+    fn text(&mut self, text: &str) -> Result<(), String> {
+        match &mut self.backend {
+            Backend::Enigo(enigo) => enigo.text(text).map_err(input_error),
+            #[cfg(all(unix, not(target_os = "macos")))]
+            Backend::Wayland(input) => input.text(text),
+        }
+    }
+
+    fn button(&mut self, button: Button, direction: Direction) -> Result<(), String> {
+        match &mut self.backend {
+            Backend::Enigo(enigo) => enigo.button(button, direction).map_err(input_error),
+            #[cfg(all(unix, not(target_os = "macos")))]
+            Backend::Wayland(input) => input.button(button, direction),
+        }
+    }
+
+    fn move_mouse(&mut self, x: i32, y: i32, mode: Coordinate) -> Result<(), String> {
+        match &mut self.backend {
+            Backend::Enigo(enigo) => enigo.move_mouse(x, y, mode).map_err(input_error)?,
+            #[cfg(all(unix, not(target_os = "macos")))]
+            Backend::Wayland(input) => input.move_mouse(x, y, mode)?,
+        }
+        self.pointer = moved_pointer(self.pointer, x, y, mode);
+        Ok(())
+    }
+
+    fn scroll(&mut self, amount: i32, axis: Axis) -> Result<(), String> {
+        match &mut self.backend {
+            Backend::Enigo(enigo) => enigo.scroll(amount, axis).map_err(input_error),
+            #[cfg(all(unix, not(target_os = "macos")))]
+            Backend::Wayland(input) => input.scroll(amount, axis),
+        }
+    }
+
+    fn position(&mut self) -> Result<(i32, i32), String> {
+        match &mut self.backend {
+            Backend::Enigo(enigo) => enigo.location().map_err(input_error),
+            #[cfg(all(unix, not(target_os = "macos")))]
+            Backend::Wayland(_) => self.pointer.ok_or_else(|| {
+                "the pointer position is unknown on Wayland until the pointer is moved to a position"
+                    .to_string()
+            }),
+        }
+    }
+
+    fn main_display(&mut self) -> Result<(i32, i32), String> {
+        match &mut self.backend {
+            Backend::Enigo(enigo) => enigo.main_display().map_err(input_error),
+            #[cfg(all(unix, not(target_os = "macos")))]
+            Backend::Wayland(input) => input.main_display(),
+        }
+    }
+}
+
 /// Runs `f` with the input device, opening it on first use.
-fn with_enigo<T>(f: impl FnOnce(&mut Enigo) -> Result<T, String>) -> Result<T, String> {
-    ENIGO.with(|cell| {
+fn with_device<T>(f: impl FnOnce(&mut Device) -> Result<T, String>) -> Result<T, String> {
+    DEVICE.with(|cell| {
         let mut slot = cell.borrow_mut();
         if slot.is_none() {
-            let enigo = Enigo::new(&Settings::default())
-                .map_err(|err| format!("cannot open the input device: {}", err))?;
-            *slot = Some(enigo);
+            *slot = Some(Device {
+                backend: open_backend()?,
+                pointer: None,
+            });
         }
         f(slot.as_mut().expect("opened above"))
     })
@@ -212,6 +328,20 @@ fn parse_direction(name: &str) -> Result<Direction, String> {
     }
 }
 
+/// Where the pointer is after a move, if it was known before or the move
+/// was absolute.
+fn moved_pointer(
+    pointer: Option<(i32, i32)>,
+    x: i32,
+    y: i32,
+    mode: Coordinate,
+) -> Option<(i32, i32)> {
+    match mode {
+        Coordinate::Abs => Some((x, y)),
+        Coordinate::Rel => pointer.map(|(px, py)| (px.saturating_add(x), py.saturating_add(y))),
+    }
+}
+
 fn coordinate(args: &[Value], index: usize, name: &str) -> Result<i32, String> {
     let value = int_arg(args, index, name)?;
     i32::try_from(value).map_err(|_| format!("{} is out of range", name))
@@ -221,7 +351,7 @@ fn coordinate(args: &[Value], index: usize, name: &str) -> Result<i32, String> {
 fn builtin_key(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let key = parse_key(str_arg(args, 0, "key")?)?;
     let direction = parse_direction(str_arg(args, 1, "direction")?)?;
-    with_enigo(|enigo| enigo.key(key, direction).map_err(input_error))?;
+    with_device(|device| device.key(key, direction))?;
     Ok(vec![])
 }
 
@@ -237,7 +367,7 @@ fn builtin_text(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     if text.is_empty() {
         return Ok(vec![]);
     }
-    with_enigo(|enigo| enigo.text(text).map_err(input_error))?;
+    with_device(|device| device.text(text))?;
     Ok(vec![])
 }
 
@@ -245,7 +375,7 @@ fn builtin_text(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 fn builtin_button(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let button = parse_button(str_arg(args, 0, "button")?)?;
     let direction = parse_direction(str_arg(args, 1, "direction")?)?;
-    with_enigo(|enigo| enigo.button(button, direction).map_err(input_error))?;
+    with_device(|device| device.button(button, direction))?;
     Ok(vec![])
 }
 
@@ -265,7 +395,7 @@ fn builtin_move(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     } else {
         Coordinate::Abs
     };
-    with_enigo(|enigo| enigo.move_mouse(x, y, mode).map_err(input_error))?;
+    with_device(|device| device.move_mouse(x, y, mode))?;
     Ok(vec![])
 }
 
@@ -279,20 +409,21 @@ fn builtin_scroll(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         Axis::Vertical
     };
     if amount != 0 {
-        with_enigo(|enigo| enigo.scroll(amount, axis).map_err(input_error))?;
+        with_device(|device| device.scroll(amount, axis))?;
     }
     Ok(vec![])
 }
 
-/// `()`: the pointer position in screen pixels.
+/// `()`: the pointer position in screen pixels. On Wayland it is where the
+/// last move put the pointer, since the compositor does not tell clients.
 fn builtin_position(_vm: &mut VM, _args: &[Value]) -> Result<Vec<Value>, String> {
-    let (x, y) = with_enigo(|enigo| enigo.location().map_err(input_error))?;
+    let (x, y) = with_device(|device| device.position())?;
     Ok(vec![Value::Int(x as i64), Value::Int(y as i64)])
 }
 
 /// `()`: the main display size in pixels.
 fn builtin_screen_size(_vm: &mut VM, _args: &[Value]) -> Result<Vec<Value>, String> {
-    let (width, height) = with_enigo(|enigo| enigo.main_display().map_err(input_error))?;
+    let (width, height) = with_device(|device| device.main_display())?;
     Ok(vec![Value::Int(width as i64), Value::Int(height as i64)])
 }
 
@@ -335,5 +466,19 @@ mod tests {
         assert_eq!(parse_button("Right").unwrap(), Button::Right);
         assert!(parse_button("fourth").is_err());
         assert!(parse_direction("tap").is_err());
+    }
+
+    #[test]
+    fn pointer_tracking() {
+        assert_eq!(moved_pointer(None, 5, 5, Coordinate::Rel), None);
+        assert_eq!(moved_pointer(None, 10, 20, Coordinate::Abs), Some((10, 20)));
+        assert_eq!(
+            moved_pointer(Some((10, 20)), -4, 6, Coordinate::Rel),
+            Some((6, 26))
+        );
+        assert_eq!(
+            moved_pointer(Some((i32::MAX, 0)), 1, 0, Coordinate::Rel),
+            Some((i32::MAX, 0))
+        );
     }
 }
