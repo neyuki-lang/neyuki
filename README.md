@@ -1,6 +1,9 @@
 # Neyuki
 */neˈjuːki/ — `neh-yoo-kee`. From 根雪, the base layer of snow that settles early and stays all winter.*
 
+### NEYUKI IS STILL IN BETA
+Please do not use this in professional use, but only for hobby projects. It is unknown if we will get so far for Neyuki to become usable for production use-cases. If you find any bugs please report them in the Issues tab! We are actively looking at them!
+
 Neyuki is a small scripting language for everyday programs: automation, command-line tools, little servers, quick windows and games. It reads like Lua, ships as one executable with no dependencies, and comes with the libraries those jobs need.
 
 ```lua
