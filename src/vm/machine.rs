@@ -25,6 +25,10 @@ pub const DEFAULT_MAX_CALL_DEPTH: usize = 512;
 /// target depth, so there is always a running frame inside it.
 const RUNNING_FRAME: &str = "the interpreter loop has a running frame";
 
+/// How many callable tables a call follows through `__call` before giving
+/// up, like the `__index` chain limit.
+const MAX_CALL_CHAIN: usize = 100;
+
 /// A register of the running frame. The interpreter loop only calls this
 /// with indices below `base + max_registers` of a verified prototype, and
 /// sizes the stack to cover that window before dispatching, so the bounds
@@ -578,15 +582,27 @@ impl VM {
                     }
                 }
             }
-            Value::Table(ref t) => {
-                let handler = t.borrow().metamethod("__call");
-                if let Some(handler) = handler {
-                    let mut call_args = Vec::with_capacity(args.len() + 1);
-                    call_args.push(func.clone());
-                    call_args.extend_from_slice(args);
-                    return self.call_function_inner(handler, &call_args);
+            Value::Table(_) => {
+                // A `__call` handler may itself be a table with `__call`:
+                // follow the chain, each table becoming the first argument
+                // of the next. A loop would otherwise recurse forever,
+                // growing the arguments each time.
+                let mut callee = func;
+                let mut call_args = args.to_vec();
+                for _ in 0..MAX_CALL_CHAIN {
+                    let handler = match &callee {
+                        Value::Table(t) => t.borrow().metamethod("__call"),
+                        _ => return self.call_function_inner(callee, &call_args),
+                    };
+                    let Some(handler) = handler else {
+                        return Err(
+                            "attempt to call a table value without __call metamethod".to_string()
+                        );
+                    };
+                    call_args.insert(0, callee);
+                    callee = handler;
                 }
-                Err("attempt to call a table value without __call metamethod".to_string())
+                Err("loop in __call chain".to_string())
             }
             _ => Err("attempt to call a non-function value".to_string()),
         }

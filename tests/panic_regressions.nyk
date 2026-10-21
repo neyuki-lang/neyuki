@@ -40,3 +40,16 @@ fails("at most", crypto.pbkdf2, "pw", "salt", {iterations = 1, length = 90071992
 fails("at most", crypto.hkdf, crypto.randomBytes(32), {length = 9007199254740993})
 fails("at most", crypto.hashPassword, "pw", {memory = 4294967295})
 assert(#crypto.randomBytes(16, "hex") == 32)
+
+-- METAMETHODS --------------------------------------------------------------
+
+-- A table whose `__call` is itself recursed forever, growing the arguments
+-- each time, until memory ran out.
+local selfCall = setmetatable({}, {})
+getmetatable(selfCall).__call = selfCall
+fails("loop in __call chain", selfCall)
+fails("loop in __call chain", function() return selfCall(1, 2) end)
+-- A chain that ends in a function still works, each table passed along.
+local inner = setmetatable({}, {__call = function(...) return select("#", ...) end})
+local outer = setmetatable({}, {__call = inner})
+assert(outer("x") == 3)
