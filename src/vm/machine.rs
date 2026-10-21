@@ -490,7 +490,9 @@ impl VM {
     }
 
     fn call_function_inner(&mut self, func: Value, args: &[Value]) -> Result<Vec<Value>, String> {
-        if self.call_depth() >= self.max_call_depth {
+        // A native that calls a native (`__call = pcall`) nests the Rust
+        // stack without pushing a frame, so re-entries are bounded too.
+        if self.call_depth() >= self.max_call_depth || self.native_calls > self.max_call_depth {
             return Err(format!(
                 "call stack overflow: exceeded maximum call depth of {}",
                 self.max_call_depth
@@ -3114,6 +3116,31 @@ mod tests {
                     text
                 );
             }
+        };
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(run)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn test_natives_calling_natives_count_toward_the_call_depth() {
+        // `__call = pcall` re-enters the interpreter from native to native
+        // without pushing a frame; it recursed until the Rust stack
+        // overflowed and the process aborted.
+        let run = || {
+            let code =
+                "local t = setmetatable({}, {__call = pcall})\nreturn select(-1, pcall(t, t))";
+            let stmts = crate::compiler::compile_source(code).expect("syntax error");
+            let proto = crate::compiler::compile_to_proto(&stmts);
+            let mut vm = VM::new();
+            let text = match vm.execute(proto) {
+                Ok(v) => v.to_string(),
+                Err(e) => e,
+            };
+            assert!(text.contains("call stack overflow"), "{}", text);
         };
         std::thread::Builder::new()
             .stack_size(256 * 1024 * 1024)
