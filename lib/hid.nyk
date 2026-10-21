@@ -134,7 +134,13 @@ function mouse.glide(x: number, y: number, seconds: number?): ()
     seconds = seconds ?? 0.25
     checkNumber(seconds, "seconds")
     if (seconds < 0) then error("seconds must not be negative") end
-    local fromX, fromY = __hid_position()
+    -- Wayland does not report where the pointer starts until it has been
+    -- moved, so the first glide there is a jump.
+    local known, fromX, fromY = try(__hid_position)
+    if (not known) then
+        __hid_move(math.round(x), math.round(y), false)
+        return
+    end
     local steps = math.max(1, math.floor(seconds * 60))
     for step = 1, steps do
         local t = step / steps
@@ -143,7 +149,8 @@ function mouse.glide(x: number, y: number, seconds: number?): ()
     end
 end
 
--- The pointer position as two numbers.
+-- The pointer position as two numbers. On Wayland it is where this library
+-- last moved the pointer, and an error before the first move.
 function mouse.position(): (number, number)
     return __hid_position()
 end

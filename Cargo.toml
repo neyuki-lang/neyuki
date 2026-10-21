@@ -78,7 +78,7 @@ fontdue = "0.9"
 png = "0.18"
 
 # `@neyuki/hid` drives the keyboard and mouse through `enigo` (SendInput on
-# Windows, CoreGraphics on macOS, XTest over the pure-Rust `x11rb` on Linux)
+# Windows, CoreGraphics on macOS, XTest over the pure-Rust `x11rb` on X11)
 # and the clipboard through `arboard`. Neither needs a C compiler.
 enigo = "0.6"
 arboard = { version = "3", default-features = false }
@@ -89,6 +89,16 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 
 [target.'cfg(windows)'.dependencies]
 schannel = ">=0.1.23, <0.1.28"
+
+# On Wayland, XTest only reaches XWayland windows, so `@neyuki/hid` drives the
+# compositor's virtual keyboard and pointer itself. enigo's own Wayland
+# backend would link libxkbcommon; these are protocol bindings only, and
+# `tempfile` holds the keymap the virtual keyboard is given.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+wayland-client = "0.31"
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+tempfile = "3"
 
 # Debug builds still optimize dependencies: the crypto crates run 10-50x
 # slower unoptimized, enough that `hashPassword` and `pbkdf2` at their default
