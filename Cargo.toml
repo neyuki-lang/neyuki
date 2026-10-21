@@ -97,8 +97,9 @@ schannel = ">=0.1.23, <0.1.28"
 opt-level = 3
 
 # Optimized for speed and small binary size. `panic = "abort"` is intentionally
-# omitted: lint.rs/compiler.rs/runtime.rs rely on `catch_unwind` to turn parser
-# panics into recoverable errors, which abort would defeat.
+# omitted: the parser, the VM and the REPL keep `catch_unwind` as a last-resort
+# guard against interpreter bugs, and `@neyuki/ui` catches the panic `winit`
+# raises on macOS when an event loop is built off the main thread.
 [profile.release]
 opt-level = 3
 lto = true

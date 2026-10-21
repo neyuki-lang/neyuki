@@ -231,7 +231,7 @@ impl NeyukiType {
                 if filtered.is_empty() {
                     NeyukiType::Never
                 } else if filtered.len() == 1 {
-                    filtered.into_iter().next().unwrap()
+                    filtered.into_iter().next().expect("checked: one variant")
                 } else {
                     NeyukiType::Union(filtered)
                 }
@@ -253,7 +253,7 @@ impl NeyukiType {
                 if filtered.is_empty() {
                     NeyukiType::Never
                 } else if filtered.len() == 1 {
-                    filtered.into_iter().next().unwrap()
+                    filtered.into_iter().next().expect("checked: one variant")
                 } else {
                     NeyukiType::Union(filtered)
                 }

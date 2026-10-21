@@ -1,0 +1,55 @@
+-- Script input that used to panic the interpreter (caught only by its
+-- last-resort `catch_unwind`) or abort the process. Each must now be an
+-- ordinary error, or an ordinary result.
+
+local crypto = require("@neyuki/crypto")
+local math = require("@neyuki/math")
+local string = require("@neyuki/string")
+local utf8 = require("@neyuki/utf8")
+
+local function fails(expected, f, ...)
+    local ok, err = pcall(f, ...)
+    assert(not ok, "expected an error mentioning " .. expected)
+    assert(string.find(tostring(err), expected, 1, true), "unexpected error: " .. tostring(err))
+end
+
+-- UTF8 ---------------------------------------------------------------------
+
+-- A start position past the end of the string sliced out of bounds.
+fails("out of bounds", utf8.codepoint, "abcd", 9007199254740991)
+fails("out of bounds", utf8.codepoint, "abcd", 6)
+fails("out of bounds", utf8.len, "abcd", 6)
+-- One past the end is still an empty range, as in Lua.
+assert(utf8.len("abcd", 5) == 0)
+assert(select("#", utf8.codepoint("abcd", 5)) == 0)
+
+-- MATH ---------------------------------------------------------------------
+
+-- Huge coordinates overflowed the integer cell index.
+assert(math.noise(1e300) == 0)
+assert(math.noise(1e300, -1e300, 1e300) == 0)
+-- Reducing the cells keeps the noise periodic over 256 cells, as before.
+assert(math.noise(256.25, 0.75, 512.125) == math.noise(0.25, 0.75, 0.125))
+assert(math.noise(-0.5, 3.25) == math.noise(255.5, 3.25))
+
+-- CRYPTO -------------------------------------------------------------------
+
+-- An unbounded output length aborted the process when the allocation failed.
+fails("at most", crypto.randomBytes, 9007199254740993)
+fails("at most", crypto.pbkdf2, "pw", "salt", {iterations = 1, length = 9007199254740993})
+fails("at most", crypto.hkdf, crypto.randomBytes(32), {length = 9007199254740993})
+fails("at most", crypto.hashPassword, "pw", {memory = 4294967295})
+assert(#crypto.randomBytes(16, "hex") == 32)
+
+-- METAMETHODS --------------------------------------------------------------
+
+-- A table whose `__call` is itself recursed forever, growing the arguments
+-- each time, until memory ran out.
+local selfCall = setmetatable({}, {})
+getmetatable(selfCall).__call = selfCall
+fails("loop in __call chain", selfCall)
+fails("loop in __call chain", function() return selfCall(1, 2) end)
+-- A chain that ends in a function still works, each table passed along.
+local inner = setmetatable({}, {__call = function(...) return select("#", ...) end})
+local outer = setmetatable({}, {__call = inner})
+assert(outer("x") == 3)

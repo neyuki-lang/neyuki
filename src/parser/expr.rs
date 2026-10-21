@@ -388,7 +388,11 @@ pub fn parse_interp_parts(value: &str) -> Result<Vec<InterpPart>, String> {
                 expression
             ));
         }
-        match statements.into_iter().next().unwrap() {
+        match statements
+            .into_iter()
+            .next()
+            .expect("checked above: exactly one statement")
+        {
             Stmt::Expr { expr, .. } => {
                 parts.push(InterpPart::Expr(expr));
             }

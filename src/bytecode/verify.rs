@@ -56,6 +56,19 @@ fn verify_proto_depth(proto: &Proto, depth: usize) -> Result<(), BytecodeVerifyE
     let num_upvalues = proto.upvalues.len();
     let num_insts = proto.instructions.len();
 
+    // A call clears the parameter registers the caller did not pass, which
+    // must lie inside the register window the call reserves.
+    if proto.num_params > proto.max_registers {
+        return Err(BytecodeVerifyError {
+            message: format!(
+                "parameter count {} exceeds prototype max_registers ({})",
+                proto.num_params, proto.max_registers
+            ),
+            proto_name: name,
+            pc: None,
+        });
+    }
+
     let check_reg = |reg: u8, pc: usize| -> Result<(), BytecodeVerifyError> {
         if reg >= proto.max_registers {
             return Err(BytecodeVerifyError {

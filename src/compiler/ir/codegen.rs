@@ -549,7 +549,7 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
                                 },
                                 1,
                             ),
-                            _ => unreachable!(),
+                            _ => unreachable!("the outer match arm only takes comparisons"),
                         };
                         proto.emit(Instruction::LoadBool { dst: rd, val: true }, 1);
                         let skip = proto.emit(Instruction::Jump { offset: 1 }, 1);
@@ -672,7 +672,7 @@ fn ir_function_to_proto(func: &IrFunction, depth: usize) -> Result<Proto, String
                                 a: ra,
                                 b: rb,
                             },
-                            _ => unreachable!(),
+                            _ => unreachable!("comparisons are handled in the arm above"),
                         };
                         proto.emit(inst, 1);
                     }

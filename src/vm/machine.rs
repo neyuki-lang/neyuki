@@ -21,6 +21,14 @@ use crate::vm::value::{NativeDef, StrRef, Upvalue, Value, VmClosure, VmTable};
 
 pub const DEFAULT_MAX_CALL_DEPTH: usize = 512;
 
+/// The interpreter loop only runs while the frame stack is deeper than its
+/// target depth, so there is always a running frame inside it.
+const RUNNING_FRAME: &str = "the interpreter loop has a running frame";
+
+/// How many callable tables a call follows through `__call` before giving
+/// up, like the `__index` chain limit.
+const MAX_CALL_CHAIN: usize = 100;
+
 /// A register of the running frame. The interpreter loop only calls this
 /// with indices below `base + max_registers` of a verified prototype, and
 /// sizes the stack to cover that window before dispatching, so the bounds
@@ -137,6 +145,10 @@ pub struct VM {
     /// happen at that level; deeper, it would unwind native frames that
     /// cannot be saved and resumed.
     pub yield_floor: usize,
+    /// Frames of the callers that resumed the running coroutine, put aside
+    /// while it runs. Each resume nests the Rust stack like a call does, so
+    /// they count toward `max_call_depth`.
+    pub frames_below: usize,
     /// Active `debug.sethook` hook, if any.
     pub hook: Option<DebugHook>,
     /// True while a hook function itself runs: hooks never trigger hooks.
@@ -199,6 +211,7 @@ impl VM {
             is_yielding: false,
             native_calls: 0,
             yield_floor: 0,
+            frames_below: 0,
             hook: None,
             in_hook: false,
             hook_countdown: 0,
@@ -227,6 +240,13 @@ impl VM {
 
     pub fn set_max_call_depth(&mut self, depth: usize) {
         self.max_call_depth = depth;
+    }
+
+    /// Frames on the call stack, counting those of suspended coroutine
+    /// callers.
+    #[inline]
+    pub(crate) fn call_depth(&self) -> usize {
+        self.frames.len() + self.frames_below
     }
 
     fn register_builtins(&mut self) {
@@ -280,6 +300,7 @@ impl VM {
         // leave these mid-call; a new top-level run starts outside any.
         self.native_calls = 0;
         self.yield_floor = 0;
+        self.frames_below = 0;
         self.current_co = None;
         self.is_yielding = false;
         self.error_trace = None;
@@ -300,7 +321,9 @@ impl VM {
         Ok(value)
     }
 
-    /// Turns a panic inside `f` (an interpreter bug) into a runtime error.
+    /// Turns a panic inside `f` into a runtime error. This is a last resort:
+    /// script and bytecode input reach errors through `Result`, so a panic
+    /// here is an interpreter bug, and the VM may be left mid-instruction.
     fn catch_panics<T>(
         &mut self,
         f: impl FnOnce(&mut Self) -> Result<T, String>,
@@ -340,7 +363,10 @@ impl VM {
             if *idx < from {
                 break;
             }
-            let (idx, uv) = self.open_upvalues.pop().unwrap();
+            let (idx, uv) = self
+                .open_upvalues
+                .pop()
+                .expect("the loop condition saw an open upvalue");
             let val = self.stack.get(idx).cloned().unwrap_or(Value::Nil);
             uv.close(val);
         }
@@ -468,7 +494,9 @@ impl VM {
     }
 
     fn call_function_inner(&mut self, func: Value, args: &[Value]) -> Result<Vec<Value>, String> {
-        if self.frames.len() >= self.max_call_depth {
+        // A native that calls a native (`__call = pcall`) nests the Rust
+        // stack without pushing a frame, so re-entries are bounded too.
+        if self.call_depth() >= self.max_call_depth || self.native_calls > self.max_call_depth {
             return Err(format!(
                 "call stack overflow: exceeded maximum call depth of {}",
                 self.max_call_depth
@@ -554,15 +582,27 @@ impl VM {
                     }
                 }
             }
-            Value::Table(ref t) => {
-                let handler = t.borrow().metamethod("__call");
-                if let Some(handler) = handler {
-                    let mut call_args = Vec::with_capacity(args.len() + 1);
-                    call_args.push(func.clone());
-                    call_args.extend_from_slice(args);
-                    return self.call_function_inner(handler, &call_args);
+            Value::Table(_) => {
+                // A `__call` handler may itself be a table with `__call`:
+                // follow the chain, each table becoming the first argument
+                // of the next. A loop would otherwise recurse forever,
+                // growing the arguments each time.
+                let mut callee = func;
+                let mut call_args = args.to_vec();
+                for _ in 0..MAX_CALL_CHAIN {
+                    let handler = match &callee {
+                        Value::Table(t) => t.borrow().metamethod("__call"),
+                        _ => return self.call_function_inner(callee, &call_args),
+                    };
+                    let Some(handler) = handler else {
+                        return Err(
+                            "attempt to call a table value without __call metamethod".to_string()
+                        );
+                    };
+                    call_args.insert(0, callee);
+                    callee = handler;
                 }
-                Err("attempt to call a table value without __call metamethod".to_string())
+                Err("loop in __call chain".to_string())
             }
             _ => Err("attempt to call a non-function value".to_string()),
         }
@@ -620,7 +660,7 @@ impl VM {
         if self.in_hook || self.in_eval {
             return Ok(());
         }
-        let frame = self.frames.last_mut().unwrap();
+        let frame = self.frames.last_mut().expect(RUNNING_FRAME);
         let line = frame.closure.proto.lines.get(ip).copied().unwrap_or(0);
         // A new line, or a jump back into the same one (a loop), starts a
         // new line event.
@@ -900,7 +940,7 @@ impl VM {
             return Ok(Some(Value::Nil));
         }
         let (closure, mut base, mut ip) = {
-            let f = self.frames.last().unwrap();
+            let f = self.frames.last().expect(RUNNING_FRAME);
             (f.closure.clone(), f.base, f.ip)
         };
         // Verified once per prototype: afterwards every register operand
@@ -949,7 +989,7 @@ impl VM {
         }
         macro_rules! sync_ip {
             () => {
-                self.frames.last_mut().unwrap().ip = ip;
+                self.frames.last_mut().expect(RUNNING_FRAME).ip = ip;
             };
         }
         macro_rules! jump {
@@ -1096,7 +1136,7 @@ impl VM {
                 if self.hook.is_some() {
                     self.fire_hook(HookEvent::Return)?;
                 }
-                let frame = self.frames.pop().unwrap();
+                let frame = self.frames.pop().expect(RUNNING_FRAME);
                 if !self.open_upvalues.is_empty() {
                     self.close_upvalues(frame.base);
                 }
@@ -1104,7 +1144,7 @@ impl VM {
                     self.returned.clear();
                     return Ok(Some(Value::Nil));
                 }
-                let caller_frame = self.frames.last().unwrap();
+                let caller_frame = self.frames.last().expect(RUNNING_FRAME);
                 current_closure = caller_frame.closure.clone();
                 base = caller_frame.base;
                 ip = caller_frame.ip;
@@ -1119,7 +1159,7 @@ impl VM {
             if TRAP {
                 // The frame's ip points past the instruction about to run,
                 // as it does while that instruction executes.
-                self.frames.last_mut().unwrap().ip = ip + 1;
+                self.frames.last_mut().expect(RUNNING_FRAME).ip = ip + 1;
                 self.instruction_hook(ip)?;
                 if !self.trap {
                     sync_ip!();
@@ -1987,7 +2027,7 @@ impl VM {
                                         count: MULTRET,
                                     }) if *ret == callee
                                 );
-                            if !tail && self.frames.len() >= self.max_call_depth {
+                            if !tail && self.call_depth() >= self.max_call_depth {
                                 throw!(
                                     "call stack overflow: exceeded maximum call depth of {}",
                                     self.max_call_depth
@@ -2000,7 +2040,7 @@ impl VM {
                             // call from our caller would put it, and the
                             // callee inherits our return obligation.
                             let (new_base, want_ret) = if tail {
-                                let cur = self.frames.pop().unwrap();
+                                let cur = self.frames.pop().expect(RUNNING_FRAME);
                                 if !self.open_upvalues.is_empty() {
                                     self.close_upvalues(cur.base);
                                 }
@@ -2147,7 +2187,7 @@ impl VM {
                     if self.hook.is_some() {
                         self.fire_hook(HookEvent::Return)?;
                     }
-                    let frame = self.frames.pop().unwrap();
+                    let frame = self.frames.pop().expect(RUNNING_FRAME);
                     if !self.open_upvalues.is_empty() {
                         self.close_upvalues(frame.base);
                     }
@@ -2243,7 +2283,7 @@ impl VM {
                     if frame.want_ret == MULTRET {
                         self.top = caller_dest + nret;
                     }
-                    let caller_frame = self.frames.last().unwrap();
+                    let caller_frame = self.frames.last().expect(RUNNING_FRAME);
                     if !Rc::ptr_eq(&current_closure, &caller_frame.closure) {
                         current_closure = caller_frame.closure.clone();
                         code = &current_closure.proto.instructions;
@@ -2259,7 +2299,7 @@ impl VM {
                 }
                 Instruction::Vararg { dst, count } => {
                     let all = count == 0 || count == MULTRET;
-                    let frame = self.frames.last().unwrap();
+                    let frame = self.frames.last().expect(RUNNING_FRAME);
                     let cnt = if all {
                         frame.varargs.len()
                     } else {
@@ -2269,7 +2309,7 @@ impl VM {
                     if dest + cnt > self.stack.len() {
                         self.stack.resize(dest + cnt, Value::Nil);
                     }
-                    let frame = self.frames.last().unwrap();
+                    let frame = self.frames.last().expect(RUNNING_FRAME);
                     for i in 0..cnt {
                         let val = frame.varargs.get(i).cloned().unwrap_or(Value::Nil);
                         self.stack[dest + i] = val;
@@ -2294,7 +2334,7 @@ impl VM {
             && let Some(mm) = self.get_binop_metamethod(va, vb, "__eq")
         {
             let (va, vb) = (va.clone(), vb.clone());
-            self.frames.last_mut().unwrap().ip = ip;
+            self.frames.last_mut().expect(RUNNING_FRAME).ip = ip;
             return self.call_cmp_mm(mm, va, vb);
         }
         Ok(false)
@@ -3066,6 +3106,64 @@ mod tests {
             .execute(proto)
             .expect("recursion up to 1000 frames must succeed with depth 2000");
         assert_eq!(res.to_string(), "1000");
+    }
+
+    #[test]
+    fn test_nested_coroutine_resumes_count_toward_the_call_depth() {
+        // Each coroutine runs on its own frame stack, so a coroutine that
+        // resumes a new one forever overflowed the Rust stack and aborted.
+        // Every resume nests the interpreter, whose debug-build frames are
+        // large, so this runs on a stack as big as the CLI's.
+        let run = || {
+            for code in [
+                "local function f() return select(2, coroutine.resume(coroutine.create(f))) end\nreturn f()",
+                "local function f() return coroutine.wrap(f)() end\nreturn f()",
+            ] {
+                let stmts = crate::compiler::compile_source(code).expect("syntax error");
+                let proto = crate::compiler::compile_to_proto(&stmts);
+                let mut vm = VM::new();
+                let text = match vm.execute(proto) {
+                    Ok(v) => v.to_string(),
+                    Err(e) => e,
+                };
+                assert!(
+                    text.contains("call stack overflow: exceeded maximum call depth of 512"),
+                    "{}",
+                    text
+                );
+            }
+        };
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(run)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn test_natives_calling_natives_count_toward_the_call_depth() {
+        // `__call = pcall` re-enters the interpreter from native to native
+        // without pushing a frame; it recursed until the Rust stack
+        // overflowed and the process aborted.
+        let run = || {
+            let code =
+                "local t = setmetatable({}, {__call = pcall})\nreturn select(-1, pcall(t, t))";
+            let stmts = crate::compiler::compile_source(code).expect("syntax error");
+            let proto = crate::compiler::compile_to_proto(&stmts);
+            let mut vm = VM::new();
+            let text = match vm.execute(proto) {
+                Ok(v) => v.to_string(),
+                Err(e) => e,
+            };
+            assert!(text.contains("call stack overflow"), "{}", text);
+        };
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(run)
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
