@@ -48,7 +48,10 @@ fn utf8_char(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 fn byte_range(s: &str, i: i64, j: i64) -> Result<(usize, usize), String> {
     let start = pos_relat_start(i, s.len()) - 1;
     let end = pos_relat_end(j, s.len());
-    if start < end && !s.is_char_boundary(start) {
+    if start > s.len() {
+        return Err(format!("byte position {} is out of bounds", i));
+    }
+    if !s.is_char_boundary(start) {
         return Err(format!("byte position {} is inside a character", start + 1));
     }
     Ok((start, end.max(start)))

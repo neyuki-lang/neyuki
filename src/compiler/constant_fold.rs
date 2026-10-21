@@ -262,6 +262,10 @@ fn fold_binary_op(op: BinOp, left: FoldVal, right: FoldVal) -> Option<FoldVal> {
         BinOp::Shl => {
             let ia = left.to_bigint()?;
             let ib = right.to_bigint()?;
+            // Float operands skipped the check above.
+            if !int_fold_fits(op, &ia, &ib) {
+                return None;
+            }
             if ib.sign() == Sign::Minus {
                 let shift = (-ib).to_usize()?;
                 Some(FoldVal::Int(ia >> shift))
@@ -273,6 +277,10 @@ fn fold_binary_op(op: BinOp, left: FoldVal, right: FoldVal) -> Option<FoldVal> {
         BinOp::Shr => {
             let ia = left.to_bigint()?;
             let ib = right.to_bigint()?;
+            // Float operands skipped the check above.
+            if !int_fold_fits(op, &ia, &ib) {
+                return None;
+            }
             if ib.sign() == Sign::Minus {
                 let shift = (-ib).to_usize()?;
                 Some(FoldVal::Int(ia << shift))
@@ -933,6 +941,28 @@ mod tests {
                 assert_eq!(val, &BigInt::from(20));
             }
             _ => panic!("failed to fold bitwise"),
+        }
+    }
+
+    #[test]
+    fn huge_shifts_by_a_float_are_left_for_runtime() {
+        // Folding these once built a 2^60-bit integer and aborted the
+        // process; runtime reports them as a catchable error instead.
+        for source in ["local x = 1 << 2^60", "local x = 1 >> -(2.0^62)"] {
+            let mut parser = Parser::new(source);
+            let (stmts, _pool) = parser.parse_program().expect("syntax error");
+            let optimized = fold_program(stmts);
+            assert!(
+                !matches!(
+                    &optimized[0],
+                    Stmt::Local {
+                        initializer: Some(Expr::Literal { .. }),
+                        ..
+                    }
+                ),
+                "{} was folded",
+                source
+            );
         }
     }
 
