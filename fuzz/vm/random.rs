@@ -37,7 +37,10 @@ fn budget_survives_pcall() {
         "while true do coroutine.resume(coroutine.create(function() while true do end end)) end",
     ] {
         let proto = compile(source).expect("the regression program compiles");
-        assert!(run_sandboxed(proto).is_err(), "{source} should run out of budget");
+        assert!(
+            run_sandboxed(proto).is_err(),
+            "{source} should run out of budget"
+        );
     }
 }
 
