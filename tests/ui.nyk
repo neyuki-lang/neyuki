@@ -192,6 +192,9 @@ expectError(ui.loadFont, "path must be provided", "loadFont checks the path")
 expectError(ui.loadFont, "cannot open", "loadFont reports a missing file", "tests/fixtures/missing.ttf")
 expectError(ui.loadImage, "cannot open", "loadImage reports a missing file", "tests/fixtures/missing.png")
 expectError(ui.loadImage, "cannot decode", "loadImage rejects non-PNG files", "tests/ui.nyk")
+expectError(ui.loadImage, "cannot decode", "loadImage rejects unknown formats", "tests/ui.nyk")
+expectError(ui.decodeImage, "must be a buffer or string", "decodeImage checks its input", 5)
+expectError(ui.decodeImage, "cannot decode", "decodeImage rejects garbage", "not an image")
 expectError(ui.mediaSession, "info must be a table", "mediaSession checks its info", 5)
 expectError(ui.mediaSession, "title must be a string", "mediaSession checks the title", { title = 1 })
 expectError(ui.mediaSession, "duration must be non-negative", "mediaSession checks the duration", { duration = -1 })
@@ -222,6 +225,48 @@ assert(image.path == "tests/fixtures/dot.png")
 image:close()
 image:close()
 expectError(function() return image:id() end, "image was freed", "a freed image is unusable")
+
+local jpeg = ui.loadImage("tests/fixtures/quadrants.jpg")
+assert(jpeg.width == 16 and jpeg.height == 16 and jpeg.frames == 1, "the JPEG is 16 x 16")
+assert(jpeg:frameDelay(1) == 0, "stills have no delay")
+local still = ui.loadImage("tests/fixtures/still.webp")
+assert(still.frames == 1, "the WebP is a still")
+
+local gif = ui.loadImage("tests/fixtures/spin.gif")
+assert(gif.width == 4 and gif.height == 4 and gif.frames == 3, "the GIF has three 4 x 4 frames")
+assert(gif.loopCount == 0, "the GIF loops forever")
+assert(gif:frameDelay(1) == 0.05 and gif:frameDelay(2) == 0.1 and gif:frameDelay(3) == 0.2)
+expectError(function() return gif:frameDelay(4) end, "frame number", "frameDelay checks the frame")
+
+local blink = ui.loadImage("tests/fixtures/blink.webp")
+assert(blink.frames == 2 and blink.loopCount == 3, "the animated WebP has two frames and three loops")
+
+local anim = ui.animation(gif)
+assert(anim.frame == 1)
+anim:update(0.06)
+assert(anim.frame == 2, "0.06 s is past the first 0.05 s frame")
+anim:update(0.1)
+assert(anim.frame == 3)
+anim:update(0.2)
+assert(anim.frame == 1, "an endless animation wraps around")
+anim:reset()
+assert(anim.frame == 1 and not anim.finished)
+
+local finite = ui.animation(blink)
+for _ = 1, 20 do finite:update(0.2) end
+assert(finite.finished and finite.frame == 2, "a finite animation stops on its last frame")
+
+local small = gif:resized(2, 2)
+assert(small.width == 2 and small.height == 2 and small.frames == 3, "resized keeps the frames")
+assert(small:frameDelay(3) == 0.2)
+expectError(function() return gif:resized(0, 2) end, "positive whole numbers", "resized checks the size")
+small:close()
+
+-- 3 x 2 BMP, from memory.
+local bmp = ui.decodeImage(buffer.fromhex("424d4e000000000000003600000028000000030000000200000001001800000000001800000000000000000000000000000000000000ffffff0000008080800000000000ff00ff00ff0000000000"))
+assert(bmp.width == 3 and bmp.height == 2, "decodeImage reads buffers")
+expectError(ui.decodeImage, "maxPixels", "decodeImage limits the pixel count", buffer.fromhex("424d4e000000000000003600000028000000030000000200000001001800000000001800000000000000000000000000000000000000ffffff0000008080800000000000ff00ff00ff0000000000"), { maxPixels = 4 })
+for _, img in { jpeg, still, gif, blink, bmp } do img:close() end
 
 -- LIVE WINDOW (opt in with an empty tests/ui.local file) --------------------
 --
@@ -256,6 +301,11 @@ assert(drawn > 0, "drawing text reports its width")
 local dot = ui.loadImage("tests/fixtures/dot.png")
 win:drawImage(dot, 5, 100)
 win:drawImage(dot, 20, 100, { width = 16, height = 12 })
+win:drawImage(dot, 40, 100, { width = 30, height = 30, fit = "cover", opacity = 0.5, radius = 4 })
+win:drawImage(dot, 80, 100, { width = 30, height = 30, fit = "contain", frame = 1 })
+expectError(function() win:drawImage(dot, 0, 0, { frame = 2 }) end, "frame number", "drawImage checks the frame")
+expectError(function() win:drawImage(dot, 0, 0, { fit = "stretch" }) end, "fit", "drawImage checks the fit")
+expectError(function() win:drawImage(dot, 0, 0, { opacity = 2 }) end, "opacity", "drawImage checks the opacity")
 dot:close()
 win:present()
 

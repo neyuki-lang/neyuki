@@ -130,9 +130,33 @@ Loads the installed font whose family or PostScript name is `family` (ignoring c
 
 Sets the fonts every text searches, in order, for characters its own font lacks (kana, kanji, Hangul, emoji). The bundled font is always tried last. An empty list or `nil` clears them. A `fallback` option on a single call replaces this list for that call.
 
-## ui.loadImage(path: string): Image
+## ui.loadImage(path: string, options: table?): Image
 
-Decodes a PNG file into an `Image` with `width` and `height`. `image:close()` frees it.
+Decodes a PNG, JPEG, WebP, GIF or BMP file into an `Image`. The format is detected from the file's first bytes, not its name. Animated GIF, WebP and PNG files decode every frame.
+
+An `Image` has `width`, `height`, `frames` (1 for stills), `loopCount` (0 plays forever) and `path`. `options.maxPixels` (default 64 million) and `options.maxBytes` (memory for all decoded frames, default 512 MiB) reject oversized images with an error. `image:close()` frees it.
+
+## ui.decodeImage(data: buffer | string, options: table?): Image
+
+Like `loadImage`, from the bytes of an image held in memory, such as an HTTP response body.
+
+## Image:frameDelay(i: number): number
+
+The seconds frame `i` (from 1) stays on screen. Delays of 10 ms or less are read as 100 ms, as browsers do. Stills report 0.
+
+## Image:resized(w: number, h: number): Image
+
+A new image with every frame resampled to `w` x `h` pixels, for shrinking a large animation once instead of scaling it on every draw.
+
+## ui.animation(image: Image, options: table?): ImageAnimation
+
+Plays an animated image from elapsed time. `anim:update(dt)` advances `anim.frame` by the image's frame delays and returns it; `anim:reset()` starts over. `options.speed` scales time (default 1) and `options.loop = true` repeats forever whatever the image's `loopCount`. When the loops are used up, `anim.finished` becomes true on the last frame. `anim.playing` can be set to `false` to pause.
+
+```lua
+local anim = ui.animation(img)
+anim:update(dt)
+win:drawImage(img, 0, 0, { width = w, height = h, fit = "cover", frame = anim.frame })
+```
 
 ## ui.measureText(s: string, options: table?): (number, number, number)
 
@@ -175,7 +199,7 @@ Draws text with the top-left corner of its first line at `(x, y)`; `"
 
 ## Window:drawImage(image: Image, x: number, y: number, options: table?): ()
 
-Draws an image at its own size, or scaled to `options.width` and/or `options.height`.
+Draws an image at its own size, or into the box given by `options.width` and/or `options.height`. More options: `frame` (which frame of an animation, from 1), `opacity` (0 to 1), `radius` (rounds the corners) and `fit`: `"fill"` (default) stretches the image to the box, `"contain"` shows all of it centered, `"cover"` fills the box and crops the overflow around the center. Scaling is smooth, and the scaled copy of a frame is cached, so redrawing it at the same size is cheap.
 
 ## Window:present(): ()
 

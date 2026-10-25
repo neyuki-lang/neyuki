@@ -58,6 +58,10 @@ This document outlines the architectural milestones and engineering trajectory f
 - [x] `@neyuki/ui` window chrome and input: frameless windows with app-drawn title bars (`startDrag`, `startResize`, minimize/maximize/restore, fullscreen, minimum size, icon, drop shadow), pointer cursors, IME text input (`textinput` and `ime` events), click counts for double-click, window state, file drop and DPI change events, `ui.clipboard` and `ui.openUrl`.
 - [x] `@neyuki/ui` text: font fallback chains for apps that ship their own CJK fonts (`ui.setFallbackFonts`, per-call `fallback`, `ui.loadFont` from a buffer, `ui.systemFont`), plus ellipsis, clip and wrap overflow, alignment, line height and letter spacing.
 - [x] OS media integration for `@neyuki/ui`: now-playing metadata in the system media controls (`ui.mediaSession`) and global media keys as `mediakey` events.
+- [x] `@neyuki/ui` image decoding: PNG, JPEG, WebP, GIF and BMP detected by magic bytes, from files (`ui.loadImage`) or memory (`ui.decodeImage`).
+  - [x] Animated GIF/WebP/PNG frames with browser-style delay clamping, `ui.animation` playback helper and `image:resized`.
+  - [x] `drawImage` options `frame`, `opacity`, `radius` and `fit` (`fill`, `contain`, `cover`) with cached smooth resampling.
+  - [x] Pixel-count and decoded-memory limits.
 - [ ] Tray icon with a menu whose items arrive as events.
 - [ ] Single-instance apps: a second launch signals and focuses the first.
 - [ ] Auto-update support.

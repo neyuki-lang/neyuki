@@ -177,19 +177,52 @@ function ui.setFallbackFonts(fonts: {Font}?): ()
     __ui_set_fallback_fonts(fontIds(fonts ?? {}, "fonts"))
 end
 
--- Decodes a PNG file into an `Image` with `width` and `height`.
-function ui.loadImage(path: string): Image
-    checkString(path, "path")
-    local id, width, height = __ui_load_image(path)
+function checkImage(image: any, name: string)
+    if (type(image) != "table" or type(image.id) != "function") then
+        error(name .. " must be an image from ui.loadImage or ui.decodeImage")
+    end
+end
+
+function checkFrame(image: Image, i: any, name: string)
+    if (type(i) != "number" or i != math.floor(i) or i < 1 or i > image.frames) then
+        error(name .. " must be a frame number from 1 to " .. tostring(image.frames))
+    end
+end
+
+-- Builds the `Image` object around what the image natives return. Drawing
+-- only needs `id`, so anything drawable (a future canvas, say) can share
+-- `window:drawImage` by offering the same method.
+function makeImage(id: number, width: number, height: number, frames: number, loopCount: number, delays: {number}, path: string?): Image
     local freed = false
     local image = {}
     image.path = path
     image.width = width
     image.height = height
+    image.frames = frames
+    image.loopCount = loopCount
 
     function image.id(self: Image): number
         if (freed) then error("image was freed") end
         return id
+    end
+
+    -- Seconds frame `i` (from 1) stays on screen. Delays of 10 ms or less
+    -- are read as 100 ms, as browsers do; stills report 0.
+    function image.frameDelay(self: Image, i: number): number
+        checkFrame(self, i, "i")
+        return delays[i]
+    end
+
+    -- A new image with every frame resampled to `w` × `h` pixels, for
+    -- drawing at one size over and over without scaling.
+    function image.resized(self: Image, w: number, h: number): Image
+        checkNumber(w, "width")
+        checkNumber(h, "height")
+        if (w < 1 or h < 1 or w != math.floor(w) or h != math.floor(h)) then
+            error("width and height must be positive whole numbers")
+        end
+        local nid, nw, nh, nframes, nloops, ndelays = __ui_resize_image(self:id(), w, h)
+        return makeImage(nid, nw, nh, nframes, nloops, ndelays, path)
     end
 
     function image.close(self: Image): ()
@@ -199,6 +232,39 @@ function ui.loadImage(path: string): Image
     end
 
     return table.freeze(image)
+end
+
+-- Reads `maxPixels` and `maxBytes` from the options of loadImage and
+-- decodeImage.
+function imageLimits(options: ImageLimits?): (number?, number?)
+    checkOptionalTable(options, "options")
+    options = options ?? {}
+    checkOptionalNumber(options.maxPixels, "maxPixels")
+    checkOptionalNumber(options.maxBytes, "maxBytes")
+    return options.maxPixels, options.maxBytes
+end
+
+-- Decodes a PNG, JPEG, WebP, GIF or BMP file into an `Image` with `width`,
+-- `height`, `frames` and `loopCount`. The format is read from the file's
+-- first bytes, not its name. Animated GIF, WebP and PNG files decode every
+-- frame. `options.maxPixels` (default 64 million) and `options.maxBytes`
+-- (memory for all decoded frames, default 512 MiB) bound what is accepted.
+function ui.loadImage(path: string, options: ImageLimits?): Image
+    checkString(path, "path")
+    local maxPixels, maxBytes = imageLimits(options)
+    local id, width, height, frames, loopCount, delays = __ui_load_image(path, maxPixels, maxBytes)
+    return makeImage(id, width, height, frames, loopCount, delays, path)
+end
+
+-- Like `loadImage`, from the bytes of an image in a buffer (or a string),
+-- such as a downloaded file.
+function ui.decodeImage(data: any, options: ImageLimits?): Image
+    if (type(data) != "buffer" and type(data) != "string") then
+        error("data must be a buffer or string")
+    end
+    local maxPixels, maxBytes = imageLimits(options)
+    local id, width, height, frames, loopCount, delays = __ui_decode_image(data, maxPixels, maxBytes)
+    return makeImage(id, width, height, frames, loopCount, delays, nil)
 end
 
 -- WINDOWS ------------------------------------------------------------------
@@ -439,20 +505,29 @@ function ui.open(options: WindowOptions?): Window
         return w, h
     end
 
-    -- Draws an image at its own size, or scaled to `options.width` and/or
-    -- `options.height`.
+    -- Draws an image at its own size, or into the box given by
+    -- `options.width` and/or `options.height`. Other options:
+    --   frame    which frame of an animated image to draw, from 1 (default 1)
+    --   opacity  0 (invisible) to 1 (default)
+    --   radius   rounds the corners of the drawn image
+    --   fit      "fill" (default) stretches the image to the box, "contain"
+    --            shows all of it centered, "cover" fills the box and crops
+    --            the overflow around the center
     function window.drawImage(self: Window, image: Image, x: number, y: number, options: ImageOptions?): ()
         checkOpen()
-        if (type(image) != "table" or type(image.id) != "function") then
-            error("image must be an image from ui.loadImage")
-        end
+        checkImage(image, "image")
         checkNumber(x, "x")
         checkNumber(y, "y")
         checkOptionalTable(options, "options")
         options = options ?? {}
         checkOptionalNumber(options.width, "width")
         checkOptionalNumber(options.height, "height")
-        __ui_draw_image(id, image:id(), x, y, options.width, options.height)
+        checkOptionalNumber(options.opacity, "opacity")
+        checkOptionalNumber(options.radius, "radius")
+        checkOptionalString(options.fit, "fit")
+        if (options.frame != nil) then checkFrame(image, options.frame, "frame") end
+        __ui_draw_image(id, image:id(), x, y, options.width, options.height, options.frame,
+            options.opacity, options.radius, options.fit)
     end
 
     -- Shows everything drawn since the last call.
@@ -1027,6 +1102,62 @@ function ui.update(dt: number): number
     for _, tween in running do still[#still + 1] = tween end
     running = still
     return #running
+end
+
+-- Plays an animated image: `update(dt)` advances `frame` by the image's own
+-- frame delays, so a script only forwards the time since the last frame.
+-- Draw with `win:drawImage(img, x, y, { frame = anim.frame })`. The
+-- animation loops `image.loopCount` times (0 or `options.loop = true`: forever)
+-- and then stays on the last frame. Options: `speed` (default 1) scales time.
+function ui.animation(image: Image, options: AnimationOptions?): ImageAnimation
+    checkImage(image, "image")
+    checkOptionalTable(options, "options")
+    local opts = options ?? {}
+    checkOptionalNumber(opts.speed, "speed")
+    checkOptionalBoolean(opts.loop, "loop")
+    local speed = opts.speed ?? 1
+    if (speed < 0) then error("speed must be non-negative") end
+    local forever = opts.loop == true or image.loopCount == 0
+    local plays = 0
+    local anim = {}
+    anim.frame = 1
+    anim.playing = true
+    anim.finished = false
+    local elapsed = 0
+
+    -- Moves the animation `dt` seconds on and returns the current frame.
+    function anim.update(self: ImageAnimation, dt: number): number
+        checkNumber(dt, "dt")
+        if (not self.playing or self.finished or image.frames <= 1) then return self.frame end
+        elapsed = elapsed + dt * speed
+        local guard = 0
+        while (elapsed >= image:frameDelay(self.frame) and guard < 100000) do
+            guard += 1
+            elapsed = elapsed - image:frameDelay(self.frame)
+            if (self.frame < image.frames) then
+                self.frame += 1
+            else
+                plays += 1
+                if (not forever and plays >= image.loopCount) then
+                    self.finished = true
+                    elapsed = 0
+                    break
+                end
+                self.frame = 1
+            end
+        end
+        return self.frame
+    end
+
+    -- Goes back to the first frame and plays again.
+    function anim.reset(self: ImageAnimation): ()
+        self.frame = 1
+        self.finished = false
+        plays = 0
+        elapsed = 0
+    end
+
+    return anim
 end
 
 return table.freeze(ui)
