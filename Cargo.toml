@@ -77,16 +77,23 @@ fallible-iterator = "0.2"
 mysql = { version = "28", default-features = false, features = ["minimal-rust", "native-tls", "buffer-pool"] }
 
 # `@neyuki/ui` opens windows through `winit`, blits CPU-rendered frames with
-# `softbuffer` and draws them with `tiny-skia` and `fontdue`; `png` loads
-# images. Everything is CPU-rendered, so no GPU or GL driver is needed. On
-# Linux the X11, Wayland and xkbcommon client libraries are loaded at runtime (dlopen)
+# `softbuffer` and draws them with `tiny-skia` and `fontdue`. `image` decodes
+# PNG, JPEG, WebP, GIF and BMP (animations included) through its pure-Rust
+# codecs (`png`, `zune-jpeg`, `image-webp`, `gif`); only those formats are
+# enabled. All pure Rust, so no GPU, GL or C compiler is needed. On Linux the
+# X11, Wayland and xkbcommon client libraries are loaded at runtime (dlopen)
 # rather than linked, so a build machine needs none of them and a headless
 # machine still runs everything else.
 winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen", "wayland-csd-adwaita"] }
 softbuffer = "0.4"
 tiny-skia = "0.11"
 fontdue = "0.9"
-png = "0.18"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }
+# The now-playing session and media keys of `@neyuki/ui`: Windows'
+# SystemMediaTransportControls, MPRIS on Linux and MPNowPlayingInfoCenter on
+# macOS behind one API. Its zbus backend speaks D-Bus in pure Rust, where
+# the default one links the C libdbus.
+souvlaki = { version = "0.8", default-features = false, features = ["use_zbus"] }
 # `ui.openUrl` hands links to the default browser or mail client through
 # `open` (ShellExecuteW on Windows, `open` on macOS, xdg-open and friends on
 # Linux) instead of spawning shell commands by hand.
@@ -101,6 +108,14 @@ arboard = { version = "3", default-features = false }
 # `os.date` formats times and reads the local time zone through the
 # operating system (Windows API bindings, /etc/localtime, CoreFoundation).
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+fontdb = "0.23"
+
+# `neyuki build` sets the icon, version resource and subsystem of the Windows
+# executable it writes. `editpe` edits PE files on any host, so a Linux or
+# macOS machine can build a Windows app from a Windows runtime. `images` is
+# off: it pulls in the `image` crate only to resize icons, and `.png` icons
+# are wrapped into `.ico` files by `neyuki build` itself.
+editpe = { version = "0.2", default-features = false, features = ["std"] }
 
 # Opt-in global allocator for the `neyuki` binary (`--features mimalloc`).
 # The VM allocates many small, short-lived tables, strings and closures, the
@@ -115,8 +130,9 @@ mimalloc = ["dep:mimalloc"]
 schannel = ">=0.1.23, <0.1.28"
 # `os.protect` seals secrets with DPAPI (CryptProtectData) for the current
 # user. 0.59 is the generation that still links through import libraries,
-# for the same windows-gnu reason as `schannel` above.
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography"] }
+# for the same windows-gnu reason as `schannel` above. A built app also
+# shows an error that ends it in a message box, as it has no console.
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_UI_WindowsAndMessaging"] }
 
 # Elsewhere `os.protect` keeps a random AES-256-GCM key in the OS keychain:
 # Keychain Services on macOS, the Secret Service over the pure-Rust `zbus`

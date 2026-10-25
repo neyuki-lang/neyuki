@@ -411,6 +411,23 @@ fn os_getenv(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     }
 }
 
+/// `app()` describes the app built with `neyuki build` that is running:
+/// `{ bundled = true, name, version, identifier }`, or `{ bundled = false }`
+/// under `neyuki run`.
+fn os_app(_vm: &mut VM, _args: &[Value]) -> Result<Vec<Value>, String> {
+    let mut table = VmTable::new();
+    let bundle = crate::app::installed();
+    table.set_str("bundled", Value::Bool(bundle.is_some()));
+    if let Some(bundle) = bundle {
+        for key in ["name", "version", "identifier"] {
+            if let Some(value) = bundle.meta(key) {
+                table.set_str(key, Value::string(value.to_string()));
+            }
+        }
+    }
+    Ok(vec![crate::vm::libs::args::frozen(table)])
+}
+
 pub fn create_os_lib() -> Value {
     let mut table = VmTable::new();
     table.set_str("clock", crate::native!("os.clock", os_clock));
@@ -422,6 +439,7 @@ pub fn create_os_lib() -> Value {
     table.set_str("exit", crate::native!("os.exit", os_exit));
     table.set_str("args", crate::native!("os.args", os_args));
     table.set_str("run", crate::native!("os.run", os_run));
+    table.set_str("app", crate::native!("os.app", os_app));
     table.set_str(
         "dataDir",
         crate::native!("os.dataDir", storage::os_data_dir),

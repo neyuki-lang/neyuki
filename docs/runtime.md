@@ -9,6 +9,7 @@ neyuki lint [--json] [--stdin] <file>
 neyuki compile <file> [out]       compile to bytecode (default: <file>b)
 neyuki repl                       interactive session
 neyuki test                       run every .nyk file in tests/
+neyuki build [project]            build a standalone app executable
 neyuki pkg <command>              manage the project manifest and packages
 neyuki dap                        Debug Adapter Protocol server on stdio
 neyuki disasm <file>              print the bytecode the compiler emits
@@ -40,6 +41,10 @@ warning[W0001]: unused variable 'total'
 
 The bytecode format changes between Neyuki versions. A `.nykb` written by another version is rejected with an error naming both formats; recompile it with `neyuki compile`. When `require` meets such a file and the `.nyk` source sits next to it, it compiles the source instead.
 
+### Building apps
+
+`neyuki build [project]` writes a standalone executable that holds the entry script, the modules it needs and an asset folder (default `assets`) in an embedded read-only file system, so `fs.read("assets/logo.png")` and `require` resolve inside the bundle. Options: `-o`/`--out`, `--name`, `--version`, `--icon`, `--asset` (repeatable), `--console` (keep the Windows console window) and `--runtime`. The `[app]` section of `neyuki.toml` sets `name`, `identifier`, `icon`, `assets`, `publisher` and `copyright`. A built app reads its own details with [`os.app()`](reference/os.md).
+
 ### Debugging
 
 `neyuki dap` speaks the Debug Adapter Protocol on standard input and output, which the VS Code extension uses for breakpoints, stepping, the call stack and variables. Scripts can also inspect themselves with the [debug library](reference/debug.md) and time functions with [@neyuki/profile](reference/profile.md).
@@ -64,4 +69,4 @@ A few limits keep one script from exhausting the machine: integers are capped at
 
 ## Platform notes
 
-The runtime is a single executable with nothing else to install, apart from OpenSSL (`libssl`) on Linux. `@neyuki/ui` and `@neyuki/hid` need a desktop session (on Linux, X11 or Wayland); everything else runs headless. TLS for `@neyuki/http` and `@neyuki/sql` uses the operating system's own library (SChannel, Secure Transport or OpenSSL).
+The runtime is a single executable with nothing else to install, apart from OpenSSL (`libssl`) on Linux. `@neyuki/ui` and `@neyuki/hid` need a desktop session (on Linux, X11 or Wayland); everything else runs headless. On Linux, `ui.mediaSession` publishes over MPRIS and so needs a D-Bus session bus. TLS for `@neyuki/http` and `@neyuki/sql` uses the operating system's own library (SChannel, Secure Transport or OpenSSL).

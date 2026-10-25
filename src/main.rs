@@ -43,6 +43,7 @@ Commands:
                           Report errors and warnings without running
   lsp                     Serve the Language Server Protocol on stdio
   compile <file> [out]    Compile to .nykb bytecode
+  build [project]         Build a standalone app executable
   test                    Run every script in tests/
   repl                    Start an interactive session
   pkg <command>           Manage packages
@@ -57,6 +58,16 @@ Commands:
   help, version";
 
 fn run_cli() {
+    // An executable written by `neyuki build` runs its app, never the CLI.
+    match app::find_own_bundle() {
+        Ok(Some(bundle)) => return run_app(bundle),
+        Ok(None) => {}
+        Err(err) => {
+            app::report_error(&format!("error: {}", err));
+            process::exit(1);
+        }
+    }
+
     let mut args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         eprintln!("{}", USAGE);
@@ -118,6 +129,15 @@ fn run_cli() {
                 }
                 process::exit(1);
             }
+        }
+    } else if action == "build" {
+        if let Err(err) = app::build::run_cli(&args[2..]) {
+            if err.starts_with("error[") {
+                eprint!("{}", err);
+            } else {
+                eprintln!("build error: {}", err);
+            }
+            process::exit(1);
         }
     } else if action == "run" {
         let Some(path) = args.get(2) else {
@@ -233,6 +253,22 @@ fn run_cli() {
 {}",
             action, USAGE
         );
+        process::exit(1);
+    }
+}
+
+/// Runs the app bundled into this executable with every argument passed to
+/// the script.
+fn run_app(bundle: app::Bundle) {
+    app::install(Some(bundle));
+    vm::libs::os::set_script_args(env::args().skip(1).collect());
+    if let Err(err) = app::run_installed() {
+        let message = if err.starts_with("error[") || err.starts_with("runtime error") {
+            err.trim_end().to_string()
+        } else {
+            format!("error: {}", err)
+        };
+        app::report_error(&message);
         process::exit(1);
     }
 }
