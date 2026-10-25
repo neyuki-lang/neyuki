@@ -1753,6 +1753,8 @@ fn builtin_polygon(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     Ok(vec![])
 }
 
+type FontChain = Vec<(u64, Rc<fontdue::Font>)>;
+
 /// Reads the text arguments `__ui_text` and `__ui_measure_text` share: the
 /// size at `size_index`, then from `font_index` on `font?, fallback?,
 /// maxWidth?, overflow?, align?, lineHeight?, letterSpacing?`. Returns the
@@ -1761,7 +1763,7 @@ fn text_args(
     args: &[Value],
     size_index: usize,
     font_index: usize,
-) -> Result<(TextOptions, Vec<(u64, Rc<fontdue::Font>)>), String> {
+) -> Result<(TextOptions, FontChain), String> {
     let size = float_arg(args, size_index, "size")?;
     if size <= 0.0 {
         return Err("size must be positive".to_string());
@@ -2379,14 +2381,16 @@ mod tests {
     #[test]
     fn wrapping_breaks_at_spaces_and_between_cjk_characters() {
         let (noto, cjk, _) = fonts();
-        let one = layout_text(&[&noto], "hello", &TextOptions::sized(16.0));
+        let hello = layout_text(&[&noto], "hello", &TextOptions::sized(16.0));
+        let world = layout_text(&[&noto], "world", &TextOptions::sized(16.0));
+        let one_width = hello.width.max(world.width);
         let options = TextOptions {
-            max_width: Some(one.width + 4.0),
+            max_width: Some(one_width + 4.0),
             ..TextOptions::sized(16.0)
         };
         let wrapped = layout_text(&[&noto], "hello world", &options);
         assert_eq!(wrapped.lines, 2);
-        assert!(wrapped.width <= one.width + 4.0);
+        assert!(wrapped.width <= one_width + 4.0);
         // The second line starts with "w" at the left edge.
         let second: Vec<&Placed> = wrapped
             .glyphs
