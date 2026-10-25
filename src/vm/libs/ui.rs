@@ -40,8 +40,9 @@ use souvlaki::{
     SeekDirection,
 };
 use tiny_skia::{
-    Color, FillRule, Paint, Path, PathBuilder, Pixmap, PremultipliedColorU8, Rect, Stroke,
-    Transform,
+    Color, FillRule, GradientStop, LineCap, LineJoin, LinearGradient, Mask, Paint, Path,
+    PathBuilder, Pixmap, PixmapPaint, Point, PremultipliedColorU8, RadialGradient, Rect, Shader,
+    SpreadMode, Stroke, Transform,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize};
@@ -58,8 +59,10 @@ use crate::vm::libs::task;
 use crate::vm::machine::VM;
 use crate::vm::value::{NativeDef, StrRef, Value, VmTable};
 
+mod effects;
 mod images;
 
+use effects::coverage_in;
 use images::{Decoded, Fit, Limits};
 
 pub(crate) const NATIVES: &[NativeDef] = &[
@@ -160,12 +163,64 @@ pub(crate) const NATIVES: &[NativeDef] = &[
         func: builtin_free_font,
     },
     NativeDef {
+        name: "__ui_canvas",
+        func: builtin_canvas,
+    },
+    NativeDef {
+        name: "__ui_free_canvas",
+        func: builtin_free_canvas,
+    },
+    NativeDef {
+        name: "__ui_push_clip",
+        func: builtin_push_clip,
+    },
+    NativeDef {
+        name: "__ui_push_clip_path",
+        func: builtin_push_clip_path,
+    },
+    NativeDef {
+        name: "__ui_pop_clip",
+        func: builtin_pop_clip,
+    },
+    NativeDef {
+        name: "__ui_push_opacity",
+        func: builtin_push_opacity,
+    },
+    NativeDef {
+        name: "__ui_pop_opacity",
+        func: builtin_pop_opacity,
+    },
+    NativeDef {
+        name: "__ui_fill_path",
+        func: builtin_fill_path,
+    },
+    NativeDef {
+        name: "__ui_stroke_path",
+        func: builtin_stroke_path,
+    },
+    NativeDef {
+        name: "__ui_blur_region",
+        func: builtin_blur_region,
+    },
+    NativeDef {
+        name: "__ui_blur_image",
+        func: builtin_blur_image,
+    },
+    NativeDef {
+        name: "__ui_get_pixel",
+        func: builtin_get_pixel,
+    },
+    NativeDef {
         name: "__ui_set_fallback_fonts",
         func: builtin_set_fallback_fonts,
     },
     NativeDef {
         name: "__ui_present",
         func: builtin_present,
+    },
+    NativeDef {
+        name: "__ui_stats",
+        func: builtin_stats,
     },
     NativeDef {
         name: "__ui_media_session",
@@ -309,6 +364,8 @@ struct Win {
     /// Last known cursor position in logical pixels, for button events,
     /// which winit reports without one.
     cursor: (f64, f64),
+    /// Clips and open opacity groups of the frame being drawn.
+    state: DrawState,
     /// Whether the window was opened `transparent`, so presenting keeps the
     /// alpha channel instead of dropping it.
     transparent: bool,
@@ -345,6 +402,38 @@ impl Clicks {
         self.last = Some((at, x, y, button));
         self.count
     }
+}
+
+/// What clipping and group opacity keep per drawing target. Clips are a
+/// stack of masks, each already intersected with the one below it, so the
+/// top one is all a draw call needs.
+#[derive(Default)]
+struct DrawState {
+    clips: Vec<Mask>,
+    groups: Vec<Group>,
+}
+
+/// An open `pushOpacity`: the pixels drawn before it, which the layer now
+/// being drawn into is composited onto at `popOpacity`.
+struct Group {
+    saved: Pixmap,
+    opacity: f32,
+    /// How many clips were active when it opened; it closes back to this.
+    clips: usize,
+}
+
+/// An off-screen surface from `ui.canvas`, drawn into like a window.
+struct Canvas {
+    pixmap: Pixmap,
+    scale: f64,
+    state: DrawState,
+}
+
+/// What the drawing natives paint into, whether window or canvas.
+struct Target<'a> {
+    pixmap: &'a mut Pixmap,
+    scale: f64,
+    state: &'a mut DrawState,
 }
 
 /// What `__ui_open` asks the event loop to create. Windows can only be made
@@ -392,6 +481,7 @@ thread_local! {
     static WINDOWS: RefCell<HashMap<u64, Win>> = RefCell::new(HashMap::new());
     static WINDOW_IDS: RefCell<HashMap<WindowId, u64>> = RefCell::new(HashMap::new());
     static IMAGES: RefCell<HashMap<u64, ImageEntry>> = RefCell::new(HashMap::new());
+    static CANVASES: RefCell<HashMap<u64, Canvas>> = RefCell::new(HashMap::new());
     static FONTS: RefCell<HashMap<u64, Rc<fontdue::Font>>> = RefCell::new(HashMap::new());
     static FALLBACKS: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
     static GLYPHS: RefCell<GlyphCache> = RefCell::new(GlyphCache::default());
@@ -399,7 +489,30 @@ thread_local! {
     static EVENTS: RefCell<Vec<Value>> = const { RefCell::new(Vec::new()) };
     static PENDING_OPEN: RefCell<Option<OpenRequest>> = const { RefCell::new(None) };
     static OPENED: RefCell<Option<Result<(u64, f64), String>>> = const { RefCell::new(None) };
+    static STATS: RefCell<Stats> = RefCell::new(Stats::default());
     static NEXT_ID: Cell<u64> = const { Cell::new(1) };
+}
+
+/// Frame timing for `__ui_stats`. `blur` collects the seconds spent in
+/// gaussian blurs since the last present; the `_ms` fields describe the last
+/// presented frame.
+#[derive(Default)]
+struct Stats {
+    frames: u64,
+    last_end: Option<Instant>,
+    blur: f64,
+    draw_ms: f64,
+    blur_ms: f64,
+    present_ms: f64,
+    frame_ms: f64,
+}
+
+/// Runs a blur and charges its time to the current frame.
+fn timed_blur(pixmap: &mut Pixmap, sigma: f32) {
+    let start = Instant::now();
+    effects::blur(pixmap, sigma);
+    let spent = start.elapsed().as_secs_f64();
+    STATS.with(|stats| stats.borrow_mut().blur += spent);
 }
 
 fn next_id() -> u64 {
@@ -1051,6 +1164,7 @@ fn create_window(event_loop: &ActiveEventLoop, request: OpenRequest) -> Result<(
         scale,
         modifiers: ModifiersState::empty(),
         cursor: (0.0, 0.0),
+        state: DrawState::default(),
         transparent: request.transparent,
         maximized: window.is_maximized(),
         minimized: false,
@@ -1061,7 +1175,7 @@ fn create_window(event_loop: &ActiveEventLoop, request: OpenRequest) -> Result<(
     // Wayland only maps a window once it has a frame, so show the blank
     // canvas straight away; a failure here just means the first real
     // `present` does it.
-    let _ = blit(&mut win);
+    let _ = blit(&mut win, None);
     WINDOW_IDS.with(|ids| ids.borrow_mut().insert(window.id(), id));
     WINDOWS.with(|windows| windows.borrow_mut().insert(id, win));
     Ok((id, scale))
@@ -1080,6 +1194,7 @@ fn translate_event(id: u64, win: &mut Win, event: WindowEvent, out: &mut Vec<Val
                 let mut pixmap = pixmap;
                 pixmap.fill(blank(win.transparent));
                 win.pixmap = pixmap;
+                win.state = DrawState::default();
             }
             let size = win.window.inner_size().to_logical::<f64>(win.scale);
             push(
@@ -1109,7 +1224,7 @@ fn translate_event(id: u64, win: &mut Win, event: WindowEvent, out: &mut Vec<Val
             }
         }
         WindowEvent::RedrawRequested => {
-            let _ = blit(win);
+            let _ = blit(win, None);
             push("redraw", vec![]);
         }
         WindowEvent::ModifiersChanged(modifiers) => {
@@ -1320,12 +1435,39 @@ fn with_window<T>(id: u64, body: impl FnOnce(&mut Win) -> Result<T, String>) -> 
     })
 }
 
+/// Runs `body` on the window or canvas `id`, whichever it names.
+fn with_target<T>(
+    id: u64,
+    body: impl FnOnce(&mut Target) -> Result<T, String>,
+) -> Result<T, String> {
+    if WINDOWS.with(|windows| windows.borrow().contains_key(&id)) {
+        return with_window(id, |win| {
+            body(&mut Target {
+                pixmap: &mut win.pixmap,
+                scale: win.scale,
+                state: &mut win.state,
+            })
+        });
+    }
+    CANVASES.with(|canvases| {
+        let mut canvases = canvases.borrow_mut();
+        let canvas = canvases
+            .get_mut(&id)
+            .ok_or_else(|| "window is closed".to_string())?;
+        body(&mut Target {
+            pixmap: &mut canvas.pixmap,
+            scale: canvas.scale,
+            state: &mut canvas.state,
+        })
+    })
+}
+
 /// Copies the back buffer to the screen. softbuffer wants `0RGB` words;
 /// the pixmap is premultiplied, which over an opaque window is exactly the
 /// composited color. A transparent window also gets the alpha in the top
 /// byte, premultiplied as compositors expect; backends that read only
 /// `0RGB` ignore it.
-fn blit(win: &mut Win) -> Result<(), String> {
+fn blit(win: &mut Win, dirty: Option<&[(i32, i32, i32, i32)]>) -> Result<(), String> {
     let (width, height) = (win.pixmap.width(), win.pixmap.height());
     let (Some(w), Some(h)) = (NonZeroU32::new(width), NonZeroU32::new(height)) else {
         return Ok(());
@@ -1337,10 +1479,64 @@ fn blit(win: &mut Win) -> Result<(), String> {
         .surface
         .buffer_mut()
         .map_err(|err| format!("cannot present window: {}", err))?;
-    pack_pixels(win.pixmap.pixels(), &mut buffer, win.transparent);
-    buffer
-        .present()
-        .map_err(|err| format!("cannot present window: {}", err))
+    // Only a buffer that still holds the previous frame can be updated in
+    // part; any other age is stale or new and needs every pixel.
+    let rects = match dirty {
+        Some(rects) if buffer.age() == 1 => clamp_rects(rects, width, height),
+        _ => None,
+    };
+    match rects {
+        Some(rects) => {
+            let stride = width as usize;
+            let pixels = win.pixmap.pixels();
+            let mut damage = Vec::with_capacity(rects.len());
+            for (x, y, rw, rh) in rects {
+                for row in y..y + rh {
+                    let from = row as usize * stride + x as usize;
+                    let to = from + rw as usize;
+                    pack_pixels(&pixels[from..to], &mut buffer[from..to], win.transparent);
+                }
+                if let (Some(rw), Some(rh)) = (NonZeroU32::new(rw), NonZeroU32::new(rh)) {
+                    damage.push(softbuffer::Rect {
+                        x,
+                        y,
+                        width: rw,
+                        height: rh,
+                    });
+                }
+            }
+            buffer
+                .present_with_damage(&damage)
+                .map_err(|err| format!("cannot present window: {}", err))
+        }
+        None => {
+            pack_pixels(win.pixmap.pixels(), &mut buffer, win.transparent);
+            buffer
+                .present()
+                .map_err(|err| format!("cannot present window: {}", err))
+        }
+    }
+}
+
+/// Clips physical `(x, y, w, h)` rectangles to a `width` x `height` surface,
+/// dropping empty ones. `None` when nothing is left, which presents the
+/// whole frame instead.
+fn clamp_rects(
+    rects: &[(i32, i32, i32, i32)],
+    width: u32,
+    height: u32,
+) -> Option<Vec<(u32, u32, u32, u32)>> {
+    let mut out = Vec::with_capacity(rects.len());
+    for &(x, y, w, h) in rects {
+        let x0 = (x as i64).max(0);
+        let y0 = (y as i64).max(0);
+        let x1 = (x as i64 + w as i64).min(width as i64);
+        let y1 = (y as i64 + h as i64).min(height as i64);
+        if x1 > x0 && y1 > y0 {
+            out.push((x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32));
+        }
+    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 fn pack_pixels(pixels: &[PremultipliedColorU8], out: &mut [u32], alpha: bool) {
@@ -1449,6 +1645,286 @@ fn stroke(width: f64) -> Stroke {
         width: width as f32,
         ..Stroke::default()
     }
+}
+
+/// A stroke with the given line cap (`"butt"`, `"round"` or `"square"`) and
+/// join (`"miter"`, `"round"` or `"bevel"`).
+fn styled_stroke(width: f64, cap: &str, join: &str) -> Result<Stroke, String> {
+    let line_cap = match cap {
+        "butt" => LineCap::Butt,
+        "round" => LineCap::Round,
+        "square" => LineCap::Square,
+        _ => return Err("cap must be \"butt\", \"round\" or \"square\"".to_string()),
+    };
+    let line_join = match join {
+        "miter" => LineJoin::Miter,
+        "round" => LineJoin::Round,
+        "bevel" => LineJoin::Bevel,
+        _ => return Err("join must be \"miter\", \"round\" or \"bevel\"".to_string()),
+    };
+    Ok(Stroke {
+        width: width as f32,
+        line_cap,
+        line_join,
+        ..Stroke::default()
+    })
+}
+
+/// An optional table of finite numbers, such as a gradient or shadow spec.
+fn numbers_arg(args: &[Value], index: usize, name: &str) -> Result<Option<Vec<f64>>, String> {
+    match args.get(index) {
+        None | Some(Value::Nil) => Ok(None),
+        Some(Value::Table(table)) => table
+            .borrow()
+            .array
+            .iter()
+            .map(|value| {
+                crate::vm::libs::args::number(value)
+                    .ok()
+                    .filter(|number| number.is_finite())
+                    .ok_or_else(|| format!("{} must hold finite numbers", name))
+            })
+            .collect::<Result<Vec<f64>, String>>()
+            .map(Some),
+        Some(value) => Err(format!(
+            "{} must be a table, got {}",
+            name,
+            value.type_name()
+        )),
+    }
+}
+
+/// A path from the flat command list `lib/ui.nyk` builds: `0 x y` moves,
+/// `1 x y` draws a line, `2 cx cy x y` a quadratic curve, `3 c1x c1y c2x
+/// c2y x y` a cubic curve and `4` closes the sub-path.
+fn path_from_commands(commands: &[f64]) -> Result<Path, String> {
+    let mut pb = PathBuilder::new();
+    let mut i = 0;
+    while i < commands.len() {
+        let count = match commands[i] as i32 {
+            0 | 1 => 2,
+            2 => 4,
+            3 => 6,
+            4 => 0,
+            _ => return Err("path holds an unknown command".to_string()),
+        };
+        let Some(a) = commands.get(i + 1..i + 1 + count) else {
+            return Err("path ends in the middle of a command".to_string());
+        };
+        let f = |k: usize| a[k] as f32;
+        match commands[i] as i32 {
+            0 => pb.move_to(f(0), f(1)),
+            1 => pb.line_to(f(0), f(1)),
+            2 => pb.quad_to(f(0), f(1), f(2), f(3)),
+            3 => pb.cubic_to(f(0), f(1), f(2), f(3), f(4), f(5)),
+            _ => pb.close(),
+        }
+        i += 1 + count;
+    }
+    pb.finish().ok_or_else(|| "path is empty".to_string())
+}
+
+fn path_arg(args: &[Value], index: usize) -> Result<Path, String> {
+    let commands = numbers_arg(args, index, "path")?.ok_or("path must be provided")?;
+    path_from_commands(&commands)
+}
+
+/// The shader of a gradient spec: `kind` (0 linear, 1 radial), four numbers
+/// (`x1, y1, x2, y2` of a linear gradient; `cx, cy, radius` and a spare of a
+/// radial one), then `offset, color` pairs. Coordinates are logical.
+fn gradient_shader(spec: &[f64]) -> Result<Shader<'static>, String> {
+    if spec.len() < 9 || !(spec.len() - 5).is_multiple_of(2) {
+        return Err("gradient needs at least two stops".to_string());
+    }
+    let stops = spec[5..]
+        .chunks(2)
+        .map(|pair| {
+            let (r, g, b, a) = unpack_color(pair[1] as u32);
+            GradientStop::new(pair[0] as f32, Color::from_rgba8(r, g, b, a))
+        })
+        .collect();
+    let point = |x: f64, y: f64| Point::from_xy(x as f32, y as f32);
+    let shader = if spec[0] == 0.0 {
+        LinearGradient::new(
+            point(spec[1], spec[2]),
+            point(spec[3], spec[4]),
+            stops,
+            SpreadMode::Pad,
+            Transform::identity(),
+        )
+    } else {
+        let center = point(spec[1], spec[2]);
+        RadialGradient::new(
+            center,
+            center,
+            spec[3] as f32,
+            stops,
+            SpreadMode::Pad,
+            Transform::identity(),
+        )
+    };
+    shader.ok_or_else(|| "gradient is degenerate (zero length or radius)".to_string())
+}
+
+/// Fills `path` (logical coordinates) with `color` or the `gradient`, after
+/// painting the `shadow` it casts.
+fn fill_shape(
+    target: &mut Target,
+    path: &Path,
+    color: (u8, u8, u8, u8),
+    gradient: Option<&[f64]>,
+    shadow: Option<&[f64]>,
+) -> Result<(), String> {
+    if let Some(shadow) = shadow {
+        draw_shadow(target, path, shadow)?;
+    }
+    let mut paint = paint(color);
+    if let Some(gradient) = gradient {
+        paint.shader = gradient_shader(gradient)?;
+    }
+    let scale = target.scale as f32;
+    target.pixmap.fill_path(
+        path,
+        &paint,
+        FillRule::Winding,
+        Transform::from_scale(scale, scale),
+        target.state.clips.last(),
+    );
+    Ok(())
+}
+
+/// Paints the blurred shadow of `path`. `spec` is `blur, offsetX, offsetY,
+/// spread, color`: `blur` is the CSS-style blur radius (the gaussian's
+/// standard deviation is half of it), `spread` grows the shape first.
+fn draw_shadow(target: &mut Target, path: &Path, spec: &[f64]) -> Result<(), String> {
+    if spec.len() < 5 {
+        return Err("shadow needs blur, offsetX, offsetY, spread and color".to_string());
+    }
+    let blur = spec[0].max(0.0) as f32;
+    let (dx, dy) = (spec[1] as f32, spec[2] as f32);
+    let spread = spec[3].max(0.0) as f32;
+    let color = unpack_color(spec[4] as u32);
+    let scale = target.scale as f32;
+    let sigma = blur * scale / 2.0;
+    let pad = (sigma * 3.0).ceil() + 1.0 + spread * scale;
+    let (pw, ph) = (target.pixmap.width() as i32, target.pixmap.height() as i32);
+    let bounds = path.bounds();
+    let left = (((bounds.left() + dx) * scale - pad).floor() as i32).max(0);
+    let top = (((bounds.top() + dy) * scale - pad).floor() as i32).max(0);
+    let right = (((bounds.right() + dx) * scale + pad).ceil() as i32).min(pw);
+    let bottom = (((bounds.bottom() + dy) * scale + pad).ceil() as i32).min(ph);
+    if right <= left || bottom <= top {
+        return Ok(());
+    }
+    let mut layer = Pixmap::new((right - left) as u32, (bottom - top) as u32)
+        .ok_or_else(|| "cannot allocate shadow".to_string())?;
+    let transform = Transform::from_row(
+        scale,
+        0.0,
+        0.0,
+        scale,
+        dx * scale - left as f32,
+        dy * scale - top as f32,
+    );
+    let shadow_paint = paint(color);
+    layer.fill_path(path, &shadow_paint, FillRule::Winding, transform, None);
+    if spread > 0.0 {
+        layer.stroke_path(
+            path,
+            &shadow_paint,
+            &stroke(spread as f64 * 2.0),
+            transform,
+            None,
+        );
+    }
+    effects::blur(&mut layer, sigma);
+    target.pixmap.draw_pixmap(
+        left,
+        top,
+        layer.as_ref(),
+        &PixmapPaint::default(),
+        Transform::identity(),
+        target.state.clips.last(),
+    );
+    Ok(())
+}
+
+/// The deepest clip and opacity nesting a frame may use.
+const MAX_CLIPS: usize = 64;
+const MAX_GROUPS: usize = 16;
+
+/// Pushes a clip: the area of `path` (logical coordinates; none clips
+/// everything away) intersected with the clip below it.
+fn push_clip(target: &mut Target, path: Option<&Path>) -> Result<(), String> {
+    if target.state.clips.len() >= MAX_CLIPS {
+        return Err(format!("clips nest at most {} deep", MAX_CLIPS));
+    }
+    let scale = target.scale as f32;
+    let transform = Transform::from_scale(scale, scale);
+    let mut mask = match target.state.clips.last() {
+        Some(top) => top.clone(),
+        None => {
+            let (w, h) = (target.pixmap.width(), target.pixmap.height());
+            let mut mask = Mask::new(w, h).ok_or_else(|| "cannot allocate clip".to_string())?;
+            mask.data_mut().fill(255);
+            mask
+        }
+    };
+    match path {
+        Some(path) => mask.intersect_path(path, FillRule::Winding, true, transform),
+        None => mask.data_mut().fill(0),
+    }
+    target.state.clips.push(mask);
+    Ok(())
+}
+
+fn pop_clip(target: &mut Target) -> Result<(), String> {
+    let floor = target.state.groups.last().map_or(0, |group| group.clips);
+    if target.state.clips.len() <= floor {
+        return Err("popClip without a matching pushClip".to_string());
+    }
+    target.state.clips.pop();
+    Ok(())
+}
+
+/// Starts a group: what is drawn next goes to a transparent layer that
+/// `pop_opacity` composites over the pixels drawn so far.
+fn push_opacity(target: &mut Target, opacity: f32) -> Result<(), String> {
+    if target.state.groups.len() >= MAX_GROUPS {
+        return Err(format!("opacity groups nest at most {} deep", MAX_GROUPS));
+    }
+    let (w, h) = (target.pixmap.width(), target.pixmap.height());
+    let layer = Pixmap::new(w, h).ok_or_else(|| "cannot allocate layer".to_string())?;
+    let saved = std::mem::replace(target.pixmap, layer);
+    let clips = target.state.clips.len();
+    target.state.groups.push(Group {
+        saved,
+        opacity,
+        clips,
+    });
+    Ok(())
+}
+
+fn pop_opacity(target: &mut Target) -> Result<(), String> {
+    match target.state.groups.last() {
+        None => return Err("popOpacity without a matching pushOpacity".to_string()),
+        Some(group) if group.clips != target.state.clips.len() => {
+            return Err("popClip is missing before popOpacity".to_string());
+        }
+        Some(_) => {}
+    }
+    let Some(group) = target.state.groups.pop() else {
+        return Ok(());
+    };
+    let layer = std::mem::replace(target.pixmap, group.saved);
+    let paint = PixmapPaint {
+        opacity: group.opacity,
+        ..PixmapPaint::default()
+    };
+    target
+        .pixmap
+        .draw_pixmap(0, 0, layer.as_ref(), &paint, Transform::identity(), None);
+    Ok(())
 }
 
 /// A rectangle with rounded corners as a path; a zero radius is a plain
@@ -2136,17 +2612,19 @@ fn layout_text(chain: &[&fontdue::Font], text: &str, options: &TextOptions) -> T
 }
 
 /// Composites an 8-bit coverage mask at `(x0, y0)` in `color` over the
-/// pixmap, clipping to its bounds and to the columns `clip.0..clip.1`.
+/// pixmap, clipping to its bounds, to the columns `columns.0..columns.1` and
+/// to the `clip` mask of an active `pushClip`.
 fn blend_mask(
     pixmap: &mut Pixmap,
     (x0, y0): (i32, i32),
     (width, height): (usize, usize),
     mask: &[u8],
     color: (u8, u8, u8, u8),
-    clip: (i32, i32),
+    columns: (i32, i32),
+    clip: Option<&Mask>,
 ) {
     let (pw, ph) = (pixmap.width() as i32, pixmap.height() as i32);
-    let (left, right) = (clip.0.max(0), clip.1.min(pw));
+    let (left, right) = (columns.0.max(0), columns.1.min(pw));
     let pixels = pixmap.pixels_mut();
     let (r, g, b, a) = (
         color.0 as u32,
@@ -2165,6 +2643,10 @@ fn blend_mask(
                 continue;
             }
             let coverage = mask[row * width + column] as u32;
+            let coverage = match clip {
+                Some(clip) => coverage_in(clip, x, y, coverage),
+                None => coverage,
+            };
             if coverage == 0 {
                 continue;
             }
@@ -2173,6 +2655,14 @@ fn blend_mask(
                 continue;
             }
             let index = (y * pw + x) as usize;
+            if alpha == 255 {
+                // Fully covered and opaque: the glyph replaces what is below.
+                if let Some(solid) = PremultipliedColorU8::from_rgba(r as u8, g as u8, b as u8, 255)
+                {
+                    pixels[index] = solid;
+                }
+                continue;
+            }
             let dst = pixels[index];
             let inverse = 255 - alpha;
             let na = alpha + dst.alpha() as u32 * inverse / 255;
@@ -2190,6 +2680,7 @@ fn blend_mask(
 
 /// Draws a laid-out text with its origin at logical `(x, y)`, rasterizing
 /// each glyph at the window's `scale` (through the glyph cache).
+#[allow(clippy::too_many_arguments)]
 fn draw_layout(
     pixmap: &mut Pixmap,
     cache: &mut GlyphCache,
@@ -2198,9 +2689,10 @@ fn draw_layout(
     (x, y): (f32, f32),
     scale: f32,
     color: (u8, u8, u8, u8),
+    clip: Option<&Mask>,
 ) {
     let px = layout.size * scale;
-    let clip = match layout.clip {
+    let columns = match layout.clip {
         Some((left, right)) => (
             ((x + left) * scale).floor() as i32,
             ((x + right) * scale).ceil() as i32,
@@ -2230,6 +2722,7 @@ fn draw_layout(
             (metrics.width, metrics.height),
             mask,
             color,
+            columns,
             clip,
         );
     }
@@ -2518,6 +3011,12 @@ fn builtin_poll(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
             }),
         );
     }
+    // A sleeping task's deadline also ends the wait, so `task.wait` keeps
+    // its timing while `fps = "auto"` idles for up to a second.
+    let timeout = match task::next_due(vm) {
+        Some(due) => timeout.min(due.saturating_duration_since(Instant::now())),
+        None => timeout,
+    };
     pump(timeout)?;
     drain_media_commands();
     let events = EVENTS.with(|events| std::mem::take(&mut *events.borrow_mut()));
@@ -2529,23 +3028,24 @@ fn builtin_poll(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 fn builtin_clear(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let id = integer_arg(args, 0, "window")?;
     let (r, g, b, a) = color_arg(args, 1, "color")?;
-    with_window(id, |win| {
+    with_target(id, |win| {
         win.pixmap.fill(Color::from_rgba8(r, g, b, a));
         Ok(())
     })?;
     Ok(vec![])
 }
 
-/// `__ui_fill_rect(window, x, y, width, height, color, radius?)`.
+/// `__ui_fill_rect(window, x, y, width, height, color, radius?, gradient?,
+/// shadow?)`.
 fn builtin_fill_rect(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let (id, x, y, w, h) = rect_args(args)?;
     let color = color_arg(args, 5, "color")?;
     let radius = optional_float_arg(args, 6, "radius", 0.0)? as f32;
-    with_window(id, |win| {
+    let gradient = numbers_arg(args, 7, "gradient")?;
+    let shadow = numbers_arg(args, 8, "shadow")?;
+    with_target(id, |target| {
         if let Some(path) = rounded_rect(x, y, w, h, radius) {
-            let transform = Transform::from_scale(win.scale as f32, win.scale as f32);
-            win.pixmap
-                .fill_path(&path, &paint(color), FillRule::Winding, transform, None);
+            fill_shape(target, &path, color, gradient.as_deref(), shadow.as_deref())?;
         }
         Ok(())
     })?;
@@ -2558,11 +3058,16 @@ fn builtin_stroke_rect(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, Strin
     let color = color_arg(args, 5, "color")?;
     let radius = optional_float_arg(args, 6, "radius", 0.0)? as f32;
     let width = optional_float_arg(args, 7, "lineWidth", 1.0)?;
-    with_window(id, |win| {
+    with_target(id, |win| {
         if let Some(path) = rounded_rect(x, y, w, h, radius) {
             let transform = Transform::from_scale(win.scale as f32, win.scale as f32);
-            win.pixmap
-                .stroke_path(&path, &paint(color), &stroke(width), transform, None);
+            win.pixmap.stroke_path(
+                &path,
+                &paint(color),
+                &stroke(width),
+                transform,
+                win.state.clips.last(),
+            );
         }
         Ok(())
     })?;
@@ -2578,21 +3083,27 @@ fn builtin_line(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let y2 = float_arg(args, 4, "y2")? as f32;
     let color = color_arg(args, 5, "color")?;
     let width = optional_float_arg(args, 6, "lineWidth", 1.0)?;
-    with_window(id, |win| {
+    with_target(id, |win| {
         let mut pb = PathBuilder::new();
         pb.move_to(x1, y1);
         pb.line_to(x2, y2);
         if let Some(path) = pb.finish() {
             let transform = Transform::from_scale(win.scale as f32, win.scale as f32);
-            win.pixmap
-                .stroke_path(&path, &paint(color), &stroke(width), transform, None);
+            win.pixmap.stroke_path(
+                &path,
+                &paint(color),
+                &stroke(width),
+                transform,
+                win.state.clips.last(),
+            );
         }
         Ok(())
     })?;
     Ok(vec![])
 }
 
-/// `__ui_circle(window, cx, cy, radius, color, fill, lineWidth?)`.
+/// `__ui_circle(window, cx, cy, radius, color, fill, lineWidth?, gradient?,
+/// shadow?)`.
 fn builtin_circle(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let id = integer_arg(args, 0, "window")?;
     let cx = float_arg(args, 1, "x")? as f32;
@@ -2601,18 +3112,24 @@ fn builtin_circle(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let color = color_arg(args, 4, "color")?;
     let fill = bool_arg(args, 5, "fill", true)?;
     let width = optional_float_arg(args, 6, "lineWidth", 1.0)?;
+    let gradient = numbers_arg(args, 7, "gradient")?;
+    let shadow = numbers_arg(args, 8, "shadow")?;
     if radius < 0.0 {
         return Err("radius must be non-negative".to_string());
     }
-    with_window(id, |win| {
+    with_target(id, |win| {
         if let Some(path) = PathBuilder::from_circle(cx, cy, radius) {
             let transform = Transform::from_scale(win.scale as f32, win.scale as f32);
             if fill {
-                win.pixmap
-                    .fill_path(&path, &paint(color), FillRule::Winding, transform, None);
+                fill_shape(win, &path, color, gradient.as_deref(), shadow.as_deref())?;
             } else {
-                win.pixmap
-                    .stroke_path(&path, &paint(color), &stroke(width), transform, None);
+                win.pixmap.stroke_path(
+                    &path,
+                    &paint(color),
+                    &stroke(width),
+                    transform,
+                    win.state.clips.last(),
+                );
             }
         }
         Ok(())
@@ -2620,7 +3137,8 @@ fn builtin_circle(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     Ok(vec![])
 }
 
-/// `__ui_polygon(window, points, color, fill, lineWidth?)` where `points`
+/// `__ui_polygon(window, points, color, fill, lineWidth?, gradient?, shadow?)`
+/// where `points`
 /// is a flat `{x1, y1, x2, y2, ...}` array.
 fn builtin_polygon(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let id = integer_arg(args, 0, "window")?;
@@ -2628,18 +3146,24 @@ fn builtin_polygon(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let color = color_arg(args, 2, "color")?;
     let fill = bool_arg(args, 3, "fill", true)?;
     let width = optional_float_arg(args, 4, "lineWidth", 1.0)?;
+    let gradient = numbers_arg(args, 5, "gradient")?;
+    let shadow = numbers_arg(args, 6, "shadow")?;
     if points.len() < 2 {
         return Err("points must hold at least two points".to_string());
     }
-    with_window(id, |win| {
+    with_target(id, |win| {
         if let Some(path) = polygon_path(&points) {
             let transform = Transform::from_scale(win.scale as f32, win.scale as f32);
             if fill {
-                win.pixmap
-                    .fill_path(&path, &paint(color), FillRule::Winding, transform, None);
+                fill_shape(win, &path, color, gradient.as_deref(), shadow.as_deref())?;
             } else {
-                win.pixmap
-                    .stroke_path(&path, &paint(color), &stroke(width), transform, None);
+                win.pixmap.stroke_path(
+                    &path,
+                    &paint(color),
+                    &stroke(width),
+                    transform,
+                    win.state.clips.last(),
+                );
             }
         }
         Ok(())
@@ -2730,16 +3254,17 @@ fn builtin_text(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let (options, chain) = text_args(args, 4, 6)?;
     let fonts: Vec<&fontdue::Font> = chain.iter().map(|(_, font)| font.as_ref()).collect();
     let layout = layout_text(&fonts, &text, &options);
-    with_window(id, |win| {
+    with_target(id, |target| {
         GLYPHS.with(|cache| {
             draw_layout(
-                &mut win.pixmap,
+                target.pixmap,
                 &mut cache.borrow_mut(),
                 &chain,
                 &layout,
                 (x, y),
-                win.scale as f32,
+                target.scale as f32,
                 color,
+                target.state.clips.last(),
             )
         });
         Ok(())
@@ -2893,6 +3418,17 @@ fn builtin_draw_image(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String
     if radius < 0.0 {
         return Err("radius must be non-negative".to_string());
     }
+    if image == id {
+        return Err("a canvas cannot be drawn onto itself".to_string());
+    }
+    // A canvas is lifted out while it is drawn, so drawing it onto another
+    // canvas does not borrow the table twice.
+    if let Some(canvas) = CANVASES.with(|canvases| canvases.borrow_mut().remove(&image)) {
+        let result = draw_canvas(id, &canvas, x, y, width, height, opacity, radius, fit);
+        CANVASES.with(|canvases| canvases.borrow_mut().insert(image, canvas));
+        result?;
+        return Ok(vec![]);
+    }
     IMAGES.with(|images| {
         let mut images = images.borrow_mut();
         let entry = images
@@ -2911,7 +3447,7 @@ fn builtin_draw_image(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String
             if height > 0.0 { height } else { image_h },
         );
         let (src, dest) = images::place(image_w, image_h, target, fit);
-        with_window(id, |win| {
+        with_target(id, |win| {
             let scale = win.scale as f32;
             let (left, top, w, h) = images::snap((
                 dest.0 * scale,
@@ -2938,18 +3474,360 @@ fn builtin_draw_image(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String
                 }
             };
             images::draw(
-                &mut win.pixmap,
+                win.pixmap,
                 prepared.pixmap.as_ref(),
                 prepared.opaque,
                 left,
                 top,
                 opacity,
                 radius * scale,
+                win.state.clips.last(),
             );
             Ok(())
         })
     })?;
     Ok(vec![])
+}
+
+/// `__ui_canvas(width, height, scale?)` makes an off-screen surface of
+/// `width` × `height` logical pixels at `scale` physical pixels per logical
+/// one (default 1), transparent at first, and returns its id. Drawing
+/// natives take the id like a window's, and `__ui_draw_image` draws it.
+fn builtin_canvas(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let width = float_arg(args, 0, "width")?;
+    let height = float_arg(args, 1, "height")?;
+    let scale = optional_float_arg(args, 2, "scale", 1.0)?;
+    if width <= 0.0 || height <= 0.0 || scale <= 0.0 {
+        return Err("width, height and scale must be positive".to_string());
+    }
+    let (pw, ph) = ((width * scale).ceil(), (height * scale).ceil());
+    if pw > u32::MAX as f64 || ph > u32::MAX as f64 {
+        return Err("canvas is too large".to_string());
+    }
+    let (pw, ph) = (pw as u32, ph as u32);
+    images::check_size(pw, ph, Limits::default())?;
+    let pixmap = Pixmap::new(pw, ph).ok_or_else(|| "canvas is too large".to_string())?;
+    let id = next_id();
+    CANVASES.with(|canvases| {
+        canvases.borrow_mut().insert(
+            id,
+            Canvas {
+                pixmap,
+                scale,
+                state: DrawState::default(),
+            },
+        )
+    });
+    Ok(vec![integer(id)])
+}
+
+/// `__ui_free_canvas(canvas)`.
+fn builtin_free_canvas(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = integer_arg(args, 0, "canvas")?;
+    CANVASES.with(|canvases| canvases.borrow_mut().remove(&id));
+    Ok(vec![])
+}
+
+/// `__ui_push_clip(target, x, y, width, height, radius?)` limits drawing to
+/// a (rounded) rectangle inside the current clip.
+fn builtin_push_clip(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let (id, x, y, w, h) = rect_args(args)?;
+    let radius = optional_float_arg(args, 5, "radius", 0.0)? as f32;
+    if radius < 0.0 {
+        return Err("radius must be non-negative".to_string());
+    }
+    with_target(id, |target| {
+        let path = rounded_rect(x, y, w, h, radius);
+        push_clip(target, path.as_ref())
+    })?;
+    Ok(vec![])
+}
+
+/// `__ui_push_clip_path(target, path)` limits drawing to the inside of a
+/// path.
+fn builtin_push_clip_path(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = integer_arg(args, 0, "target")?;
+    let path = path_arg(args, 1)?;
+    with_target(id, |target| push_clip(target, Some(&path)))?;
+    Ok(vec![])
+}
+
+/// `__ui_pop_clip(target)`.
+fn builtin_pop_clip(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = integer_arg(args, 0, "target")?;
+    with_target(id, pop_clip)?;
+    Ok(vec![])
+}
+
+/// `__ui_push_opacity(target, opacity)`.
+fn builtin_push_opacity(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = integer_arg(args, 0, "target")?;
+    let opacity = float_arg(args, 1, "opacity")? as f32;
+    if !(0.0..=1.0).contains(&opacity) {
+        return Err("opacity must be from 0 to 1".to_string());
+    }
+    with_target(id, |target| push_opacity(target, opacity))?;
+    Ok(vec![])
+}
+
+/// `__ui_pop_opacity(target)`.
+fn builtin_pop_opacity(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = integer_arg(args, 0, "target")?;
+    with_target(id, pop_opacity)?;
+    Ok(vec![])
+}
+
+/// `__ui_fill_path(target, path, color, gradient?, shadow?, evenOdd?)`.
+fn builtin_fill_path(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = integer_arg(args, 0, "target")?;
+    let path = path_arg(args, 1)?;
+    let color = color_arg(args, 2, "color")?;
+    let gradient = numbers_arg(args, 3, "gradient")?;
+    let shadow = numbers_arg(args, 4, "shadow")?;
+    let even_odd = bool_arg(args, 5, "evenOdd", false)?;
+    with_target(id, |target| {
+        if even_odd {
+            // Shadows and gradients go through `fill_shape`, which fills
+            // with the winding rule; even-odd is the plain-color case.
+            if gradient.is_some() || shadow.is_some() {
+                return Err("evenOdd cannot be combined with a gradient or shadow".to_string());
+            }
+            let scale = target.scale as f32;
+            target.pixmap.fill_path(
+                &path,
+                &paint(color),
+                FillRule::EvenOdd,
+                Transform::from_scale(scale, scale),
+                target.state.clips.last(),
+            );
+            return Ok(());
+        }
+        fill_shape(target, &path, color, gradient.as_deref(), shadow.as_deref())
+    })?;
+    Ok(vec![])
+}
+
+/// `__ui_stroke_path(target, path, color, lineWidth?, cap?, join?)`.
+fn builtin_stroke_path(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = integer_arg(args, 0, "target")?;
+    let path = path_arg(args, 1)?;
+    let color = color_arg(args, 2, "color")?;
+    let width = optional_float_arg(args, 3, "lineWidth", 1.0)?;
+    let cap = match args.get(4) {
+        None | Some(Value::Nil) => "butt".to_string(),
+        _ => string_arg(args, 4, "cap")?,
+    };
+    let join = match args.get(5) {
+        None | Some(Value::Nil) => "miter".to_string(),
+        _ => string_arg(args, 5, "join")?,
+    };
+    let stroke = styled_stroke(width, &cap, &join)?;
+    with_target(id, |target| {
+        let scale = target.scale as f32;
+        target.pixmap.stroke_path(
+            &path,
+            &paint(color),
+            &stroke,
+            Transform::from_scale(scale, scale),
+            target.state.clips.last(),
+        );
+        Ok(())
+    })?;
+    Ok(vec![])
+}
+
+/// The largest blur radius, in logical pixels, a script may ask for.
+const MAX_BLUR: f64 = 200.0;
+
+/// `__ui_blur_region(target, x, y, width, height, radius, cornerRadius?)`
+/// blurs what is already drawn under a rectangle, the way a CSS
+/// `backdrop-filter` does. `radius` is the gaussian's standard deviation.
+fn builtin_blur_region(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let (id, x, y, w, h) = rect_args(args)?;
+    let sigma = float_arg(args, 5, "radius")?;
+    let corner = optional_float_arg(args, 6, "cornerRadius", 0.0)? as f32;
+    if !(0.0..=MAX_BLUR).contains(&sigma) {
+        return Err(format!("radius must be from 0 to {}", MAX_BLUR));
+    }
+    if corner < 0.0 {
+        return Err("cornerRadius must be non-negative".to_string());
+    }
+    if sigma == 0.0 {
+        return Ok(vec![]);
+    }
+    with_target(id, |target| {
+        let scale = target.scale as f32;
+        let (left, top, width, height) = images::snap((x * scale, y * scale, w * scale, h * scale));
+        let (pw, ph) = (target.pixmap.width() as i64, target.pixmap.height() as i64);
+        // Blur a margin around the rectangle too, so its edges see their
+        // surroundings instead of repeating their own border.
+        let pad = (sigma as f32 * scale * 3.0).ceil() as i64;
+        let x0 = (left as i64 - pad).max(0);
+        let y0 = (top as i64 - pad).max(0);
+        let x1 = (left as i64 + width as i64 + pad).min(pw);
+        let y1 = (top as i64 + height as i64 + pad).min(ph);
+        if x1 <= x0 || y1 <= y0 || width == 0 || height == 0 {
+            return Ok(());
+        }
+        let (rw, rh) = ((x1 - x0) as usize, (y1 - y0) as usize);
+        let mut region =
+            Pixmap::new(rw as u32, rh as u32).ok_or_else(|| "cannot allocate blur".to_string())?;
+        let stride = pw as usize * 4;
+        let source = target.pixmap.data();
+        for row in 0..rh {
+            let from = (y0 as usize + row) * stride + x0 as usize * 4;
+            region.data_mut()[row * rw * 4..(row + 1) * rw * 4]
+                .copy_from_slice(&source[from..from + rw * 4]);
+        }
+        timed_blur(&mut region, sigma as f32 * scale);
+        let mut cover =
+            Mask::new(rw as u32, rh as u32).ok_or_else(|| "cannot allocate blur".to_string())?;
+        if let Some(path) = rounded_rect(
+            left as f32,
+            top as f32,
+            width as f32,
+            height as f32,
+            corner * scale,
+        ) {
+            cover.fill_path(
+                &path,
+                FillRule::Winding,
+                true,
+                Transform::from_translate(-x0 as f32, -y0 as f32),
+            );
+        }
+        effects::blend_region(
+            target.pixmap,
+            &region,
+            x0 as i32,
+            y0 as i32,
+            Some(&cover),
+            target.state.clips.last(),
+        );
+        Ok(())
+    })?;
+    Ok(vec![])
+}
+
+/// `__ui_blur_image(image, radius)` makes a new image with every frame
+/// blurred by a gaussian of standard deviation `radius` pixels.
+fn builtin_blur_image(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = integer_arg(args, 0, "image")?;
+    let sigma = float_arg(args, 1, "radius")?;
+    if !(0.0..=MAX_BLUR).contains(&sigma) {
+        return Err(format!("radius must be from 0 to {}", MAX_BLUR));
+    }
+    let entry = IMAGES.with(|images| {
+        let images = images.borrow();
+        let source = images
+            .get(&id)
+            .ok_or_else(|| "image was freed".to_string())?;
+        let frames = source
+            .frames
+            .iter()
+            .map(|frame| {
+                let mut pixmap = frame.pixmap.clone();
+                timed_blur(&mut pixmap, sigma as f32);
+                pixmap
+            })
+            .collect();
+        let decoded = Decoded {
+            frames,
+            delays: source.delays.clone(),
+            loop_count: source.loop_count,
+        };
+        Ok::<ImageEntry, String>(ImageEntry::new(decoded, source.limits))
+    })?;
+    Ok(register_image(entry))
+}
+
+/// `__ui_get_pixel(target, x, y)` returns the red, green, blue and alpha
+/// (0 to 255, not premultiplied) of the pixel under the logical point.
+fn builtin_get_pixel(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = integer_arg(args, 0, "target")?;
+    let x = float_arg(args, 1, "x")?;
+    let y = float_arg(args, 2, "y")?;
+    let pixel = with_target(id, |target| {
+        let (px, py) = ((x * target.scale).floor(), (y * target.scale).floor());
+        let (w, h) = (target.pixmap.width() as f64, target.pixmap.height() as f64);
+        if px < 0.0 || py < 0.0 || px >= w || py >= h {
+            return Err("pixel is outside the surface".to_string());
+        }
+        let pixel = target.pixmap.pixels()[(py as usize) * (w as usize) + px as usize];
+        Ok(pixel.demultiply())
+    })?;
+    Ok(vec![
+        integer(pixel.red() as u64),
+        integer(pixel.green() as u64),
+        integer(pixel.blue() as u64),
+        integer(pixel.alpha() as u64),
+    ])
+}
+
+/// Draws a canvas like an image: `__ui_draw_image` with a canvas id lands
+/// here. The canvas is resampled to the size it covers unless it is drawn
+/// one to one.
+#[allow(clippy::too_many_arguments)]
+fn draw_canvas(
+    id: u64,
+    canvas: &Canvas,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    opacity: f32,
+    radius: f32,
+    fit: Fit,
+) -> Result<(), String> {
+    let (pixel_w, pixel_h) = (canvas.pixmap.width(), canvas.pixmap.height());
+    let scale = canvas.scale as f32;
+    let target = (
+        x,
+        y,
+        if width > 0.0 {
+            width
+        } else {
+            pixel_w as f32 / scale
+        },
+        if height > 0.0 {
+            height
+        } else {
+            pixel_h as f32 / scale
+        },
+    );
+    let (src, dest) = images::place(pixel_w as f32, pixel_h as f32, target, fit);
+    with_target(id, |dst| {
+        let scale = dst.scale as f32;
+        let (left, top, w, h) = images::snap((
+            dest.0 * scale,
+            dest.1 * scale,
+            dest.2 * scale,
+            dest.3 * scale,
+        ));
+        if w == 0 || h == 0 || opacity == 0.0 {
+            return Ok(());
+        }
+        let resampled;
+        let source =
+            if src == (0.0, 0.0, pixel_w as f32, pixel_h as f32) && (w, h) == (pixel_w, pixel_h) {
+                &canvas.pixmap
+            } else {
+                resampled = images::resample(&canvas.pixmap, src, w, h)
+                    .ok_or_else(|| "cannot scale canvas".to_string())?;
+                &resampled
+            };
+        images::draw(
+            dst.pixmap,
+            source.as_ref(),
+            false,
+            left,
+            top,
+            opacity,
+            radius * scale,
+            dst.state.clips.last(),
+        );
+        Ok(())
+    })
 }
 
 /// `__ui_load_font(path)` reads a TrueType or OpenType font and returns its
@@ -3018,11 +3896,74 @@ fn builtin_set_fallback_fonts(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>
     Ok(vec![])
 }
 
-/// `__ui_present(window)` shows what has been drawn since the last call.
+/// `__ui_present(window, dirty?)` shows what has been drawn since the last
+/// call. `dirty` is a flat `{x, y, w, h, ...}` array of logical rectangles
+/// that changed; when given, only those are copied to the screen.
 fn builtin_present(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let id = integer_arg(args, 0, "window")?;
-    with_window(id, blit)?;
+    let dirty = match args.get(1) {
+        None | Some(Value::Nil) => None,
+        _ => Some(points_arg(args, 1, "dirty")?),
+    };
+    let started = Instant::now();
+    with_window(id, |win| {
+        if !win.state.groups.is_empty() || !win.state.clips.is_empty() {
+            // Drop the unfinished layers so the next frame starts clean.
+            let state = std::mem::take(&mut win.state);
+            if let Some(first) = state.groups.into_iter().next() {
+                win.pixmap = first.saved;
+            }
+            return Err("popClip or popOpacity is missing before present".to_string());
+        }
+        let rects = dirty.as_ref().map(|points| {
+            let scale = win.scale as f32;
+            points
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&[(x, y), (w, h)]| {
+                    let (x0, y0) = ((x * scale).floor(), (y * scale).floor());
+                    let (x1, y1) = (((x + w) * scale).ceil(), ((y + h) * scale).ceil());
+                    (x0 as i32, y0 as i32, (x1 - x0) as i32, (y1 - y0) as i32)
+                })
+                .collect::<Vec<_>>()
+        });
+        blit(win, rects.as_deref())
+    })?;
+    let now = Instant::now();
+    STATS.with(|stats| {
+        let mut stats = stats.borrow_mut();
+        let present = now.duration_since(started).as_secs_f64();
+        let since = stats
+            .last_end
+            .map_or(0.0, |end| started.duration_since(end).as_secs_f64());
+        stats.draw_ms = (since - stats.blur).max(0.0) * 1000.0;
+        stats.blur_ms = stats.blur * 1000.0;
+        stats.present_ms = present * 1000.0;
+        stats.frame_ms = (since + present) * 1000.0;
+        stats.blur = 0.0;
+        stats.frames += 1;
+        stats.last_end = Some(now);
+    });
     Ok(vec![])
+}
+
+/// `__ui_stats()` returns the timing of the last presented frame in
+/// milliseconds: `draw` (everything between presents except blur), `blur`,
+/// `present` and `frame` (all three together), plus the `frames` presented so
+/// far.
+fn builtin_stats(_vm: &mut VM, _args: &[Value]) -> Result<Vec<Value>, String> {
+    let stats = STATS.with(|stats| {
+        let stats = stats.borrow();
+        record(vec![
+            ("frames", integer(stats.frames)),
+            ("draw", Value::Float(stats.draw_ms)),
+            ("blur", Value::Float(stats.blur_ms)),
+            ("present", Value::Float(stats.present_ms)),
+            ("frame", Value::Float(stats.frame_ms)),
+        ])
+    });
+    Ok(vec![stats])
 }
 
 /// A non-negative number of seconds small enough for every backend's clock.
@@ -3433,6 +4374,7 @@ mod tests {
             &[255; 4],
             (255, 0, 0, 255),
             open,
+            None,
         );
         let pixels = pixmap.pixels();
         assert_eq!(
@@ -3444,7 +4386,15 @@ mod tests {
             (255, 255, 255)
         );
         // Half coverage of an opaque color leaves a blend.
-        blend_mask(&mut pixmap, (0, 0), (1, 1), &[128], (0, 0, 255, 255), open);
+        blend_mask(
+            &mut pixmap,
+            (0, 0),
+            (1, 1),
+            &[128],
+            (0, 0, 255, 255),
+            open,
+            None,
+        );
         let blended = pixmap.pixels()[0];
         assert!(blended.red() < 255 && blended.red() > 0);
         assert_eq!(blended.alpha(), 255);
@@ -3456,6 +4406,7 @@ mod tests {
             &[255; 4],
             (0, 0, 0, 255),
             (1, 3),
+            None,
         );
         let row: Vec<u8> = pixmap.pixels()[4..8].iter().map(|p| p.red()).collect();
         assert_eq!(row, vec![255, 0, 0, 255]);
@@ -3723,6 +4674,7 @@ mod tests {
                 (10.0, 5.0),
                 scale,
                 color,
+                None,
             );
             let width = pixmap.width() as usize;
             let inked: Vec<usize> = pixmap
@@ -4006,6 +4958,21 @@ mod tests {
     }
 
     #[test]
+    fn damage_rects_are_clamped_to_the_surface() {
+        let rects = [
+            (-5, -5, 10, 10),
+            (95, 95, 20, 20),
+            (200, 0, 5, 5),
+            (3, 3, 0, 4),
+        ];
+        assert_eq!(
+            clamp_rects(&rects, 100, 100),
+            Some(vec![(0, 0, 5, 5), (95, 95, 5, 5)])
+        );
+        assert_eq!(clamp_rects(&[(200, 0, 5, 5)], 100, 100), None);
+    }
+
+    #[test]
     fn media_commands_become_keys_and_session_actions() {
         let key = |event| media_command(&event);
         assert_eq!(
@@ -4129,5 +5096,104 @@ mod tests {
         ]);
         let err = points_arg(&[table], 0, "points").unwrap_err();
         assert!(err.contains("pairs"), "{}", err);
+    }
+
+    fn red_at(pixmap: &Pixmap, x: u32, y: u32) -> (u8, u8, u8, u8) {
+        let p = pixmap.pixels()[(y * pixmap.width() + x) as usize];
+        (p.red(), p.green(), p.blue(), p.alpha())
+    }
+
+    #[test]
+    fn paths_are_built_from_commands() {
+        let square = [0.0, 0.0, 0.0, 1.0, 10.0, 0.0, 1.0, 10.0, 10.0, 4.0];
+        assert!(path_from_commands(&square).is_ok());
+        assert!(path_from_commands(&[]).is_err());
+        assert!(path_from_commands(&[9.0]).unwrap_err().contains("unknown"));
+        assert!(
+            path_from_commands(&[1.0, 5.0])
+                .unwrap_err()
+                .contains("middle")
+        );
+    }
+
+    #[test]
+    fn gradients_need_stops_and_extent() {
+        let linear = [0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 4278190335.0, 1.0, 65535.0];
+        assert!(gradient_shader(&linear).is_ok());
+        assert!(gradient_shader(&linear[..7]).is_err());
+        let radial = [1.0, 5.0, 5.0, 0.0, 0.0, 0.0, 4278190335.0, 1.0, 65535.0];
+        assert!(gradient_shader(&radial).unwrap_err().contains("degenerate"));
+    }
+
+    #[test]
+    fn clips_and_opacity_groups_shape_drawing() {
+        let mut pixmap = Pixmap::new(10, 10).unwrap();
+        pixmap.fill(Color::WHITE);
+        let mut state = DrawState::default();
+        let mut target = Target {
+            pixmap: &mut pixmap,
+            scale: 1.0,
+            state: &mut state,
+        };
+        let whole = rounded_rect(0.0, 0.0, 10.0, 10.0, 0.0).unwrap();
+        let left = rounded_rect(0.0, 0.0, 5.0, 10.0, 0.0);
+        push_clip(&mut target, left.as_ref()).unwrap();
+        fill_shape(&mut target, &whole, (255, 0, 0, 255), None, None).unwrap();
+        pop_clip(&mut target).unwrap();
+        assert!(pop_clip(&mut target).is_err());
+        // An empty clip draws nothing.
+        push_clip(&mut target, None).unwrap();
+        fill_shape(&mut target, &whole, (0, 0, 255, 255), None, None).unwrap();
+        pop_clip(&mut target).unwrap();
+
+        push_opacity(&mut target, 0.5).unwrap();
+        push_clip(&mut target, left.as_ref()).unwrap();
+        assert!(pop_opacity(&mut target).is_err());
+        pop_clip(&mut target).unwrap();
+        fill_shape(&mut target, &whole, (0, 0, 0, 255), None, None).unwrap();
+        pop_opacity(&mut target).unwrap();
+        assert!(pop_opacity(&mut target).is_err());
+
+        let (r, _, _, _) = red_at(&pixmap, 2, 5);
+        assert!(r > 100 && r < 160, "red under half black: {}", r);
+        let (r, g, _, a) = red_at(&pixmap, 7, 5);
+        assert!(
+            r > 100 && r < 160 && g == r && a == 255,
+            "{} {} {}",
+            r,
+            g,
+            a
+        );
+    }
+
+    #[test]
+    fn gradients_and_shadows_paint() {
+        let mut pixmap = Pixmap::new(40, 40).unwrap();
+        pixmap.fill(Color::WHITE);
+        let mut state = DrawState::default();
+        let mut target = Target {
+            pixmap: &mut pixmap,
+            scale: 1.0,
+            state: &mut state,
+        };
+        let rect = rounded_rect(10.0, 10.0, 20.0, 20.0, 0.0).unwrap();
+        // Black to white across the rectangle, with a black shadow.
+        let gradient = [0.0, 10.0, 0.0, 30.0, 0.0, 0.0, 255.0, 1.0, 4294967295.0];
+        let shadow = [8.0, 0.0, 0.0, 0.0, 255.0];
+        fill_shape(
+            &mut target,
+            &rect,
+            (0, 0, 0, 255),
+            Some(&gradient),
+            Some(&shadow),
+        )
+        .unwrap();
+        let (left, ..) = red_at(&pixmap, 11, 20);
+        let (right, ..) = red_at(&pixmap, 28, 20);
+        assert!(left < 60 && right > 190, "{} {}", left, right);
+        let (halo, ..) = red_at(&pixmap, 8, 20);
+        assert!(halo < 250, "shadow reaches outside the shape: {}", halo);
+        let (far, ..) = red_at(&pixmap, 0, 0);
+        assert_eq!(far, 255);
     }
 }
