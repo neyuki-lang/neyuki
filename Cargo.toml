@@ -16,6 +16,14 @@ path = "src/lib.rs"
 name = "neyuki"
 path = "src/main.rs"
 
+[features]
+default = ["webview"]
+# `@neyuki/webview`: pages rendered by the system web engine through `wry`.
+# On Linux this links WebKitGTK and GTK 3 (libwebkit2gtk-4.1-dev, libgtk-3-dev);
+# build with `--no-default-features` where those are not installed.
+webview = ["dep:wry", "dep:gtk"]
+mimalloc = ["dep:mimalloc"]
+
 [dependencies]
 num-bigint = "0.4"
 num-integer = "0.1"
@@ -105,6 +113,10 @@ open = "5"
 enigo = "0.6"
 arboard = { version = "3", default-features = false }
 
+# `@neyuki/webview` hosts WebView2 (Windows), WKWebView (macOS) and WebKitGTK
+# (Linux) through `wry`, inside the same `winit` event loop as `@neyuki/ui`.
+wry = { version = "0.52", optional = true }
+
 # `os.date` formats times and reads the local time zone through the
 # operating system (Windows API bindings, /etc/localtime, CoreFoundation).
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
@@ -122,9 +134,6 @@ editpe = { version = "0.2", default-features = false, features = ["std"] }
 # workload mimalloc is built for; it needs a C compiler. Off by default until
 # `neyuki bench` numbers on each release platform justify turning it on.
 mimalloc = { version = "0.1", default-features = false, optional = true }
-
-[features]
-mimalloc = ["dep:mimalloc"]
 
 [target.'cfg(windows)'.dependencies]
 schannel = ">=0.1.23, <0.1.28"
@@ -145,6 +154,8 @@ keyring = { version = "3.6", features = ["apple-native", "async-secret-service",
 # backend would link libxkbcommon; these are protocol bindings only, and
 # `tempfile` holds the keymap the virtual keyboard is given.
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+# `gtk` hosts the web view on Linux, where WebKitGTK cannot live in a winit window.
+gtk = { version = "0.18", optional = true }
 wayland-client = "0.31"
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
