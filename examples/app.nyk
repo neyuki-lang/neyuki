@@ -1,0 +1,9 @@
+-- Shows the details of the running app. Build it with `neyuki build`
+-- (set [app] in neyuki.toml); under `neyuki run` it is not bundled.
+
+local app = os.app()
+if app.bundled then
+    print(app.name .. " " .. app.version)
+else
+    print("running from source")
+end

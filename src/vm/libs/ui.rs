@@ -21,8 +21,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::BufReader;
+use std::io::Cursor;
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -574,6 +573,8 @@ fn create_pending(event_loop: &ActiveEventLoop) {
 }
 
 fn create_window(event_loop: &ActiveEventLoop, request: OpenRequest) -> Result<(u64, f64), String> {
+    let icon = request.icon.or_else(executable_icon);
+    #[allow(unused_mut)]
     let mut attributes = Window::default_attributes()
         .with_title(&request.title)
         .with_inner_size(LogicalSize::new(request.width, request.height))
@@ -581,7 +582,12 @@ fn create_window(event_loop: &ActiveEventLoop, request: OpenRequest) -> Result<(
         .with_visible(request.visible)
         .with_decorations(request.decorations)
         .with_transparent(request.transparent)
-        .with_window_icon(request.icon);
+        .with_window_icon(icon.clone());
+    #[cfg(windows)]
+    {
+        use winit::platform::windows::WindowAttributesExtWindows;
+        attributes = attributes.with_taskbar_icon(icon);
+    }
     if request.min_width > 0.0 || request.min_height > 0.0 {
         attributes =
             attributes.with_min_inner_size(LogicalSize::new(request.min_width, request.min_height));
@@ -1213,9 +1219,23 @@ fn draw_text(
 
 // IMAGES -------------------------------------------------------------------
 
+/// The bytes of a font or image: from the app bundle when the path is
+/// bundled (see `crate::app`), otherwise from disk.
+fn read_asset(path: &str) -> Result<Vec<u8>, String> {
+    crate::app::read(path)
+        .unwrap_or_else(|| std::fs::read(path))
+        .map_err(|err| format!("cannot open {}: {}", path, err))
+}
+
 fn decode_png(path: &str) -> Result<Pixmap, String> {
-    let file = File::open(path).map_err(|err| format!("cannot open {}: {}", path, err))?;
-    let mut decoder = png::Decoder::new(BufReader::new(file));
+    let (rgba, width, height) = decode_png_rgba(path)?;
+    rgba_to_pixmap(&rgba, width, height)
+        .ok_or_else(|| format!("cannot decode {}: image too large", path))
+}
+
+/// Decodes a PNG into straight (not premultiplied) RGBA bytes.
+fn decode_png_rgba(path: &str) -> Result<(Vec<u8>, u32, u32), String> {
+    let mut decoder = png::Decoder::new(Cursor::new(read_asset(path)?));
     decoder.set_transformations(png::Transformations::normalize_to_color8());
     let mut reader = decoder
         .read_info()
@@ -1243,8 +1263,7 @@ fn decode_png(path: &str) -> Result<Pixmap, String> {
             return Err(format!("cannot decode {}: unexpected indexed output", path));
         }
     };
-    rgba_to_pixmap(&rgba, info.width, info.height)
-        .ok_or_else(|| format!("cannot decode {}: image too large", path))
+    Ok((rgba, info.width, info.height))
 }
 
 fn rgba_to_pixmap(rgba: &[u8], width: u32, height: u32) -> Option<Pixmap> {
@@ -1253,6 +1272,20 @@ fn rgba_to_pixmap(rgba: &[u8], width: u32, height: u32) -> Option<Pixmap> {
         *pixel = ColorU8::from_rgba(source[0], source[1], source[2], source[3]).premultiply();
     }
     Some(pixmap)
+}
+
+/// The icon `neyuki build` embedded in this executable, so an app's windows
+/// match its file icon without asking for one. Other platforms take the
+/// app icon from the bundle or desktop file instead.
+#[cfg(windows)]
+fn executable_icon() -> Option<Icon> {
+    use winit::platform::windows::IconExtWindows;
+    Icon::from_resource_name("MAINICON", None).ok()
+}
+
+#[cfg(not(windows))]
+fn executable_icon() -> Option<Icon> {
+    None
 }
 
 // NATIVES ------------------------------------------------------------------
@@ -1613,8 +1646,7 @@ fn builtin_draw_image(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String
 /// id.
 fn builtin_load_font(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let path = string_arg(args, 0, "path")?;
-    let bytes = std::fs::read(&path).map_err(|err| format!("cannot open {}: {}", path, err))?;
-    let entry = load_font(bytes)?;
+    let entry = load_font(read_asset(&path)?)?;
     let id = next_id();
     FONTS.with(|fonts| fonts.borrow_mut().insert(id, entry));
     Ok(vec![integer(id)])
