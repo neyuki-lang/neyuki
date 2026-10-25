@@ -69,6 +69,16 @@ pub(super) struct Decoded {
     pub loop_count: u32,
 }
 
+impl std::fmt::Debug for Decoded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Decoded")
+            .field("frames", &self.frames.len())
+            .field("delays", &self.delays)
+            .field("loop_count", &self.loop_count)
+            .finish()
+    }
+}
+
 /// Decodes a PNG, JPEG, WebP, GIF or BMP image, picking the format from the
 /// leading bytes. Errors are bare reasons; the caller names the source.
 pub(super) fn decode(bytes: &[u8], limits: Limits) -> Result<Decoded, String> {
@@ -254,7 +264,8 @@ pub(super) fn rgba_to_pixmap(mut rgba: Vec<u8>, width: u32, height: u32) -> Opti
     if rgba.len() as u64 != width as u64 * height as u64 * 4 {
         return None;
     }
-    for pixel in rgba.chunks_exact_mut(4) {
+    let (pixels, _) = rgba.as_chunks_mut::<4>();
+    for pixel in pixels {
         if pixel[3] != 255 {
             let c = ColorU8::from_rgba(pixel[0], pixel[1], pixel[2], pixel[3]).premultiply();
             pixel.copy_from_slice(&[c.red(), c.green(), c.blue(), c.alpha()]);
