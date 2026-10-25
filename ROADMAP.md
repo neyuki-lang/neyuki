@@ -60,5 +60,7 @@ This document outlines the architectural milestones and engineering trajectory f
 
 ## Desktop app platform
 - [x] OS media integration for `@neyuki/ui`: now-playing metadata in the system media controls (`ui.mediaSession`) and global media keys as `mediakey` events.
+- [x] Per-user storage in `@neyuki/os`: `dataDir`, `configDir` and `cacheDir` following each platform's conventions, and `protect`/`unprotect` for secrets (DPAPI on Windows, an OS keychain key elsewhere).
+- [x] `@neyuki/ui` window chrome and input: frameless windows with app-drawn title bars (`startDrag`, `startResize`, minimize/maximize/restore, fullscreen, minimum size, icon, drop shadow), pointer cursors, IME text input (`textinput` and `ime` events), click counts for double-click, window state, file drop and DPI change events, `ui.clipboard` and `ui.openUrl`.
 - [ ] Tray icon with a menu whose items arrive as events.
 - [ ] Single-instance apps: a second launch signals and focuses the first.

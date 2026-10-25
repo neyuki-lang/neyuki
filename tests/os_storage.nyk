@@ -1,0 +1,20 @@
+-- os.dataDir, os.configDir and os.cacheDir check the app name before they
+-- touch the file system, and os.unprotect rejects anything protect did not
+-- produce. Real directories and the OS keychain are exercised by the Rust
+-- unit tests, which point them at a temporary directory and a test key.
+
+for _, dir in { os.dataDir, os.configDir, os.cacheDir } do
+    for _, bad in { "", ".", "..", "a/b", "a\\b", "../escape", "c:", "x*", "line\nbreak", "dot." } do
+        local ok, err = try(dir, bad)
+        assert(not ok, `'{bad}' is rejected`)
+        assert(err:find("appName", 1, true) != nil, "the error names the argument")
+    end
+    assert(not try(dir), "appName is required")
+    assert(not try(dir, 42), "appName must be a string")
+end
+
+assert(not try(os.protect), "data is required")
+assert(not try(os.protect, {}), "data must be a string")
+assert(not try(os.unprotect, "not base64 !"), "garbage is rejected")
+assert(not try(os.unprotect, ""), "an empty blob is rejected")
+assert(not try(os.unprotect, "CQECAw=="), "an unknown scheme is rejected")
