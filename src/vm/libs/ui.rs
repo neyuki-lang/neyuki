@@ -2090,6 +2090,9 @@ fn builtin_media_session(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, Str
 /// from the OS media controls.
 fn builtin_media_session_clear(_vm: &mut VM, _args: &[Value]) -> Result<Vec<Value>, String> {
     MEDIA.with(|media| *media.borrow_mut() = None);
+    Ok(vec![])
+}
+
 /// `__ui_drag(window)` lets the window system move the window with the
 /// mouse, as if its title bar were being dragged. Only works while a button
 /// is held; returns whether the system took over.
