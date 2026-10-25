@@ -440,6 +440,9 @@ mod real {
         }
     }
 
+    /// Defines `window.neyuki.postMessage` on top of wry's IPC channel.
+    const BRIDGE_SCRIPT: &str = "window.neyuki = Object.freeze({ postMessage: function (message) { window.ipc.postMessage(String(message)); } });";
+
     // BUILDING ---------------------------------------------------------------
 
     /// Applies `spec` and the event handlers for view `id` to a builder.
@@ -465,9 +468,15 @@ mod real {
         if let Some(agent) = &spec.user_agent {
             builder = builder.with_user_agent(agent.as_str());
         }
-        if let Some(script) = &spec.init_script {
-            builder = builder.with_initialization_script(script.as_str());
+        // `window.neyuki.postMessage(string)` is the page's only way out; it
+        // runs before the page and the app's own init script.
+        let mut script = String::from(BRIDGE_SCRIPT);
+        if let Some(extra) = &spec.init_script {
+            script.push('
+');
+            script.push_str(extra);
         }
+        builder = builder.with_initialization_script(script.as_str());
         if let Some((scheme, dir)) = &spec.assets {
             let dir = dir.clone();
             builder = builder.with_custom_protocol(scheme.clone(), move |_, request| {
