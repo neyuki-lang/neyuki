@@ -1,0 +1,28 @@
+-- Fetch several pages at once: each request runs in its own task, so they
+-- wait on background threads in parallel instead of one after another.
+
+local http = require("@neyuki/http")
+local io = require("@neyuki/io")
+
+local urls = {
+    "https://httpbin.org/get?n=1",
+    "https://httpbin.org/get?n=2",
+    "https://httpbin.org/get?n=3",
+}
+
+local pending = #urls
+for _, url in ipairs(urls) do
+    task.spawn(function()
+        local ok, response = try(http.get, url, { timeout = 15 })
+        if ok then
+            io.write(url, " -> ", response.status, "\n")
+        else
+            io.write(url, " failed: ", response, "\n")
+        end
+        pending -= 1
+    end)
+end
+
+while pending > 0 do
+    task.wait(0.01)
+end

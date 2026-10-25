@@ -1,7 +1,12 @@
 //! Native HTTP primitives backing `@neyuki/http`.
 //!
-//! The client side is a single `__http_request` native built on `ureq`. The
-//! server side is pull-based because natives cannot call back into Neyuki
+//! The client side is `__http_request` on one shared `ureq` agent, plus
+//! `__http_read` / `__http_end` for response bodies that are streamed
+//! instead of buffered. Requests, body reads and `__http_accept` go through
+//! `background::run`: inside a task they run on a worker thread while only
+//! that task waits, anywhere else they block as before.
+//!
+//! The server side is pull-based because natives cannot call back into Neyuki
 //! functions: `__http_listen` opens a listener, `__http_accept` hands back the
 //! next request as a table (keeping the connection parked here under an id)
 //! and `__http_respond` answers it. `lib/http.nyk` builds the `Response`,
@@ -31,6 +36,14 @@ pub(crate) const NATIVES: &[NativeDef] = &[
     NativeDef {
         name: "__http_request",
         func: builtin_request,
+    },
+    NativeDef {
+        name: "__http_read",
+        func: builtin_read,
+    },
+    NativeDef {
+        name: "__http_end",
+        func: builtin_end,
     },
     NativeDef {
         name: "__http_listen",
@@ -85,11 +98,15 @@ struct Forward {
 
 thread_local! {
     // Each server with the largest request body it accepts.
-    static SERVERS: RefCell<HashMap<u64, (tiny_http::Server, u64)>> = RefCell::new(HashMap::new());
+    // Shared so an `accept` waiting on a worker thread can hold one too.
+    static SERVERS: RefCell<HashMap<u64, (Arc<tiny_http::Server>, u64)>> = RefCell::new(HashMap::new());
     // Each parked request keeps its raw body so a proxy can pass it on
     // byte-for-byte; the table Neyuki sees holds the (lossy) string copy.
     static PENDING: RefCell<HashMap<u64, (tiny_http::Request, Vec<u8>)>> = RefCell::new(HashMap::new());
     static FORWARDS: RefCell<HashMap<u64, Forward>> = RefCell::new(HashMap::new());
+    // Streamed response bodies; `None` while a read is in flight on a
+    // worker thread.
+    static STREAMS: RefCell<HashMap<u64, Option<ureq::BodyReader<'static>>>> = RefCell::new(HashMap::new());
     static NEXT_ID: Cell<u64> = const { Cell::new(1) };
 }
 
@@ -253,32 +270,74 @@ fn integer(value: u64) -> Value {
     Value::from_u64(value)
 }
 
-/// `__http_request(method, url, headers?, body?, timeout?, follow?, maxBody?)`
-/// performs one request and returns `{ status, headers, body, url }`. Only
-/// transport failures (DNS, connection, TLS, timeout, too many redirects) and
-/// a response body over `maxBody` bytes are errors.
-fn builtin_request(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let method = string_arg(args, 0, "method")?.to_ascii_uppercase();
-    let url = string_arg(args, 1, "url")?;
-    let headers = headers_arg(args, 2, "headers")?;
-    let body = optional_string_arg(args, 3, "body")?;
-    let timeout = timeout_arg(args, 4, "timeout")?;
-    let follow = bool_arg(args, 5, "follow", true)?;
-    let max_body = max_body_arg(args, 6)?;
+/// The client every request goes through. One agent keeps a pool of
+/// keep-alive connections, so repeated requests to the same host skip the
+/// TCP and TLS handshakes; timeouts and redirects are set per request.
+/// `ureq` advertises and transparently decodes gzip and brotli bodies.
+fn agent() -> &'static ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT.get_or_init(|| {
+        // The crate is built with only the platform TLS backend (see
+        // Cargo.toml), so it must be selected explicitly.
+        let tls = ureq::tls::TlsConfig::builder()
+            .provider(ureq::tls::TlsProvider::NativeTls)
+            .build();
+        ureq::config::Config::builder()
+            .tls_config(tls)
+            .http_status_as_error(false)
+            // Enough idle connections for every worker thread to keep one
+            // to the same host.
+            .max_idle_connections(64)
+            .max_idle_connections_per_host(crate::vm::libs::background::MAX_WORKERS)
+            .build()
+            .new_agent()
+    })
+}
 
-    // The crate is built with only the platform TLS backend (see Cargo.toml),
-    // so it must be selected explicitly.
-    let tls = ureq::tls::TlsConfig::builder()
-        .provider(ureq::tls::TlsProvider::NativeTls)
-        .build();
-    let config = ureq::config::Config::builder()
-        .tls_config(tls)
-        .http_status_as_error(false)
-        .timeout_global(timeout)
-        .max_redirects(if follow { 10 } else { 0 })
-        .build();
-    let agent = config.new_agent();
+/// The largest chunk one `__http_read` call hands back.
+const MAX_READ: u64 = 16 * 1024 * 1024;
 
+/// How much `__http_read` reads when no size is given.
+const DEFAULT_READ: u64 = 64 * 1024;
+
+/// A request as `__http_request` was asked to make it, owned so it can be
+/// performed on a worker thread.
+struct RequestSpec {
+    method: String,
+    url: String,
+    headers: Vec<(String, String)>,
+    body: Option<String>,
+    timeout: Option<Duration>,
+    follow: bool,
+    max_body: u64,
+    stream: bool,
+}
+
+/// A body read to the end, or one left open for `__http_read`.
+enum ResponseBody {
+    Complete(Vec<u8>),
+    Stream(ureq::BodyReader<'static>),
+}
+
+/// What came back, before it is turned into Neyuki values.
+struct RawResponse {
+    status: u16,
+    url: String,
+    headers: Vec<(String, Vec<u8>)>,
+    body: ResponseBody,
+}
+
+fn perform_request(spec: RequestSpec) -> Result<RawResponse, String> {
+    let RequestSpec {
+        method,
+        url,
+        headers,
+        body,
+        timeout,
+        follow,
+        max_body,
+        stream,
+    } = spec;
     let mut builder = ureq::http::Request::builder()
         .method(method.as_str())
         .uri(url.as_str());
@@ -288,39 +347,175 @@ fn builtin_request(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let request = builder
         .body(body.map(String::into_bytes).unwrap_or_default())
         .map_err(|err| format!("cannot build request for `{}`: {}", url, err))?;
+    let configured = agent()
+        .configure_request(request)
+        .max_redirects(if follow { 10 } else { 0 });
+    // A streamed body may legitimately take far longer than any timeout to
+    // arrive, so there the timeout only covers getting the response head.
+    let request = if stream {
+        configured.timeout_recv_response(timeout).build()
+    } else {
+        configured.timeout_global(timeout).build()
+    };
 
-    let mut response = agent
+    let response = agent()
         .run(request)
         .map_err(|err| format!("cannot {} `{}`: {}", method, url, err))?;
 
-    let status = u64::from(response.status().as_u16());
+    let status = response.status().as_u16();
     let final_url = response.get_uri().to_string();
-    let headers = headers_table(
-        response
-            .headers()
-            .iter()
-            .map(|(name, value)| (name.as_str(), value.as_bytes())),
-    );
-    let bytes = response
-        .body_mut()
-        .with_config()
-        // ureq rejects a body that reaches the limit, not one past it.
-        .limit(max_body.saturating_add(1))
-        .read_to_vec()
-        .map_err(|err| match err {
-            ureq::Error::BodyExceedsLimit(_) => format!(
-                "response from `{}` is larger than maxBody ({} bytes)",
-                url, max_body
-            ),
-            err => format!("cannot read response from `{}`: {}", url, err),
-        })?;
+    let headers = response
+        .headers()
+        .iter()
+        .map(|(name, value)| (name.as_str().to_string(), value.as_bytes().to_vec()))
+        .collect();
+    let body = response.into_body();
+    let body = if stream {
+        ResponseBody::Stream(body.into_reader())
+    } else {
+        let bytes = body
+            .into_with_config()
+            // ureq rejects a body that reaches the limit, not one past it.
+            .limit(max_body.saturating_add(1))
+            .read_to_vec()
+            .map_err(|err| match err {
+                ureq::Error::BodyExceedsLimit(_) => format!(
+                    "response from `{}` is larger than maxBody ({} bytes)",
+                    url, max_body
+                ),
+                err => format!("cannot read response from `{}`: {}", url, err),
+            })?;
+        ResponseBody::Complete(bytes)
+    };
+    Ok(RawResponse {
+        status,
+        url: final_url,
+        headers,
+        body,
+    })
+}
 
+/// `__http_request(method, url, headers?, body?, timeout?, follow?, maxBody?,
+/// stream?)` performs one request and returns `{ status, headers, body, url }`,
+/// or with `stream` `{ status, headers, stream, url }`, where `stream` is the
+/// id `__http_read` reads the body from. Only transport failures (DNS,
+/// connection, TLS, timeout, too many redirects) and a response body over
+/// `maxBody` bytes are errors.
+///
+/// Inside a task the request runs on a worker thread and only that task
+/// waits for it; see `background::run`.
+fn builtin_request(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let spec = RequestSpec {
+        method: string_arg(args, 0, "method")?.to_ascii_uppercase(),
+        url: string_arg(args, 1, "url")?,
+        headers: headers_arg(args, 2, "headers")?,
+        body: optional_string_arg(args, 3, "body")?,
+        timeout: timeout_arg(args, 4, "timeout")?,
+        follow: bool_arg(args, 5, "follow", true)?,
+        max_body: max_body_arg(args, 6)?,
+        stream: bool_arg(args, 7, "stream", false)?,
+    };
+    crate::vm::libs::background::run(vm, move || perform_request(spec), finish_request)
+}
+
+/// Builds the table `__http_request` returns, parking a streamed body.
+fn finish_request(_vm: &mut VM, raw: RawResponse) -> Result<Vec<Value>, String> {
+    let headers = headers_table(
+        raw.headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_slice())),
+    );
+    let body = match raw.body {
+        ResponseBody::Complete(bytes) => ("body", Value::string(bytes_to_string(bytes))),
+        ResponseBody::Stream(reader) => {
+            let id = next_id();
+            STREAMS.with(|streams| streams.borrow_mut().insert(id, Some(reader)));
+            ("stream", integer(id))
+        }
+    };
     Ok(vec![record(vec![
-        ("status", integer(status)),
+        ("status", integer(u64::from(raw.status))),
         ("headers", headers),
-        ("body", Value::string(bytes_to_string(bytes))),
-        ("url", Value::string(final_url)),
+        body,
+        ("url", Value::string(raw.url)),
     ])])
+}
+
+/// `__http_read(stream, size?)` reads the next chunk of a streamed response
+/// body: a buffer of at least one and at most `size` bytes (as many as have
+/// arrived), or nil at the end, when the stream is closed. Inside a task
+/// only that task waits for the bytes.
+fn builtin_read(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = integer_arg(args, 0, "stream")?;
+    let size = match args.get(1) {
+        None | Some(Value::Nil) => DEFAULT_READ,
+        _ => integer_arg(args, 1, "size")?,
+    };
+    if size == 0 || size > MAX_READ {
+        return Err(format!("size must be between 1 and {} bytes", MAX_READ));
+    }
+    // The reader leaves the map while a read is in flight, so a second read
+    // of the same stream from another task fails instead of interleaving.
+    let mut reader = STREAMS.with(|streams| match streams.borrow_mut().get_mut(&id) {
+        None => Err("stream is closed".to_string()),
+        Some(slot) => slot
+            .take()
+            .ok_or_else(|| "stream is already being read".to_string()),
+    })?;
+    crate::vm::libs::background::run(
+        vm,
+        move || {
+            let mut chunk = vec![0; size as usize];
+            let read = loop {
+                match reader.read(&mut chunk) {
+                    Ok(read) => break Ok(read),
+                    Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(err) => break Err(format!("cannot read response body: {}", err)),
+                }
+            };
+            // The reader comes back even on failure, so `finish` can retire
+            // the stream rather than leave it marked as being read.
+            Ok((
+                reader,
+                read.map(|read| {
+                    chunk.truncate(read);
+                    chunk
+                }),
+            ))
+        },
+        move |_vm, (reader, chunk)| {
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(err) => {
+                    STREAMS.with(|streams| streams.borrow_mut().remove(&id));
+                    return Err(err);
+                }
+            };
+            STREAMS.with(|streams| {
+                let mut streams = streams.borrow_mut();
+                // At the end, or closed while the read was in flight: the
+                // reader goes. Otherwise it is put back for the next read.
+                if chunk.is_empty() || !streams.contains_key(&id) {
+                    streams.remove(&id);
+                } else {
+                    streams.insert(id, Some(reader));
+                }
+            });
+            if chunk.is_empty() {
+                return Ok(vec![Value::Nil]);
+            }
+            Ok(vec![Value::Buffer(Rc::new(RefCell::new(
+                crate::vm::buffer::VmBuffer::from_bytes(chunk),
+            )))])
+        },
+    )
+}
+
+/// `__http_end(stream)` closes a streamed body, dropping its connection.
+fn builtin_end(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = integer_arg(args, 0, "stream")?;
+    STREAMS.with(|streams| streams.borrow_mut().remove(&id));
+    Ok(vec![Value::Nil])
 }
 
 /// `__http_listen(host, port, maxBody?)` binds a server and returns its id
@@ -343,7 +538,11 @@ fn builtin_listen(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         .map(|addr| u64::from(addr.port()))
         .unwrap_or(port);
     let id = next_id();
-    SERVERS.with(|servers| servers.borrow_mut().insert(id, (server, max_body)));
+    SERVERS.with(|servers| {
+        servers
+            .borrow_mut()
+            .insert(id, (Arc::new(server), max_body))
+    });
     Ok(vec![integer(id), integer(bound_port)])
 }
 
@@ -410,39 +609,69 @@ fn read_request_body(request: &mut tiny_http::Request, max_body: u64) -> Request
 /// `__http_accept(server, timeout?)` waits for the next request and returns
 /// `{ id, method, path, headers, body, remote }`, or nil once `timeout`
 /// seconds pass without one.
-fn builtin_accept(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+///
+/// Inside a task the wait happens on a worker thread and only that task
+/// waits; see `background::run`.
+fn builtin_accept(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let id = integer_arg(args, 0, "server")?;
     let timeout = timeout_arg(args, 1, "timeout")?;
+    let (server, max_body) = SERVERS.with(|servers| {
+        servers
+            .borrow()
+            .get(&id)
+            .map(|(server, max_body)| (server.clone(), *max_body))
+            .ok_or_else(|| "server is closed".to_string())
+    })?;
+    crate::vm::libs::background::run(
+        vm,
+        move || accept_request(&server, max_body, timeout),
+        |_vm, accepted| {
+            Ok(vec![match accepted {
+                Some((request, bytes)) => park_request(request, bytes),
+                None => Value::Nil,
+            }])
+        },
+    )
+}
 
+/// Waits for the next request whose body fits `max_body`, or `None` once
+/// `timeout` passes.
+fn accept_request(
+    server: &tiny_http::Server,
+    max_body: u64,
+    timeout: Option<Duration>,
+) -> Result<Option<(tiny_http::Request, Vec<u8>)>, String> {
     let deadline = timeout.map(|duration| std::time::Instant::now() + duration);
-
-    let (request, bytes) = loop {
-        let (received, max_body) = SERVERS.with(|servers| {
-            let servers = servers.borrow();
-            let (server, max_body) = servers
-                .get(&id)
-                .ok_or_else(|| "server is closed".to_string())?;
-            match deadline {
-                Some(deadline) => server
-                    .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())),
-                None => server.recv().map(Some),
+    loop {
+        let received = match deadline {
+            Some(deadline) => {
+                server.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
             }
-            .map(|received| (received, *max_body))
-            .map_err(|err| format!("cannot accept request: {}", err))
+            None => server.recv().map(Some),
+        }
+        // `__http_close` unblocks a wait that is still in flight.
+        .map_err(|err| match err.to_string().as_str() {
+            "thread unblocked" => "server is closed".to_string(),
+            _ => format!("cannot accept request: {}", err),
         })?;
         let Some(mut request) = received else {
-            return Ok(vec![Value::Nil]);
+            return Ok(None);
         };
         // A request that is too large is answered here and one whose client
         // went away is dropped; either way the wait goes on for the next.
         match read_request_body(&mut request, max_body) {
-            RequestBody::Complete(bytes) => break (request, bytes),
+            RequestBody::Complete(bytes) => return Ok(Some((request, bytes))),
             RequestBody::TooLarge => {
                 let _ = request.respond(tiny_http::Response::empty(413));
             }
             RequestBody::Incomplete => {}
         }
-    };
+    }
+}
+
+/// Parks an accepted request for `__http_respond` and builds the table
+/// `__http_accept` returns for it.
+fn park_request(request: tiny_http::Request, bytes: Vec<u8>) -> Value {
     let headers = headers_table(
         request
             .headers()
@@ -466,7 +695,7 @@ fn builtin_accept(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         ("remote", remote),
     ]);
     PENDING.with(|pending| pending.borrow_mut().insert(request_id, (request, bytes)));
-    Ok(vec![table])
+    table
 }
 
 /// `__http_respond(request, status, headers?, body?)` answers a request that
@@ -505,6 +734,11 @@ fn builtin_close(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         return Ok(vec![Value::Bool(false)]);
     };
     let address = server.server_addr().to_ip();
+    // Every other reference belongs to an `accept` waiting on a worker
+    // thread; each unblock wakes one of them, which then lets go of it.
+    for _ in 1..Arc::strong_count(&server) {
+        server.unblock();
+    }
     drop(server);
     // Dropping only signals tiny_http's accept thread; the socket is released
     // when that thread exits. Wait (briefly) until the port can be bound again
@@ -608,17 +842,6 @@ fn proxy_upstream(
     body: Vec<u8>,
     timeout: Option<Duration>,
 ) -> Result<tiny_http::Response<std::io::Cursor<Vec<u8>>>, String> {
-    let tls = ureq::tls::TlsConfig::builder()
-        .provider(ureq::tls::TlsProvider::NativeTls)
-        .build();
-    let config = ureq::config::Config::builder()
-        .tls_config(tls)
-        .http_status_as_error(false)
-        .timeout_global(timeout)
-        .max_redirects(0)
-        .build();
-    let agent = config.new_agent();
-
     let mut builder = ureq::http::Request::builder().method(method).uri(url);
     for header in request.headers() {
         let name = header.field.as_str().as_str();
@@ -630,7 +853,12 @@ fn proxy_upstream(
     let upstream = builder
         .body(body)
         .map_err(|err| format!("cannot build request: {}", err))?;
-    let mut response = agent.run(upstream).map_err(|err| err.to_string())?;
+    let upstream = agent()
+        .configure_request(upstream)
+        .timeout_global(timeout)
+        .max_redirects(0)
+        .build();
+    let mut response = agent().run(upstream).map_err(|err| err.to_string())?;
 
     let status = response.status().as_u16();
     let mut headers = Vec::new();

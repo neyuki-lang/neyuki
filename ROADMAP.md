@@ -55,3 +55,8 @@ This document outlines the architectural milestones and engineering trajectory f
 - [ ] Bytecode Version 4 freeze: guarantee long-term stability and binary portability across all 1.x releases.
 - [ ] Performance benchmarking suite validation against standard scripting workloads.
 - [ ] Full test coverage of standard libraries, security sandboxing, and memory leak regression tests.
+
+---
+
+## Desktop app platform
+- [x] Async I/O: `http.request`, `os.run` and `fs.read` suspend only the calling task and run on background threads; `ui.run` pumps the completions every frame so windows stay responsive.

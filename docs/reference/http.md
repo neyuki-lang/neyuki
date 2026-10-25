@@ -1,6 +1,6 @@
 # @neyuki/http
 
-An HTTP/1.1 client and server, with TLS through the operating system's own library. Bodies are strings; response bytes that are not valid UTF-8 are replaced with U+FFFD. The runtime is single-threaded, so one script cannot serve and request itself at the same time.
+An HTTP/1.1 client and server, with TLS through the operating system's own library. Bodies are strings; response bytes that are not valid UTF-8 are replaced with U+FFFD. The interpreter is single-threaded, so a server and its client can share a script only when the request runs in a task, where it waits on a background thread instead of blocking (see `task`). Responses are decoded when they are gzip or brotli compressed.
 
 ```lua
 local http = require("@neyuki/http")

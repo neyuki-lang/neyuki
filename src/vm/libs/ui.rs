@@ -41,6 +41,7 @@ use winit::platform::pump_events::EventLoopExtPumpEvents;
 use winit::window::{Window, WindowId};
 
 use crate::vm::libs::args::array as new_table;
+use crate::vm::libs::task;
 use crate::vm::machine::VM;
 use crate::vm::value::{NativeDef, StrRef, Value, VmTable};
 
@@ -988,12 +989,32 @@ fn builtin_size(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     })
 }
 
+/// How long `__ui_poll` may spend resuming tasks after pumping events, so
+/// a busy scheduler cannot starve rendering. It is checked between tasks,
+/// so one task that runs long without yielding still delays the frame.
+const TASK_BUDGET: Duration = Duration::from_millis(4);
+
 /// `__ui_poll(timeout?)` pumps the event loop, waiting up to `timeout`
-/// seconds for something to happen, and returns the events as an array.
-fn builtin_poll(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+/// seconds for something to happen, then runs the tasks that are due
+/// (within `TASK_BUDGET`) and returns the events as an array. Background
+/// work that finishes during the wait wakes it early through an event loop
+/// proxy, so an idle app can wait long without missing a completion.
+fn builtin_poll(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let timeout = timeout_arg(args, 0, "timeout")?;
+    if !task::has_waker(vm) {
+        let proxy = with_event_loop(|event_loop| event_loop.create_proxy())?;
+        task::set_waker(
+            vm,
+            Box::new(move || {
+                // The wake-up event itself carries nothing: returning from
+                // the pump is all it is for.
+                let _ = proxy.send_event(());
+            }),
+        );
+    }
     pump(timeout)?;
     let events = EVENTS.with(|events| std::mem::take(&mut *events.borrow_mut()));
+    task::run_for(vm, TASK_BUDGET);
     Ok(vec![new_table(events)])
 }
 

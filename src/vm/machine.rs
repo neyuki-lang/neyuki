@@ -63,6 +63,10 @@ pub struct CoroutineState {
     pub yield_retc: u8,
     pub yield_values: Vec<Value>,
     pub open_upvalues: Vec<ParkedUpvalue>,
+    /// Set by `coroutine::resume_with_error`: the next resume raises this
+    /// error where the coroutine is suspended instead of returning values
+    /// there.
+    pub resume_error: Option<String>,
 }
 
 /// A `debug.sethook` hook. `None` means no hook is set, in which case event
