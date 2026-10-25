@@ -60,3 +60,4 @@ This document outlines the architectural milestones and engineering trajectory f
 
 ## Desktop app platform
 - [x] Async I/O: `http.request`, `os.run` and `fs.read` suspend only the calling task and run on background threads; `ui.run` pumps the completions every frame so windows stay responsive.
+- [x] `@neyuki/net`: named pipes, Unix sockets, TCP sockets and a WebSocket client with reader threads and buffered reads that suspend only the calling task, plus `os.spawn` for child processes with streamed stdin, stdout and stderr.

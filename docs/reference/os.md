@@ -65,6 +65,22 @@ if result.ok then print(result.stdout) else print("git failed: " .. result.stder
 os.run("cargo build --release", { cwd = "../engine", capture = false })
 ```
 
+## os.spawn(command: string | {string}, options: table?): Process
+
+Starts a program and returns at once instead of waiting for it, so its output can be streamed. `command` is a string for the system shell or a list that runs without one, as in `os.run`. `options` may hold `cwd`, `env`, `stdin`, `stdout` and `stderr` (each `"pipe"`, `"inherit"` (default) or `"null"`) and `showWindow` (Windows only; by default the program gets no console window). The `Process` has `pid`, `stdin`, `stdout` and `stderr` (connections as in `@neyuki/net`, present for the streams set to `"pipe"`), `p:wait()`, `p:kill()` and `p:isRunning()`.
+
+`p:wait()` suspends the task until the program ends and returns its exit code (-1 when a signal ended it). `p:kill()` ends the program and may be called on one that already ended. A program started with `os.spawn` is not stopped when the script ends.
+
+```lua
+local p = os.spawn({ "git", "log", "--oneline" }, { stdout = "pipe" })
+while true do
+    local chunk = p.stdout:read(4096)
+    if chunk == nil then break end
+    io.write(buffer.tostring(chunk))
+end
+print("exit code", p:wait())
+```
+
 ## os.sleep(seconds: number): ()
 
 Pauses the script for `seconds` (fractions allowed).
