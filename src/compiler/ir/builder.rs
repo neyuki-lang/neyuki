@@ -524,6 +524,36 @@ impl IrBuilder {
             }
             Expr::Binary {
                 left, op, right, ..
+            } if *op == BinOp::Coalesce => {
+                // Short-circuits like `or`, but tests for nil rather than
+                // falsiness: the right side runs only when the left is nil.
+                // The Eq feeding the branch fuses into one compare-and-jump.
+                let l_var = self.compile_expr(left, Some(dst));
+                if l_var != dst {
+                    self.emit(IrInst::Move { dst, src: l_var });
+                }
+                let nil = self.alloc_var();
+                self.emit(IrInst::LoadNil { dst: nil });
+                let is_nil = self.alloc_var();
+                self.emit(IrInst::BinOp {
+                    dst: is_nil,
+                    op: IrBinaryOp::Eq,
+                    lhs: dst,
+                    rhs: nil,
+                });
+                let end_label = self.alloc_label();
+                self.emit(IrInst::JumpIfFalse {
+                    cond: is_nil,
+                    target: end_label,
+                });
+                let r_var = self.compile_expr(right, Some(dst));
+                if r_var != dst {
+                    self.emit(IrInst::Move { dst, src: r_var });
+                }
+                self.emit(IrInst::Label(end_label));
+            }
+            Expr::Binary {
+                left, op, right, ..
             } => {
                 let lhs = self.compile_expr(left, None);
                 let rhs = self.compile_expr(right, None);
@@ -549,7 +579,6 @@ impl IrBuilder {
                     BinOp::Le => IrBinaryOp::Le,
                     BinOp::Gt => IrBinaryOp::Gt,
                     BinOp::Ge => IrBinaryOp::Ge,
-                    BinOp::Coalesce => IrBinaryOp::Coalesce,
                     _ => IrBinaryOp::Add,
                 };
                 self.emit(IrInst::BinOp {
