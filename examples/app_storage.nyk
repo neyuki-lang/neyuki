@@ -1,0 +1,42 @@
+-- Where a desktop app keeps its settings, cache and secrets: counts how often
+-- it has run in a settings file, and keeps a sealed token between runs.
+--
+--   neyuki app_storage.nyk
+--   neyuki app_storage.nyk forget
+
+local fs = require("@neyuki/fs")
+
+const APP = "Neyuki Storage Example"
+
+local settingsFile = fs.join(os.configDir(APP), "settings.json")
+local tokenFile = fs.join(os.dataDir(APP), "token")
+print("settings: " .. settingsFile)
+print("cache:    " .. os.cacheDir(APP))
+
+if os.args()[1] == "forget" then
+    for _, file in { settingsFile, tokenFile } do
+        if fs.exists(file) then fs.remove(file) end
+    end
+    print("forgotten")
+    return
+end
+
+local settings = fs.exists(settingsFile) and json.decode(fs.read(settingsFile)) or { runs = 0 }
+settings.runs += 1
+fs.write(settingsFile, json.encode(settings, { indent = 2 }))
+print(`run number {settings.runs}`)
+
+-- The token is sealed for this user on this machine. Without an OS keychain
+-- (a headless Linux machine, say) protect raises an error instead.
+if fs.exists(tokenFile) then
+    local ok, token = try(os.unprotect, fs.read(tokenFile))
+    print(ok and `token from last time: {token}` or `cannot read the token: {token}`)
+else
+    local ok, sealed = try(os.protect, "token-" .. os.time())
+    if ok then
+        fs.write(tokenFile, sealed)
+        print("stored a new token")
+    else
+        print("cannot protect the token: " .. sealed)
+    end
+end

@@ -818,6 +818,31 @@ pub(crate) const OS_METHODS: &[(&str, &str, &str)] = &[
         "os.run(command: string, options?: { stdin?: string, timeout?: int }): { stdout: string, stderr: string, code: int, success: boolean }",
         "Executes an external system command.",
     ),
+    (
+        "dataDir",
+        "os.dataDir(appName: string): string",
+        "The per-user directory for an app's own files, created if missing.",
+    ),
+    (
+        "configDir",
+        "os.configDir(appName: string): string",
+        "The per-user directory for an app's settings, created if missing.",
+    ),
+    (
+        "cacheDir",
+        "os.cacheDir(appName: string): string",
+        "The per-user directory for files an app can rebuild, created if missing.",
+    ),
+    (
+        "protect",
+        "os.protect(data: string): string",
+        "Seals data so only the current user on this machine can read it back.",
+    ),
+    (
+        "unprotect",
+        "os.unprotect(blob: string): string",
+        "The string os.protect sealed into blob.",
+    ),
 ];
 
 pub(crate) const STRING_METHODS: &[(&str, &str, &str)] = &[
