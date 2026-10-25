@@ -31,12 +31,22 @@ ignore = [
     # lib/fonts or chosen by the script author, through `fontdue` and through
     # winit's `sctk-adwaita` window decorations; neither has moved off it yet.
     { id = "RUSTSEC-2026-0192", reason = "unmaintained, no replacement in fontdue/winit yet; parses trusted fonts only" },
-    # `derivative` and `instant` are unmaintained. Both come from zbus 3, which
-    # `souvlaki` uses for the MPRIS media session on Linux: `derivative` only
-    # generates trait impls at compile time and `instant` wraps
-    # `std::time::Instant` off wasm. Remove once souvlaki moves to a newer zbus.
+    # `derivative` is unmaintained. It comes from zbus 3, which `souvlaki` uses
+    # for the MPRIS media session on Linux, and only generates trait impls at
+    # compile time. Remove once souvlaki moves to a newer zbus.
     { id = "RUSTSEC-2024-0388", reason = "unmaintained derive macro pulled in by souvlaki's zbus 3; compile-time only" },
-    { id = "RUSTSEC-2024-0384", reason = "unmaintained, pulled in by souvlaki's zbus 3; a thin wrapper over std::time::Instant on native targets" },
+    # `zbus_names`, `zvariant` and `zvariant_derive` were folded into zbus 6
+    # and are no longer released on their own. They come from zbus 3
+    # (souvlaki, MPRIS) and zbus 4 (keyring's Secret Service backend); neither
+    # crate has a release on zbus 6 yet. Remove once both move to zbus 6.
+    { id = "RUSTSEC-2026-0370", reason = "zvariant merged into zbus 6; souvlaki and keyring still depend on zbus 3/4" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names merged into zbus 6; souvlaki and keyring still depend on zbus 3/4" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive merged into zbus 6; souvlaki and keyring still depend on zbus 3/4" },
+    # `proc-macro-error` is unmaintained. It is a compile-time dependency of
+    # the gtk-rs 0.18 macros (glib-macros, gtk3-macros) that wry's Linux
+    # WebKitGTK backend builds on; GTK 3 bindings end at 0.18. Remove once wry
+    # moves off GTK 3.
+    { id = "RUSTSEC-2024-0370", reason = "unmaintained proc macro helper used by gtk-rs 0.18 macros under wry; compile-time only" },
 ]
 
 [licenses]
