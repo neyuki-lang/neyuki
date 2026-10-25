@@ -26,14 +26,16 @@ rand = "0.8"
 # declared Content-Length, so a client claiming a huge body and hanging up
 # aborts the process; the fork reads it through a fixed-size buffer.
 tiny_http = { package = "tiny_http_dh", version = "0.12.2" }
-# `native-tls` keeps the build free of C compilers (rustls needs `ring`/`aws-lc`).
+# TLS goes through the platform library (`native-tls`: SChannel, Secure
+# Transport, OpenSSL on Linux) so certificates come from the OS trust store.
 # schannel 0.1.28+ links Windows APIs with `raw-dylib`, which needs `dlltool`
 # on the windows-gnu toolchain; older versions use prebuilt import libraries.
 ureq = { version = "3", default-features = false, features = ["native-tls", "gzip", "charset"] }
 
-# `@neyuki/crypto` is built on the pure-Rust RustCrypto / dalek crates so the
-# build stays free of C toolchains (`ring`, OpenSSL). These are all from the
-# digest-0.10 / rand_core-0.6 generation, which matches `rand` above.
+# `@neyuki/crypto` is built on the RustCrypto / dalek crates, which cover
+# every algorithm it exposes (including RSA key generation, bcrypt and
+# argon2, which `ring` lacks). These are all from the digest-0.10 /
+# rand_core-0.6 generation, which matches `rand` above.
 md-5 = "0.10"
 sha1 = { version = "0.10", features = ["oid"] }
 sha2 = "0.10"
@@ -53,10 +55,12 @@ pkcs8 = { version = "0.10", features = ["pem", "std"] }
 base64 = "0.22"
 subtle = "2"
 
-# `@neyuki/sql` speaks to PostgreSQL and MySQL/MariaDB through these pure-Rust
-# drivers, with TLS through the platform `native-tls` like `ureq` above. The
-# `mysql` defaults are dropped because they pull in the C zlib; `minimal-rust`
-# swaps in the Rust one. `postgres-protocol` decodes the wire values that the
+# `@neyuki/sql` speaks to PostgreSQL and MySQL/MariaDB through these native
+# Rust drivers (no libpq or libmysqlclient), with TLS through the platform
+# `native-tls` like `ureq` above. The `mysql` defaults are dropped: their
+# `minimal` feature forces the stock C zlib onto every `flate2` user (it wins
+# over `zlib-rs`, chosen above) and `derive` is unused. `minimal-rust` leaves
+# the backend to `flate2`. `postgres-protocol` decodes the wire values that the
 # `postgres` crate leaves to companion crates (dates, uuids, arrays).
 postgres = "0.19"
 postgres-native-tls = "0.5"
@@ -67,8 +71,8 @@ mysql = { version = "28", default-features = false, features = ["minimal-rust", 
 
 # `@neyuki/ui` opens windows through `winit`, blits CPU-rendered frames with
 # `softbuffer` and draws them with `tiny-skia` and `fontdue`; `png` loads
-# images. All pure Rust, so no GPU, GL or C compiler is needed. On Linux the
-# X11, Wayland and xkbcommon client libraries are loaded at runtime (dlopen)
+# images. Everything is CPU-rendered, so no GPU or GL driver is needed. On
+# Linux the X11, Wayland and xkbcommon client libraries are loaded at runtime (dlopen)
 # rather than linked, so a build machine needs none of them and a headless
 # machine still runs everything else.
 winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen", "wayland-csd-adwaita"] }
@@ -79,7 +83,7 @@ png = "0.18"
 
 # `@neyuki/hid` drives the keyboard and mouse through `enigo` (SendInput on
 # Windows, CoreGraphics on macOS, XTest over the pure-Rust `x11rb` on X11)
-# and the clipboard through `arboard`. Neither needs a C compiler.
+# and the clipboard through `arboard`.
 enigo = "0.6"
 arboard = { version = "3", default-features = false }
 
