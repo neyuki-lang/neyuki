@@ -141,7 +141,7 @@ schannel = ">=0.1.23, <0.1.28"
 # user. 0.59 is the generation that still links through import libraries,
 # for the same windows-gnu reason as `schannel` above. A built app also
 # shows an error that ends it in a message box, as it has no console.
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging"] }
 
 # Elsewhere `os.protect` keeps a random AES-256-GCM key in the OS keychain:
 # Keychain Services on macOS, the Secret Service over the pure-Rust `zbus`
