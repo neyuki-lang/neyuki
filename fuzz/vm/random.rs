@@ -25,6 +25,23 @@ fn regressions() {
     fuzz_metatable_recursion_and_cycles();
     fuzz_table_sort_inconsistent_comparators();
     fuzz_instruction_boundary_and_stack();
+    budget_survives_pcall();
+}
+
+/// A loop that wraps another in `pcall` used to swallow the budget error
+/// every time it fired and run forever.
+fn budget_survives_pcall() {
+    for source in [
+        "while true do pcall(function() while true do end end) end",
+        "while true do xpcall(function() while true do end end, print) end",
+        "while true do coroutine.resume(coroutine.create(function() while true do end end)) end",
+    ] {
+        let proto = compile(source).expect("the regression program compiles");
+        assert!(
+            run_sandboxed(proto).is_err(),
+            "{source} should run out of budget"
+        );
+    }
 }
 
 fn generate(corpus: &Corpus, rng: &mut StdRng) -> Vec<u8> {

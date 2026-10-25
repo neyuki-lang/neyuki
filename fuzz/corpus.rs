@@ -109,6 +109,8 @@ const INSTRUCTION_BUDGET_K: u32 = 300;
 /// side effects (files, network, processes, windows, input devices, stdout,
 /// the scheduler, debug hooks), a `require` limited to `ALLOWED_MODULES`,
 /// and a count hook that stops the program after its instruction budget.
+/// Once the budget is gone `pcall`, `xpcall` and `coroutine.resume` rethrow,
+/// so a program can't swallow the error and keep looping.
 pub fn sandbox_vm() -> VM {
     let mut vm = VM::new();
     let names: Vec<String> = vm.globals.keys().map(|k| k.to_string()).collect();
@@ -137,9 +139,24 @@ pub fn sandbox_vm() -> VM {
         print = function(...) end
         warn = print
         local count = 0
+        local exhausted = false
+        local function guard(...)
+            if exhausted then error(\"fuzz: instruction budget exhausted\", 0) end
+            return ...
+        end
+        local realpcall, realxpcall, resume = pcall, xpcall, coroutine.resume
+        local co = {{}}
+        for k, v in pairs(coroutine) do co[k] = v end
+        coroutine = co
+        pcall = function(f, ...) return guard(realpcall(f, ...)) end
+        xpcall = function(f, h, ...) return guard(realxpcall(f, h, ...)) end
+        co.resume = function(co, ...) return guard(resume(co, ...)) end
         return function()
             count += 1
-            if count > {budget} then error(\"fuzz: instruction budget exhausted\") end
+            if count > {budget} then
+                exhausted = true
+                error(\"fuzz: instruction budget exhausted\", 0)
+            end
         end",
         allowed = allowed,
         budget = INSTRUCTION_BUDGET_K,
