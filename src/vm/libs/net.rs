@@ -327,7 +327,7 @@ fn conn_read(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
             let mut state = shared.wait_for(|s| s.buf.len() >= n);
             take_bytes(&mut state, n)
         },
-        |vm, data| bytes_result(vm, data),
+        bytes_result,
     )
 }
 
@@ -1020,9 +1020,7 @@ fn builtin_websocket(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> 
                 Value::Table(list) => {
                     for (name, value) in list.borrow().fields.iter() {
                         match value {
-                            Value::String(v) => {
-                                headers.push(((&**name).to_string(), v.to_string()))
-                            }
+                            Value::String(v) => headers.push(((**name).to_string(), v.to_string())),
                             other => {
                                 return Err(format!(
                                     "headers.{} must be a string, got {}",

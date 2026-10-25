@@ -14,7 +14,7 @@ end
 
 -- TCP: a task talks to the HTTP server the main chunk serves.
 local server = http.listen({ host = "127.0.0.1", port = 0 })
-local port = tonumber(server.url:match(":(%d+)$"))
+local port = server.port
 local reply = nil
 task.spawn(function()
     local conn = net.connect("127.0.0.1", port)
