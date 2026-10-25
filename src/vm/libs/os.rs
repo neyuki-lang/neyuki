@@ -12,6 +12,8 @@ use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveTime, TimeDelta, TimeZon
 use crate::vm::machine::VM;
 use crate::vm::value::{Value, VmTable};
 
+mod storage;
+
 fn os_clock(_vm: &mut VM, _args: &[Value]) -> Result<Vec<Value>, String> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -423,6 +425,23 @@ pub fn create_os_lib() -> Value {
     table.set_str(
         "spawn",
         crate::native!("os.spawn", crate::vm::libs::net::os_spawn),
+    );
+    table.set_str(
+        "dataDir",
+        crate::native!("os.dataDir", storage::os_data_dir),
+    );
+    table.set_str(
+        "configDir",
+        crate::native!("os.configDir", storage::os_config_dir),
+    );
+    table.set_str(
+        "cacheDir",
+        crate::native!("os.cacheDir", storage::os_cache_dir),
+    );
+    table.set_str("protect", crate::native!("os.protect", storage::os_protect));
+    table.set_str(
+        "unprotect",
+        crate::native!("os.unprotect", storage::os_unprotect),
     );
     table.frozen = true;
     Value::Table(Rc::new(RefCell::new(table)))

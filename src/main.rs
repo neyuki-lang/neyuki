@@ -8,6 +8,11 @@ mod fuzz;
 
 use neyuki::*;
 
+// Opt-in allocator; see the `mimalloc` entry in Cargo.toml.
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// Stack for the thread that runs every action. The parser caps nesting, but
 /// the passes after it recurse once per level with large debug-build frames,
 /// and the main thread only gets 1 MiB on Windows. This only reserves address

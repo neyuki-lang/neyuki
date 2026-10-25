@@ -8,6 +8,17 @@ Questions, ideas and design discussion happen on the Discord server: https://dis
 
 If you are planning a larger change, please bring it up there or in an issue first so we can agree on the approach before you invest the time.
 
+## Building
+
+Besides a recent stable Rust toolchain you need:
+
+- **Linux:** a C compiler (`gcc` or `clang`), `pkg-config` and the OpenSSL development headers (`build-essential pkg-config libssl-dev` on Debian/Ubuntu, `gcc pkgconf-pkg-config openssl-devel` on Fedora). The X11, Wayland and xkbcommon libraries are loaded at runtime and are not needed to build.
+- **macOS:** the Xcode Command Line Tools (`xcode-select --install`).
+- **Windows (msvc):** the Visual Studio Build Tools with the "Desktop development with C++" workload.
+- **Windows (gnu):** a MinGW-w64 GCC on `PATH` (for example MSYS2's `mingw-w64-x86_64-gcc`), which also provides `dlltool`.
+
+The default build compiles little or no C today, but dependencies may build C code, so keep a C compiler available. `--features mimalloc` (an opt-in allocator) always needs one.
+
 ## Before you open a pull request
 
 CI runs the following on every pull request. Run them locally first so your PR is green on the first push:
@@ -26,7 +37,7 @@ cargo test
 
 - **Format with `rustfmt`.** No hand-formatting; if `cargo fmt` changes your code, commit the result.
 - **No clippy warnings.** CI runs clippy with `-D warnings`. Fix the warning rather than adding `#[allow(...)]` unless there is a comment explaining why the lint is wrong in that spot.
-- **Keep the build free of C toolchains.** Dependencies must build with a plain Rust toolchain on Linux, macOS and Windows (gnu and msvc). Prefer pure-Rust crates; do not add anything that needs OpenSSL, `ring`/`aws-lc`, or a system C compiler. See the comments in `Cargo.toml` for the existing choices.
+- **Pick dependencies on merit.** Crates that build C or C++ code are fine; choose whichever well-maintained crate is fastest, most correct or most capable for the job, pure Rust or not. A dependency must still build on Linux, macOS and Windows (msvc and gnu) with the prerequisites listed under [Building](#building); if it needs anything more (CMake, NASM, a system library), add it to that list and to CI in the same PR. Its license must pass `cargo deny check` (see `deny.toml`).
 - **Every new dependency needs a reason.** Add a short comment in `Cargo.toml` next to it explaining what it is for, as the existing entries do.
 - **No `unsafe`** unless it is unavoidable, isolated, and documented with a `// SAFETY:` comment.
 - **No `unwrap()` / `expect()` on user-controlled input.** Script errors must surface as Neyuki runtime errors, never as a Rust panic.
