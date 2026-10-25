@@ -21,9 +21,46 @@ ui.run(function(events, dt)
 end)
 ```
 
+An app that draws its own title bar opens the window without decorations and hands moving and resizing back to the window system, so the window still snaps and crosses monitors like a native one:
+
+```lua
+local win = ui.open({ title = "Player", width = 1280, height = 800, decorations = false,
+                      minWidth = 900, minHeight = 600, icon = "icon.png" })
+local query = ""
+
+ui.run(function(events, dt)
+    for _, event in events do
+        if event.kind == "mousedown" and event.button == "left" and event.y < 32 then
+            if event.clicks == 2 then
+                if win:isMaximized() then win:restore() else win:maximize() end
+            else
+                win:startDrag()
+            end
+        elseif event.kind == "textinput" then
+            query = query .. event.text
+        end
+    end
+    -- ...draw the bar, its buttons and the rest
+end)
+```
+
+See `examples/window_chrome.nyk` for a complete one with edge resizing, hover cursors and an IME-aware text field.
+
 ## ui.open(options: table?): Window
 
-Opens a window. `options` may hold `title` (default `"Neyuki"`), `width` and `height` (default 800 × 600), `resizable` (default `true`) and `visible` (default `true`). The canvas starts out white.
+Opens a window. `options` may hold:
+
+- `title` (default `"Neyuki"`), `width` and `height` (default 800 × 600)
+- `resizable` and `visible` (default `true`)
+- `decorations` (default `true`): `false` removes the native title bar and border, for an app-drawn one
+- `minWidth` and `minHeight`: the smallest size the user can resize to
+- `icon`: a PNG path or an `Image` for the title bar and taskbar (Windows and X11; macOS and Wayland take the icon from the app bundle or desktop file)
+- `transparent` (default `false`): pixels drawn with alpha show what is behind the window, where the platform supports it (Windows and macOS; X11 and Wayland present opaque)
+- `shadow` (default `true`): keep the drop shadow of a window without decorations (Windows and macOS)
+
+The canvas starts out white, or clear when `transparent`.
+
+Without decorations, Windows 11 does not show the Snap Layouts flyout when hovering the app's own maximize button; `Win+Z` and dragging to a screen edge still snap.
 
 ## ui.run(handler: (events: {table}, dt: number) -> any, options: table?): ()
 
@@ -37,13 +74,31 @@ Pumps the event loop and returns the events since the last call. Without a timeo
 - `resize`: `width`, `height`
 - `focus`, `blur`, `redraw`, `mouseenter`, `mouseleave`
 - `keydown`, `keyup`: `key` (`"a"`, `"escape"`, `"arrowleft"`, `"f1"`), `code` (`"KeyA"`), `repeat`, `text`, `mods` (`shift`, `ctrl`, `alt`, `meta`)
+- `textinput`: `text`, what was typed or committed by an input method. Use it rather than `keydown.text` for text fields: it skips shortcuts and does not repeat what an input method is composing
+- `ime`: `phase` (`"start"`, `"preedit"`, `"commit"` or `"end"`), `text` (the composition so far for `preedit`, the result for `commit`) and `cursor` (bytes of `text` before the caret, or nil when hidden). Only sent after `window:setTextInput(true)`; draw `preedit` text underlined at the caret and drop it on `commit` or `end`
 - `mousemove`: `x`, `y`
-- `mousedown`, `mouseup`: `button` (`"left"`, `"right"`, `"middle"`), `x`, `y`
+- `mousedown`: `button` (`"left"`, `"right"`, `"middle"`), `x`, `y`, `clicks` (1, then 2 for a double click, 3 for a triple click: presses of the same button within 500 ms and 4 pixels)
+- `mouseup`: `button`, `x`, `y`. After `startDrag` or `startResize` the window system keeps the release, so it may not arrive
 - `scroll`: `dx`, `dy`, `unit` (`"lines"` or `"pixels"`), `x`, `y`
+- `maximize`, `minimize`, `restore`: the window changed state, by the user or by a call
+- `dropfile`: `path`, a file dropped on the window (one event per file)
+- `dpichange`: `scale`, the window moved to a display with another scale factor
 
 ## ui.isAvailable(): boolean
 
 Whether a display can be reached. On a headless machine the other window functions raise an error.
+
+## ui.clipboard.get(): string?
+
+The clipboard's text, or nil when it holds something else or nothing. The same clipboard as `@neyuki/hid`.
+
+## ui.clipboard.set(text: string): ()
+
+Replaces the clipboard contents with `text`.
+
+## ui.openUrl(url: string): ()
+
+Opens a link in the default browser or mail client and returns without waiting. Only `http://`, `https://` and `mailto:` links without spaces are accepted; anything else (a file path, `file:`, a custom protocol) raises an error, because the system would happily run a program for it.
 
 ## ui.color(color: any): number
 
@@ -148,6 +203,54 @@ Whether the window has not been closed.
 ## Window:close(): ()
 
 Closes the window. Calling it again does nothing.
+
+## Window:startDrag(): boolean
+
+Moves the window with the mouse as if its title bar were being dragged. Call it on `mousedown` in a custom title bar, while the button is still held; returns whether the window system took over.
+
+## Window:startResize(direction: string): boolean
+
+Resizes the window with the mouse from an edge or corner: `"n"`, `"s"`, `"e"`, `"w"`, `"ne"`, `"nw"`, `"se"` or `"sw"`. Call it on `mousedown` near the edge, like `startDrag`. A window without decorations has no resize border of its own, so this is how one gets resized.
+
+## Window:minimize(): ()
+
+Minimizes the window to the taskbar or dock.
+
+## Window:maximize(): ()
+
+Maximizes the window.
+
+## Window:restore(): ()
+
+Brings a minimized window back, or else returns a maximized one to its normal size.
+
+## Window:isMaximized(): boolean
+
+Whether the window is maximized.
+
+## Window:setFullscreen(fullscreen: boolean): ()
+
+Switches to borderless fullscreen on the window's current monitor, or back.
+
+## Window:setCursor(cursor: string): ()
+
+The pointer shown over the window: `"default"`, `"pointer"` (the hand for links and buttons), `"text"`, `"grab"`, `"grabbing"`, `"crosshair"`, `"move"`, `"notAllowed"`, `"wait"`, `"progress"`, `"help"`, `"copy"`, `"contextMenu"`, `"zoomIn"`, `"zoomOut"`, `"ewResize"`, `"nsResize"`, `"neswResize"`, `"nwseResize"`, `"colResize"`, `"rowResize"`, or `"hidden"`.
+
+## Window:setTextInput(enabled: boolean, area: table?): ()
+
+Turns text input through the input method (for Chinese, Japanese, Korean and other composed text) on or off; `ime` events are only sent while it is on. `area` is the `{ x, y, w, h }` of the text being edited, so the candidate window opens next to it; call it again as the caret moves. Turn it off when the text field loses focus.
+
+## Window:focus(): ()
+
+Brings the window to the front and gives it the keyboard, as far as the window system allows.
+
+## Window:requestAttention(): ()
+
+Flashes the taskbar entry or bounces the dock icon until the window is focused.
+
+## Window:setIcon(icon: any): ()
+
+Sets the title bar and taskbar icon from an `Image` or a PNG path, or clears it with nil. Like the `icon` option, it has no effect on macOS and Wayland.
 
 ## ui.tween(target: table, goal: table, duration: number, options: table?): Tween
 

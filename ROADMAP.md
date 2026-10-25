@@ -59,6 +59,8 @@ This document outlines the architectural milestones and engineering trajectory f
 ---
 
 ## Desktop app platform
+- [x] Per-user storage in `@neyuki/os`: `dataDir`, `configDir` and `cacheDir` following each platform's conventions, and `protect`/`unprotect` for secrets (DPAPI on Windows, an OS keychain key elsewhere).
+- [x] `@neyuki/ui` window chrome and input: frameless windows with app-drawn title bars (`startDrag`, `startResize`, minimize/maximize/restore, fullscreen, minimum size, icon, drop shadow), pointer cursors, IME text input (`textinput` and `ime` events), click counts for double-click, window state, file drop and DPI change events, `ui.clipboard` and `ui.openUrl`.
 - [x] `@neyuki/ui` image decoding: PNG, JPEG, WebP, GIF and BMP detected by magic bytes, from files (`ui.loadImage`) or memory (`ui.decodeImage`).
   - [x] Animated GIF/WebP/PNG frames with browser-style delay clamping, `ui.animation` playback helper and `image:resized`.
   - [x] `drawImage` options `frame`, `opacity`, `radius` and `fit` (`fill`, `contain`, `cover`) with cached smooth resampling.
