@@ -1,0 +1,71 @@
+-- Tests that `??` and `??=` evaluate the right side only when the left is nil.
+
+local calls = 0
+local function rhs(v)
+    calls = calls + 1
+    return v
+end
+
+-- 1. A non-nil left side skips the right side (call and error)
+local t = {}
+function t.a() return 1 end
+calls = 0
+local x = t["a"] ?? rhs(2)
+assert(x == t.a, "non-nil left kept")
+assert(calls == 0, "rhs not evaluated for non-nil left")
+
+local args = { "file.txt" }
+local v = args[1] ?? error("usage")
+assert(v == "file.txt", "error() on the right is skipped")
+
+-- 2. A nil left side evaluates the right side once
+calls = 0
+local y = t["missing"] ?? rhs(5)
+assert(y == 5, "nil left takes rhs")
+assert(calls == 1, "rhs evaluated once for nil left")
+
+local ok, err = try(function() return args[2] ?? error("usage") end)
+assert(not ok, "error() on the right runs for nil left")
+
+-- 3. false is not nil, so it is kept
+calls = 0
+local f = false
+local z = f ?? rhs(true)
+assert(z == false, "false ?? x stays false")
+assert(calls == 0, "rhs not evaluated for false left")
+
+-- 4. Nested a ?? b ?? c stops at the first non-nil value
+calls = 0
+local n = nil
+local w = n ?? t["b"] ?? rhs(3) ?? rhs(4)
+assert(w == 3, "nested coalesce picks first non-nil")
+assert(calls == 1, "nested coalesce stops after first non-nil")
+
+calls = 0
+local w2 = n ?? f ?? rhs(4)
+assert(w2 == false, "nested coalesce keeps false")
+assert(calls == 0, "nested coalesce skips rest after false")
+
+-- 5. ??= on locals and fields
+calls = 0
+local s = "set"
+s ??= rhs("other")
+assert(s == "set", "??= keeps non-nil local")
+assert(calls == 0, "??= skips rhs for non-nil local")
+
+local u = nil
+u ??= rhs("filled")
+assert(u == "filled", "??= assigns nil local")
+assert(calls == 1, "??= evaluates rhs for nil local")
+
+calls = 0
+local cfg = { name = "a", off = false }
+cfg.name ??= error("name already set")
+cfg.off ??= rhs(true)
+cfg.port ??= rhs(8080)
+assert(cfg.name == "a", "??= keeps non-nil field")
+assert(cfg.off == false, "??= keeps false field")
+assert(cfg.port == 8080, "??= assigns nil field")
+assert(calls == 1, "??= on fields evaluates rhs only for nil")
+
+print("[pass] coalesce short-circuit checks complete")
