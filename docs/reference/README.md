@@ -33,5 +33,6 @@ Load these with `require("@neyuki/name")`.
 | [@neyuki/sql](sql.md) | PostgreSQL, MySQL and MariaDB |
 | [@neyuki/crypto](crypto.md) | Hashes, passwords, encryption, signatures, secure random values |
 | [@neyuki/ui](ui.md) | Windows, drawing, input events and animation |
+| [@neyuki/webview](webview.md) | Web pages in a window: load a URL, HTML or app files, and exchange messages with the page |
 | [@neyuki/hid](hid.md) | Keyboard and mouse automation, screen size, clipboard |
 | [@neyuki/profile](profile.md) | Finding slow functions |

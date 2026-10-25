@@ -472,8 +472,7 @@ mod real {
         // runs before the page and the app's own init script.
         let mut script = String::from(BRIDGE_SCRIPT);
         if let Some(extra) = &spec.init_script {
-            script.push('
-');
+            script.push('\n');
             script.push_str(extra);
         }
         builder = builder.with_initialization_script(script.as_str());

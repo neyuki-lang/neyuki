@@ -60,3 +60,4 @@ This document outlines the architectural milestones and engineering trajectory f
 
 ## Desktop app platform
 - [x] Async I/O: `http.request`, `os.run` and `fs.read` suspend only the calling task and run on background threads; `ui.run` pumps the completions every frame so windows stay responsive.
+- [x] `@neyuki/webview`: web pages through the system web engine (WebView2, WKWebView, WebKitGTK) in the `ui` event loop, with a custom asset protocol and page/script messaging. GPU rendering for `ui` is out of scope; embedded web content covers GPU-accelerated drawing.
