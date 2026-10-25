@@ -758,7 +758,19 @@ mod real {
     /// `__webview_available()` reports whether a view can be created here:
     /// a display, and the web engine (WebView2 runtime, WebKitGTK).
     fn builtin_available(_vm: &mut VM, _args: &[Value]) -> Result<Vec<Value>, String> {
-        Ok(vec![Value::Bool(toolkit_available())])
+        Ok(vec![Value::Bool(
+            ensure_loader().is_ok() && toolkit_available(),
+        )])
+    }
+
+    /// Loads the WebView2 loader on windows-gnu (see `webview2_loader`);
+    /// elsewhere it is linked in and there is nothing to do.
+    fn ensure_loader() -> Result<(), String> {
+        #[cfg(all(windows, target_env = "gnu", target_arch = "x86_64"))]
+        return crate::vm::libs::webview2_loader::ensure()
+            .map_err(|err| format!("cannot create webview: {}", err));
+        #[cfg(not(all(windows, target_env = "gnu", target_arch = "x86_64")))]
+        Ok(())
     }
 
     /// `__webview_open(options)` creates a window with a view in it and
@@ -769,6 +781,7 @@ mod real {
             return Err("options must be a table".to_string());
         }
         let spec = parse_spec(&options)?;
+        ensure_loader()?;
         Ok(vec![integer(open(spec)?)])
     }
 

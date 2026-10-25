@@ -27,6 +27,13 @@ pub mod task;
 pub mod ui;
 pub mod utf8;
 pub mod webview;
+#[cfg(all(
+    feature = "webview",
+    windows,
+    target_env = "gnu",
+    target_arch = "x86_64"
+))]
+pub mod webview2_loader;
 
 pub use bit::create_bit_lib;
 pub use buffer::create_buffer_lib;
