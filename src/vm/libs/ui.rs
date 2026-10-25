@@ -18,16 +18,28 @@
 //! winit only supports the event loop on the thread that created it (and on
 //! macOS only the main thread), which is where the interpreter runs; all
 //! state therefore lives in thread-locals.
+//!
+//! The media session (`__ui_media_session`) publishes now-playing metadata
+//! to the OS through `souvlaki` and receives its transport commands, which
+//! include the global media keys. Those arrive on whatever thread the OS
+//! picks, so they travel through a channel and an `EventLoopProxy` wakes
+//! the pump; `__ui_poll` turns them into `mediakey` / `mediasession` events.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::num::NonZeroU32;
+use std::path::{Path as FsPath, PathBuf};
 use std::rc::Rc;
+use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
 use fontdue::layout::{CoordinateSystem, GlyphRasterConfig, Layout, LayoutSettings, TextStyle};
+use souvlaki::{
+    MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, MediaPosition, PlatformConfig,
+    SeekDirection,
+};
 use tiny_skia::{
     Color, ColorU8, FillRule, FilterQuality, Paint, Path, PathBuilder, Pixmap, PixmapPaint,
     PremultipliedColorU8, Rect, Stroke, Transform,
@@ -36,7 +48,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
-use winit::keyboard::{Key, ModifiersState, PhysicalKey};
+use winit::keyboard::{Key, ModifiersState, NamedKey, PhysicalKey};
 use winit::platform::pump_events::EventLoopExtPumpEvents;
 use winit::window::{Window, WindowId};
 
@@ -129,6 +141,14 @@ pub(crate) const NATIVES: &[NativeDef] = &[
         name: "__ui_present",
         func: builtin_present,
     },
+    NativeDef {
+        name: "__ui_media_session",
+        func: builtin_media_session,
+    },
+    NativeDef {
+        name: "__ui_media_session_clear",
+        func: builtin_media_session_clear,
+    },
 ];
 
 /// The font used when a script does not load its own: Noto Sans, under the
@@ -174,8 +194,31 @@ struct OpenRequest {
     visible: bool,
 }
 
+/// The OS media session: the controls `souvlaki` registered for `window`,
+/// the channel their commands arrive on, and the temporary PNG that holds
+/// artwork drawn from an `Image` (the OS loads artwork from a file or URL).
+struct MediaSession {
+    controls: MediaControls,
+    window: u64,
+    commands: Receiver<MediaControlEvent>,
+    artwork_file: Option<PathBuf>,
+}
+
+impl Drop for MediaSession {
+    fn drop(&mut self) {
+        if let Some(path) = self.artwork_file.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// How far a seek command without an amount (a "fast forward" button)
+/// moves, in seconds.
+const MEDIA_SEEK_STEP: f64 = 10.0;
+
 thread_local! {
     static EVENT_LOOP: RefCell<Option<Result<EventLoop<()>, String>>> = const { RefCell::new(None) };
+    static MEDIA: RefCell<Option<MediaSession>> = const { RefCell::new(None) };
     static WINDOWS: RefCell<HashMap<u64, Win>> = RefCell::new(HashMap::new());
     static WINDOW_IDS: RefCell<HashMap<WindowId, u64>> = RefCell::new(HashMap::new());
     static IMAGES: RefCell<HashMap<u64, Pixmap>> = RefCell::new(HashMap::new());
@@ -414,11 +457,334 @@ impl ApplicationHandler for App {
             let Some(win) = windows.get_mut(&id) else {
                 return;
             };
+            // A media key pressed while the window has focus. Once a media
+            // session exists the OS routes the keys through it instead, so
+            // only report them here when there is none, or a press would
+            // arrive twice.
+            let media_key = match &event {
+                WindowEvent::KeyboardInput { event: key, .. }
+                    if key.state == ElementState::Pressed
+                        && !key.repeat
+                        && MEDIA.with(|media| media.borrow().is_none()) =>
+                {
+                    media_key_name(&key.logical_key)
+                }
+                _ => None,
+            };
             if let Some(event) = translate_event(id, win, event) {
                 EVENTS.with(|events| events.borrow_mut().push(event));
             }
+            if let Some(key) = media_key {
+                EVENTS.with(|events| events.borrow_mut().push(media_key_event(id, key)));
+            }
         });
     }
+}
+
+// MEDIA --------------------------------------------------------------------
+
+/// The `key` of a `mediakey` event for a keyboard media key.
+fn media_key_name(key: &Key) -> Option<&'static str> {
+    match key {
+        Key::Named(NamedKey::MediaPlayPause) => Some("playpause"),
+        Key::Named(NamedKey::MediaPlay) => Some("play"),
+        Key::Named(NamedKey::MediaPause) => Some("pause"),
+        Key::Named(NamedKey::MediaTrackNext) => Some("next"),
+        Key::Named(NamedKey::MediaTrackPrevious) => Some("previous"),
+        Key::Named(NamedKey::MediaStop) => Some("stop"),
+        _ => None,
+    }
+}
+
+/// What a media session command means to a script.
+#[derive(Debug, PartialEq)]
+enum MediaCommand {
+    /// A transport key or button: a `mediakey` event.
+    Key(&'static str),
+    /// Jump to a position in seconds: `mediasession` `seek` with `position`.
+    SeekTo(f64),
+    /// Move by seconds (negative is back): `mediasession` `seek` with `offset`.
+    SeekBy(f64),
+    /// Anything else the session asks for: `raise` or `quit`.
+    Action(&'static str),
+}
+
+/// Sorts a session command into the event it becomes. Volume and open-URI
+/// requests have no counterpart and are dropped.
+fn media_command(event: &MediaControlEvent) -> Option<MediaCommand> {
+    let signed = |direction: &SeekDirection, seconds: f64| match direction {
+        SeekDirection::Forward => seconds,
+        SeekDirection::Backward => -seconds,
+    };
+    Some(match event {
+        MediaControlEvent::Play => MediaCommand::Key("play"),
+        MediaControlEvent::Pause => MediaCommand::Key("pause"),
+        MediaControlEvent::Toggle => MediaCommand::Key("playpause"),
+        MediaControlEvent::Next => MediaCommand::Key("next"),
+        MediaControlEvent::Previous => MediaCommand::Key("previous"),
+        MediaControlEvent::Stop => MediaCommand::Key("stop"),
+        MediaControlEvent::Seek(direction) => {
+            MediaCommand::SeekBy(signed(direction, MEDIA_SEEK_STEP))
+        }
+        MediaControlEvent::SeekBy(direction, amount) => {
+            MediaCommand::SeekBy(signed(direction, amount.as_secs_f64()))
+        }
+        MediaControlEvent::SetPosition(MediaPosition(position)) => {
+            MediaCommand::SeekTo(position.as_secs_f64())
+        }
+        MediaControlEvent::Raise => MediaCommand::Action("raise"),
+        MediaControlEvent::Quit => MediaCommand::Action("quit"),
+        MediaControlEvent::SetVolume(_) | MediaControlEvent::OpenUri(_) => return None,
+    })
+}
+
+fn media_key_event(window: u64, key: &str) -> Value {
+    record(vec![
+        ("kind", text("mediakey")),
+        ("window", integer(window)),
+        ("key", text(key)),
+    ])
+}
+
+fn media_command_event(window: u64, command: MediaCommand) -> Value {
+    let session = |action: &str, field: Option<(&'static str, f64)>| {
+        let mut fields = vec![
+            ("kind", text("mediasession")),
+            ("window", integer(window)),
+            ("action", text(action)),
+        ];
+        if let Some((name, value)) = field {
+            fields.push((name, Value::Float(value)));
+        }
+        record(fields)
+    };
+    match command {
+        MediaCommand::Key(key) => media_key_event(window, key),
+        MediaCommand::SeekTo(position) => session("seek", Some(("position", position))),
+        MediaCommand::SeekBy(offset) => session("seek", Some(("offset", offset))),
+        MediaCommand::Action(action) => session(action, None),
+    }
+}
+
+/// Moves the commands the session received since the last poll into the
+/// event queue.
+fn drain_media_commands() {
+    MEDIA.with(|media| {
+        let media = media.borrow();
+        let Some(session) = media.as_ref() else {
+            return;
+        };
+        for command in session.commands.try_iter() {
+            if let Some(command) = media_command(&command) {
+                let event = media_command_event(session.window, command);
+                EVENTS.with(|events| events.borrow_mut().push(event));
+            }
+        }
+    });
+}
+
+/// The name MPRIS registers the player under (`org.mpris.MediaPlayer2.` is
+/// prepended): bus name elements allow `[A-Za-z0-9_]` and may not start
+/// with a digit, and the `instance<pid>` suffix the spec suggests lets two
+/// copies of one script run side by side.
+fn dbus_name(title: &str, pid: u32) -> String {
+    let cleaned: String = title
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .take(64)
+        .collect();
+    let mut name = match cleaned.trim_matches('_') {
+        "" => "neyuki".to_string(),
+        trimmed => trimmed.to_string(),
+    };
+    if name.starts_with(|c: char| c.is_ascii_digit()) {
+        name.insert(0, '_');
+    }
+    format!("{}.instance{}", name, pid)
+}
+
+/// Whether an artwork string is a URL to hand over as is rather than a path.
+fn is_artwork_url(artwork: &str) -> bool {
+    let lower = artwork.to_ascii_lowercase();
+    ["http://", "https://", "file://"]
+        .iter()
+        .any(|scheme| lower.starts_with(scheme))
+}
+
+/// A `file://` URL for an absolute path, in the form each backend reads:
+/// souvlaki strips the scheme on Windows and opens the rest as a path, while
+/// MPRIS and `NSURL` want a percent-encoded URI.
+fn file_url(path: &str, windows: bool) -> String {
+    if windows {
+        return format!("file://{}", path);
+    }
+    let mut url = String::from("file://");
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric() || b"/-._~".contains(&byte) {
+            url.push(byte as char);
+        } else {
+            url.push_str(&format!("%{:02X}", byte));
+        }
+    }
+    url
+}
+
+fn path_url(path: &FsPath) -> Result<String, String> {
+    let absolute = std::path::absolute(path)
+        .map_err(|err| format!("cannot read artwork {}: {}", path.display(), err))?;
+    if !absolute.is_file() {
+        return Err(format!(
+            "cannot read artwork {}: no such file",
+            path.display()
+        ));
+    }
+    Ok(file_url(&absolute.to_string_lossy(), cfg!(windows)))
+}
+
+/// The native handle souvlaki needs to find a window's media controls; only
+/// Windows asks for one.
+#[cfg(target_os = "windows")]
+fn native_window_handle(window: &Window) -> Option<*mut std::ffi::c_void> {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match window.window_handle().ok()?.as_raw() {
+        RawWindowHandle::Win32(handle) => Some(handle.hwnd.get() as *mut std::ffi::c_void),
+        _ => None,
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn native_window_handle(_window: &Window) -> Option<*mut std::ffi::c_void> {
+    None
+}
+
+/// Registers media controls for window `id` and starts listening to them.
+fn create_media_session(id: u64) -> Result<MediaSession, String> {
+    let (title, hwnd) = with_window(id, |win| {
+        Ok((win.window.title(), native_window_handle(&win.window)))
+    })?;
+    if cfg!(target_os = "windows") && hwnd.is_none() {
+        return Err("cannot start media session: no native window handle".to_string());
+    }
+    let display_name = if title.is_empty() { "Neyuki" } else { &title };
+    let bus_name = dbus_name(display_name, std::process::id());
+    let mut controls = MediaControls::new(PlatformConfig {
+        display_name,
+        dbus_name: &bus_name,
+        hwnd,
+    })
+    .map_err(|err| format!("cannot start media session: {:?}", err))?;
+    let proxy = with_event_loop(|event_loop| event_loop.create_proxy())?;
+    let (sender, commands) = mpsc::channel();
+    controls
+        .attach(move |command| {
+            // Wake a `poll` that is waiting so the command arrives promptly.
+            if sender.send(command).is_ok() {
+                let _ = proxy.send_event(());
+            }
+        })
+        .map_err(|err| format!("cannot start media session: {:?}", err))?;
+    Ok(MediaSession {
+        controls,
+        window: id,
+        commands,
+        artwork_file: None,
+    })
+}
+
+/// Writes an image to a fresh temporary PNG for the OS to load as artwork.
+fn write_artwork_image(image: u64) -> Result<PathBuf, String> {
+    let bytes = IMAGES.with(|images| {
+        let images = images.borrow();
+        let pixmap = images
+            .get(&image)
+            .ok_or_else(|| "image was freed".to_string())?;
+        pixmap
+            .encode_png()
+            .map_err(|err| format!("cannot encode artwork: {}", err))
+    })?;
+    let path = std::env::temp_dir().join(format!(
+        "neyuki-artwork-{}-{}.png",
+        std::process::id(),
+        next_id()
+    ));
+    std::fs::write(&path, bytes).map_err(|err| format!("cannot write artwork: {}", err))?;
+    Ok(path)
+}
+
+/// What a script asked `ui.mediaSession` to show.
+struct NowPlaying {
+    title: String,
+    artist: String,
+    album: String,
+    artwork: Option<String>,
+    artwork_image: Option<u64>,
+    duration: Option<f64>,
+    position: Option<f64>,
+    playing: bool,
+}
+
+/// The artwork URL to publish, plus the temporary file behind it when it
+/// was drawn from an `Image`.
+fn prepare_artwork(info: &NowPlaying) -> Result<(Option<String>, Option<PathBuf>), String> {
+    Ok(match (&info.artwork_image, &info.artwork) {
+        (Some(image), _) => {
+            let path = write_artwork_image(*image)?;
+            let url = file_url(&path.to_string_lossy(), cfg!(windows));
+            (Some(url), Some(path))
+        }
+        (None, Some(artwork)) if is_artwork_url(artwork) => (Some(artwork.clone()), None),
+        (None, Some(artwork)) => (Some(path_url(FsPath::new(artwork))?), None),
+        (None, None) => (None, None),
+    })
+}
+
+/// Publishes `info`. Errors here come from the OS (no D-Bus session, say)
+/// rather than from the script.
+fn update_media_session(
+    session: &mut MediaSession,
+    info: &NowPlaying,
+    cover_url: Option<String>,
+    new_file: Option<PathBuf>,
+) -> Result<(), String> {
+    // Empty strings rather than `None`, which souvlaki takes as "keep what
+    // was there", so a field left out of an update really is cleared.
+    let metadata = MediaMetadata {
+        title: Some(info.title.as_str()),
+        artist: Some(info.artist.as_str()),
+        album: Some(info.album.as_str()),
+        cover_url: cover_url.as_deref(),
+        duration: info.duration.map(Duration::from_secs_f64),
+    };
+    let result = session
+        .controls
+        .set_metadata(metadata)
+        .and_then(|_| {
+            let progress = info
+                .position
+                .map(|seconds| MediaPosition(Duration::from_secs_f64(seconds)));
+            session.controls.set_playback(if info.playing {
+                MediaPlayback::Playing { progress }
+            } else {
+                MediaPlayback::Paused { progress }
+            })
+        })
+        .map_err(|err| format!("cannot update media session: {:?}", err));
+    // The previous artwork file has been replaced (or the update failed and
+    // the new one is not needed); either way one of them can go.
+    let stale = match new_file {
+        Some(file) if result.is_ok() => session.artwork_file.replace(file),
+        unused => unused,
+    };
+    if let Some(stale) = stale {
+        let _ = std::fs::remove_file(stale);
+    }
+    result
 }
 
 /// Fulfils a parked `__ui_open` request, if there is one.
@@ -937,6 +1303,13 @@ fn builtin_close(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let id = integer_arg(args, 0, "window")?;
     let removed = WINDOWS.with(|windows| windows.borrow_mut().remove(&id));
     if let Some(win) = removed {
+        // The OS controls belong to the window, so the session ends with it.
+        MEDIA.with(|media| {
+            let mut media = media.borrow_mut();
+            if media.as_ref().is_some_and(|session| session.window == id) {
+                *media = None;
+            }
+        });
         WINDOW_IDS.with(|ids| ids.borrow_mut().remove(&win.window.id()));
         drop(win);
         // Let the window system process the teardown so the window really
@@ -993,6 +1366,7 @@ fn builtin_size(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 fn builtin_poll(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let timeout = timeout_arg(args, 0, "timeout")?;
     pump(timeout)?;
+    drain_media_commands();
     let events = EVENTS.with(|events| std::mem::take(&mut *events.borrow_mut()));
     Ok(vec![new_table(events)])
 }
@@ -1268,6 +1642,88 @@ fn builtin_present(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     Ok(vec![])
 }
 
+fn optional_string_arg(args: &[Value], index: usize, name: &str) -> Result<Option<String>, String> {
+    match args.get(index) {
+        None | Some(Value::Nil) => Ok(None),
+        _ => string_arg(args, index, name).map(Some),
+    }
+}
+
+/// A non-negative number of seconds small enough for every backend's clock.
+fn optional_seconds_arg(args: &[Value], index: usize, name: &str) -> Result<Option<f64>, String> {
+    match args.get(index) {
+        None | Some(Value::Nil) => Ok(None),
+        _ => {
+            let seconds = float_arg(args, index, name)?;
+            if !(0.0..=1e9).contains(&seconds) {
+                return Err(format!("{} must be a number of seconds from 0", name));
+            }
+            Ok(Some(seconds))
+        }
+    }
+}
+
+/// `__ui_media_session(window, title?, artist?, album?, artwork?, image?,
+/// duration?, position?, playing)` publishes now-playing metadata through
+/// window `window`, starting the session on first use (or when the window
+/// changes). Returns true, or false and the reason when the OS refused.
+fn builtin_media_session(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = integer_arg(args, 0, "window")?;
+    let info = NowPlaying {
+        title: optional_string_arg(args, 1, "title")?.unwrap_or_default(),
+        artist: optional_string_arg(args, 2, "artist")?.unwrap_or_default(),
+        album: optional_string_arg(args, 3, "album")?.unwrap_or_default(),
+        artwork: optional_string_arg(args, 4, "artwork")?,
+        artwork_image: match args.get(5) {
+            None | Some(Value::Nil) => None,
+            _ => Some(integer_arg(args, 5, "artwork")?),
+        },
+        duration: optional_seconds_arg(args, 6, "duration")?,
+        position: optional_seconds_arg(args, 7, "position")?,
+        playing: bool_arg(args, 8, "playing", false)?,
+    };
+    with_window(id, |_| Ok(()))?;
+    let (cover_url, new_file) = prepare_artwork(&info)?;
+
+    let outcome = MEDIA.with(|media| {
+        let mut media = media.borrow_mut();
+        if media.as_ref().is_some_and(|session| session.window != id) {
+            *media = None;
+        }
+        if media.is_none() {
+            match create_media_session(id) {
+                Ok(session) => *media = Some(session),
+                Err(err) => {
+                    if let Some(unused) = &new_file {
+                        let _ = std::fs::remove_file(unused);
+                    }
+                    return Err(err);
+                }
+            }
+        }
+        match media.as_mut() {
+            Some(session) => update_media_session(session, &info, cover_url, new_file),
+            None => Ok(()),
+        }
+    });
+    Ok(match outcome {
+        Ok(()) => vec![Value::Bool(true)],
+        Err(err) => {
+            // A session that failed to publish is not worth keeping: it
+            // would also swallow the focused-window media keys.
+            MEDIA.with(|media| *media.borrow_mut() = None);
+            vec![Value::Bool(false), Value::string(err)]
+        }
+    })
+}
+
+/// `__ui_media_session_clear()` ends the media session, removing the app
+/// from the OS media controls.
+fn builtin_media_session_clear(_vm: &mut VM, _args: &[Value]) -> Result<Vec<Value>, String> {
+    MEDIA.with(|media| *media.borrow_mut() = None);
+    Ok(vec![])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1362,6 +1818,121 @@ mod tests {
         assert_eq!(pixels[0].alpha(), 128);
         assert!(pixels[0].red() <= 128);
         assert_eq!(pixels[1].alpha(), 0);
+    }
+
+    #[test]
+    fn media_commands_become_keys_and_session_actions() {
+        let key = |event| media_command(&event);
+        assert_eq!(
+            key(MediaControlEvent::Toggle),
+            Some(MediaCommand::Key("playpause"))
+        );
+        assert_eq!(
+            key(MediaControlEvent::Play),
+            Some(MediaCommand::Key("play"))
+        );
+        assert_eq!(
+            key(MediaControlEvent::Pause),
+            Some(MediaCommand::Key("pause"))
+        );
+        assert_eq!(
+            key(MediaControlEvent::Next),
+            Some(MediaCommand::Key("next"))
+        );
+        assert_eq!(
+            key(MediaControlEvent::Previous),
+            Some(MediaCommand::Key("previous"))
+        );
+        assert_eq!(
+            key(MediaControlEvent::Stop),
+            Some(MediaCommand::Key("stop"))
+        );
+        assert_eq!(
+            key(MediaControlEvent::SetPosition(MediaPosition(
+                Duration::from_millis(61_500)
+            ))),
+            Some(MediaCommand::SeekTo(61.5))
+        );
+        assert_eq!(
+            key(MediaControlEvent::SeekBy(
+                SeekDirection::Backward,
+                Duration::from_secs(5)
+            )),
+            Some(MediaCommand::SeekBy(-5.0))
+        );
+        assert_eq!(
+            key(MediaControlEvent::Seek(SeekDirection::Forward)),
+            Some(MediaCommand::SeekBy(MEDIA_SEEK_STEP))
+        );
+        assert_eq!(
+            key(MediaControlEvent::Raise),
+            Some(MediaCommand::Action("raise"))
+        );
+        assert_eq!(key(MediaControlEvent::SetVolume(0.5)), None);
+        assert_eq!(key(MediaControlEvent::OpenUri("x".to_string())), None);
+    }
+
+    #[test]
+    fn keyboard_media_keys_are_named() {
+        assert_eq!(
+            media_key_name(&Key::Named(NamedKey::MediaPlayPause)),
+            Some("playpause")
+        );
+        assert_eq!(
+            media_key_name(&Key::Named(NamedKey::MediaTrackNext)),
+            Some("next")
+        );
+        assert_eq!(
+            media_key_name(&Key::Named(NamedKey::MediaTrackPrevious)),
+            Some("previous")
+        );
+        assert_eq!(media_key_name(&Key::Named(NamedKey::Escape)), None);
+        assert_eq!(media_key_name(&Key::Character("p".into())), None);
+    }
+
+    #[test]
+    fn media_events_carry_their_fields() {
+        let event = media_command_event(3, MediaCommand::SeekBy(-10.0));
+        let Value::Table(table) = event else {
+            panic!("events are tables");
+        };
+        let table = table.borrow();
+        let field = |name: &str| table.fields.get(name).cloned();
+        assert!(matches!(field("kind"), Some(Value::String(s)) if s.to_string() == "mediasession"));
+        assert!(matches!(field("action"), Some(Value::String(s)) if s.to_string() == "seek"));
+        assert!(matches!(field("offset"), Some(Value::Float(f)) if f == -10.0));
+        assert!(field("position").is_none());
+    }
+
+    #[test]
+    fn dbus_names_are_valid_bus_name_elements() {
+        assert_eq!(dbus_name("Neyuki Player", 42), "neyuki_player.instance42");
+        assert_eq!(dbus_name("", 1), "neyuki.instance1");
+        assert_eq!(dbus_name("  ♫♫ ", 1), "neyuki.instance1");
+        assert_eq!(dbus_name("3D Tunes", 7), "_3d_tunes.instance7");
+        assert!(dbus_name(&"x".repeat(500), 1).len() < 100);
+    }
+
+    #[test]
+    fn artwork_urls_are_told_from_paths() {
+        assert!(is_artwork_url("https://example.com/cover.png"));
+        assert!(is_artwork_url("HTTP://example.com/cover.png"));
+        assert!(is_artwork_url("file:///tmp/cover.png"));
+        assert!(!is_artwork_url("covers/cover.png"));
+        assert!(!is_artwork_url("C:\\music\\cover.png"));
+    }
+
+    #[test]
+    fn file_urls_match_each_backend() {
+        assert_eq!(
+            file_url("C:\\Music\\My Cover.png", true),
+            "file://C:\\Music\\My Cover.png"
+        );
+        assert_eq!(
+            file_url("/home/me/My Cover#1.png", false),
+            "file:///home/me/My%20Cover%231.png"
+        );
+        assert_eq!(file_url("/tmp/é.png", false), "file:///tmp/%C3%A9.png");
     }
 
     #[test]

@@ -76,6 +76,11 @@ softbuffer = "0.4"
 tiny-skia = "0.11"
 fontdue = "0.9"
 png = "0.18"
+# The now-playing session and media keys of `@neyuki/ui`: Windows'
+# SystemMediaTransportControls, MPRIS on Linux and MPNowPlayingInfoCenter on
+# macOS behind one API. Its zbus backend speaks D-Bus in pure Rust, where
+# the default one links the C libdbus.
+souvlaki = { version = "0.8", default-features = false, features = ["use_zbus"] }
 
 # `@neyuki/hid` drives the keyboard and mouse through `enigo` (SendInput on
 # Windows, CoreGraphics on macOS, XTest over the pure-Rust `x11rb` on X11)
