@@ -498,7 +498,7 @@ fn builtin_read(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
                 if chunk.is_empty() || !streams.contains_key(&id) {
                     streams.remove(&id);
                 } else {
-                    streams.insert(id, Some(*reader));
+                    streams.insert(id, Some(reader));
                 }
             });
             if chunk.is_empty() {
