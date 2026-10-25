@@ -890,7 +890,10 @@ impl VM {
                     pad = pad
                 ));
                 out.push_str(&format!("{:pad$} |\n", "", pad = pad));
-                if let Ok(content) = std::fs::read_to_string(src_name)
+                let bundled = crate::app::read(src_name)
+                    .and_then(Result::ok)
+                    .and_then(|bytes| String::from_utf8(bytes).ok());
+                if let Some(content) = bundled.or_else(|| std::fs::read_to_string(src_name).ok())
                     && let Some(line_content) = content.lines().nth((line - 1) as usize)
                 {
                     out.push_str(&format!("{:pad$} | {}\n", line, line_content, pad = pad));

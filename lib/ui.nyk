@@ -105,10 +105,11 @@ end
 
 -- FONTS AND IMAGES ---------------------------------------------------------
 
-function makeFont(id: number, path: string?): Font
+function makeFont(id: number, path: string?, name: string?): Font
     local freed = false
     local font = {}
     font.path = path
+    font.name = name
 
     function font.id(self: Font): number
         if (freed) then error("font was freed") end
@@ -132,12 +133,48 @@ function fontId(font: Font?, name: string): number?
     return font:id()
 end
 
--- Loads a TrueType or OpenType font file. Without one, text uses the
--- bundled Noto Sans.
-function ui.loadFont(path: string): Font
-    checkString(path, "path")
-    local id = __ui_load_font(path)
-    return makeFont(id, path)
+-- Loads a TrueType or OpenType font from a file path or from a buffer of
+-- its bytes. Without one, text uses the bundled Noto Sans.
+function ui.loadFont(source: any): Font
+    if (type(source) == "buffer") then
+        local id, name = __ui_load_font_bytes(source)
+        return makeFont(id, nil, name)
+    end
+    checkString(source, "path")
+    local id, name = __ui_load_font(source)
+    return makeFont(id, source, name)
+end
+
+-- Loads the installed font with this family name (or PostScript name),
+-- ignoring case, or returns nil when there is none. `options.weight` (100
+-- to 900, default 400) and `options.italic` pick the closest face. The
+-- installed fonts are scanned on the first call.
+function ui.systemFont(family: string, options: SystemFontOptions?): Font?
+    checkString(family, "family")
+    checkOptionalTable(options, "options")
+    options = options ?? {}
+    checkOptionalNumber(options.weight, "weight")
+    checkOptionalBoolean(options.italic, "italic")
+    local id, name, path = __ui_system_font(family, options.weight, options.italic)
+    if (id == nil) then return nil end
+    return makeFont(id, path, name)
+end
+
+-- Turns a list of fonts into the ids the natives take.
+function fontIds(fonts: {Font}, name: string): {number}
+    if (type(fonts) != "table") then error(name .. " must be a table of fonts") end
+    local ids = {}
+    for i, font in fonts do
+        ids[i] = fontId(font, name .. "[" .. tostring(i) .. "]")
+    end
+    return ids
+end
+
+-- Sets the fonts every text looks in, in order, for characters its own
+-- font lacks (kana, kanji, Hangul, emoji, ...). The bundled font is always
+-- tried last. An empty list (or nil) clears them; a closed font drops out.
+function ui.setFallbackFonts(fonts: {Font}?): ()
+    __ui_set_fallback_fonts(fontIds(fonts ?? {}, "fonts"))
 end
 
 function checkImage(image: any, name: string)
@@ -258,13 +295,41 @@ function shapeOptions(options: ShapeOptions?): (boolean, number, number)
     return options.fill ?? true, options.width ?? 1, options.radius ?? 0
 end
 
-function textOptions(options: TextOptions?): (number, number, number?)
+local overflows = { clip = true, ellipsis = true, wrap = true }
+local alignments = { left = true, center = true, right = true }
+
+-- Reads the options `window:text` and `ui.measureText` share, in the order
+-- the natives take them after the text: size, color, font, fallback,
+-- maxWidth, overflow, align, lineHeight, letterSpacing.
+function textOptions(options: TextOptions?): (number, number, number?, {number}?, number?, string?, string?, number?, number?)
     checkOptionalTable(options, "options")
     options = options ?? {}
     checkOptionalNumber(options.size, "size")
     if (options.size != nil and options.size <= 0) then error("size must be positive") end
     local color = packColor(options.color ?? "#000000", "color")
-    return options.size ?? 16, color, fontId(options.font, "font")
+    checkOptionalNumber(options.opacity, "opacity")
+    if (options.opacity != nil) then
+        if (options.opacity < 0 or options.opacity > 1) then error("opacity must be from 0 to 1") end
+        local alpha = color % 256
+        color = color - alpha + math.floor(alpha * options.opacity + 0.5)
+    end
+    local fallback = nil
+    if (options.fallback != nil) then fallback = fontIds(options.fallback, "fallback") end
+    checkOptionalNumber(options.maxWidth, "maxWidth")
+    if (options.maxWidth != nil and options.maxWidth <= 0) then error("maxWidth must be positive") end
+    checkOptionalString(options.overflow, "overflow")
+    if (options.overflow != nil and overflows[options.overflow] == nil) then
+        error("overflow must be \"clip\", \"ellipsis\" or \"wrap\"")
+    end
+    checkOptionalString(options.align, "align")
+    if (options.align != nil and alignments[options.align] == nil) then
+        error("align must be \"left\", \"center\" or \"right\"")
+    end
+    checkOptionalNumber(options.lineHeight, "lineHeight")
+    if (options.lineHeight != nil and options.lineHeight <= 0) then error("lineHeight must be positive") end
+    checkOptionalNumber(options.letterSpacing, "letterSpacing")
+    return options.size ?? 16, color, fontId(options.font, "font"), fallback, options.maxWidth,
+        options.overflow, options.align, options.lineHeight, options.letterSpacing
 end
 
 -- GRADIENTS, SHADOWS AND PATHS ---------------------------------------------
@@ -547,16 +612,23 @@ function addDrawing(target: any, id: number, ensureOpen: any, clearColor: any)
         __ui_polygon(id, points, packColor(color, "color"), fill, lineWidth, gradient, shadow)
     end
 
-    -- Draws `s` with the top-left corner of its line box at (x, y); "\n"
-    -- starts a new line. `options` may hold `size` (default 16), `color`
-    -- (default black) and `font` (from ui.loadFont). Returns the width drawn.
-    function target.text(self: Window, x: number, y: number, s: string, options: TextOptions?): number
+    -- Draws `s` with the top-left corner of its first line box at (x, y);
+    -- "\n" starts a new line. `options` may hold `size` (default 16),
+    -- `color` (default black), `opacity`, `font` (from ui.loadFont),
+    -- `fallback` (fonts for characters `font` lacks, instead of the global
+    -- ones), `maxWidth` with `overflow` ("wrap" by default, "ellipsis" or
+    -- "clip"), `align` ("left", "center" or "right"), `lineHeight` (a
+    -- multiple of the size) and `letterSpacing` (pixels). Without
+    -- `maxWidth`, centered and right-aligned text is centered on or ends at
+    -- x. Returns the width and height drawn, as ui.measureText does.
+    function target.text(self: Window, x: number, y: number, s: string, options: TextOptions?): (number, number)
         ensureOpen()
         checkNumber(x, "x")
         checkNumber(y, "y")
         checkString(s, "text")
-        local size, color, font = textOptions(options)
-        return __ui_text(id, x, y, s, size, color, font)
+        local size, color, font, fallback, maxWidth, overflow, align, lineHeight, letterSpacing = textOptions(options)
+        local w, h = __ui_text(id, x, y, s, size, color, font, fallback, maxWidth, overflow, align, lineHeight, letterSpacing)
+        return w, h
     end
 
     -- Draws an image at its own size, or into the box given by
@@ -960,12 +1032,14 @@ function ui.isAvailable(): boolean
     return __ui_available()
 end
 
--- The logical width and height `window:text` would cover for `s`.
-function ui.measureText(s: string, options: TextOptions?): (number, number)
+-- The logical width and height `window:text` would cover for `s` with the
+-- same options (fallback fonts, wrapping and ellipsis included), and the
+-- number of lines.
+function ui.measureText(s: string, options: TextOptions?): (number, number, number)
     checkString(s, "text")
-    local size, _, font = textOptions(options)
-    local w, h = __ui_measure_text(s, size, font)
-    return w, h
+    local size, _, font, fallback, maxWidth, overflow, align, lineHeight, letterSpacing = textOptions(options)
+    local w, h, lines = __ui_measure_text(s, size, font, fallback, maxWidth, overflow, align, lineHeight, letterSpacing)
+    return w, h, lines
 end
 
 -- CLIPBOARD AND LINKS ------------------------------------------------------
@@ -1013,6 +1087,9 @@ end
 --   mouseup     button, x, y
 --   scroll      dx, dy, unit ("lines" or "pixels"), x, y
 --   mouseenter / mouseleave
+--   mediakey    key ("playpause", "play", "pause", "next", "previous",
+--               "stop"): a media key or OS media control (see mediaSession)
+--   mediasession action ("seek" with position or offset, "raise", "quit")
 --   maximize / minimize / restore
 --   dropfile    path            a file was dropped on the window
 --   dpichange   scale           the window moved to a display with another
@@ -1073,6 +1150,69 @@ function ui.run(handler: ({Event}, number) -> any, options: RunOptions?): ()
             error(err)
         end
     end
+end
+
+-- MEDIA SESSION ------------------------------------------------------------
+
+-- The open window with the lowest id: the first one opened that is still
+-- open.
+function firstWindow(): Window?
+    local first = nil
+    for _, window in windows do
+        if (window != nil and (first == nil or window.id < first.id)) then first = window end
+    end
+    return first
+end
+
+-- Publishes now-playing metadata to the OS media controls (the Windows
+-- volume flyout, MPRIS applets on Linux, Control Center on macOS) and
+-- starts receiving their commands, global media keys included. `info` may
+-- hold `title`, `artist`, `album`, `artwork` (an Image, a path or an
+-- http(s) URL), `duration` and `position` in seconds, `playing` and the
+-- `window` to attach to (default: the first open one). Call it again to
+-- update; every call replaces what was shown. `nil` ends the session.
+-- Returns true, or false and the reason when the OS has no media controls
+-- to offer (no D-Bus session, say).
+--
+-- Commands arrive from `poll` as events: `mediakey` with `key` ("playpause",
+-- "play", "pause", "next", "previous", "stop") and `mediasession` with
+-- `action` "seek" (and `position`, or a relative `offset`), "raise" or
+-- "quit".
+function ui.mediaSession(info: MediaInfo?): (boolean, string?)
+    if (info == nil) then
+        __ui_media_session_clear()
+        return true
+    end
+    if (type(info) != "table") then error("info must be a table or nil") end
+    checkOptionalString(info.title, "title")
+    checkOptionalString(info.artist, "artist")
+    checkOptionalString(info.album, "album")
+    checkOptionalNumber(info.duration, "duration")
+    checkOptionalNumber(info.position, "position")
+    checkOptionalBoolean(info.playing, "playing")
+    if (info.duration != nil and info.duration < 0) then error("duration must be non-negative") end
+    if (info.position != nil and info.position < 0) then error("position must be non-negative") end
+
+    local artworkPath = nil
+    local artworkImage = nil
+    if (type(info.artwork) == "string") then
+        artworkPath = info.artwork
+    elseif (type(info.artwork) == "table" and type(info.artwork.id) == "function") then
+        artworkImage = info.artwork:id()
+    elseif (info.artwork != nil) then
+        error("artwork must be an image from ui.loadImage, a path or a URL")
+    end
+
+    local window = info.window ?? firstWindow()
+    if (window == nil) then error("a media session needs an open window") end
+    if (type(window) != "table" or type(window.isOpen) != "function") then
+        error("window must be a window from ui.open")
+    end
+    if (not window:isOpen()) then error("window is closed") end
+
+    local ok, err = __ui_media_session(window.id, info.title, info.artist, info.album,
+        artworkPath, artworkImage, info.duration, info.position, info.playing ?? false)
+    return ok, err
 end
 
 -- ANIMATION ----------------------------------------------------------------
