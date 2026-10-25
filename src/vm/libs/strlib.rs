@@ -1338,6 +1338,8 @@ const NATIVE_INT_SIZE: usize = 4;
 const NATIVE_LONG_SIZE: usize = 8;
 const NATIVE_MAX_ALIGN: usize = 8;
 const MAX_INT_SIZE: usize = 16;
+/// The largest string `string.pack` builds.
+const MAX_PACK_OUTPUT: usize = 100 * 1024 * 1024;
 
 #[derive(Clone, Copy, PartialEq)]
 enum PackKind {
@@ -1591,6 +1593,11 @@ pub(crate) fn builtin_pack(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, S
                 let value = require_string(&value)?;
                 if value.len() > size {
                     return Err("string longer than given size".to_string());
+                }
+                // `c` takes any size, so cap what the zero padding can
+                // allocate (the same limit as `string.rep`).
+                if out.len().saturating_add(size) > MAX_PACK_OUTPUT {
+                    return Err("packed result is too large".to_string());
                 }
                 out.extend(value.as_bytes());
                 out.extend(std::iter::repeat_n(0u8, size - value.len()));
