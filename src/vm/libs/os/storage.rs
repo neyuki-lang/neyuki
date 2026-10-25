@@ -344,8 +344,8 @@ mod keychain {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
-    use aes_gcm::aead::{Aead, KeyInit, Payload};
-    use aes_gcm::{Aes256Gcm, Nonce};
+    use aes_gcm::Aes256Gcm;
+    use aes_gcm::aead::{Aead, KeyInit, Nonce, Payload};
     use rand::RngCore;
     use rand::rngs::OsRng;
 
@@ -415,12 +415,12 @@ mod keychain {
     pub(super) fn seal(account: &str, data: &[u8]) -> Result<Vec<u8>, String> {
         let key = key(account, true)?;
         let cipher = Aes256Gcm::new_from_slice(&key).map_err(|_| "cannot protect data")?;
-        let mut nonce = [0u8; NONCE_LEN];
-        OsRng.fill_bytes(&mut nonce);
+        let mut nonce = Nonce::<Aes256Gcm>::default();
+        OsRng.fill_bytes(nonce.as_mut_slice());
         let header = [SCHEME_KEYCHAIN];
         let sealed = cipher
             .encrypt(
-                Nonce::from_slice(&nonce),
+                &nonce,
                 Payload {
                     msg: data,
                     aad: &header,
@@ -444,7 +444,7 @@ mod keychain {
         let (nonce, sealed) = rest.split_at(NONCE_LEN);
         cipher
             .decrypt(
-                Nonce::from_slice(nonce),
+                Nonce::<Aes256Gcm>::from_slice(nonce),
                 Payload {
                     msg: sealed,
                     aad: header,
