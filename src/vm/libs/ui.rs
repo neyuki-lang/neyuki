@@ -2408,4 +2408,103 @@ mod tests {
         let err = points_arg(&[table], 0, "points").unwrap_err();
         assert!(err.contains("pairs"), "{}", err);
     }
+
+    fn red_at(pixmap: &Pixmap, x: u32, y: u32) -> (u8, u8, u8, u8) {
+        let p = pixmap.pixels()[(y * pixmap.width() + x) as usize];
+        (p.red(), p.green(), p.blue(), p.alpha())
+    }
+
+    #[test]
+    fn paths_are_built_from_commands() {
+        let square = [0.0, 0.0, 0.0, 1.0, 10.0, 0.0, 1.0, 10.0, 10.0, 4.0];
+        assert!(path_from_commands(&square).is_ok());
+        assert!(path_from_commands(&[]).is_err());
+        assert!(path_from_commands(&[9.0]).unwrap_err().contains("unknown"));
+        assert!(
+            path_from_commands(&[1.0, 5.0])
+                .unwrap_err()
+                .contains("middle")
+        );
+    }
+
+    #[test]
+    fn gradients_need_stops_and_extent() {
+        let linear = [0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 4278190335.0, 1.0, 65535.0];
+        assert!(gradient_shader(&linear).is_ok());
+        assert!(gradient_shader(&linear[..7]).is_err());
+        let radial = [1.0, 5.0, 5.0, 0.0, 0.0, 0.0, 4278190335.0, 1.0, 65535.0];
+        assert!(gradient_shader(&radial).unwrap_err().contains("degenerate"));
+    }
+
+    #[test]
+    fn clips_and_opacity_groups_shape_drawing() {
+        let mut pixmap = Pixmap::new(10, 10).unwrap();
+        pixmap.fill(Color::WHITE);
+        let mut state = DrawState::default();
+        let mut target = Target {
+            pixmap: &mut pixmap,
+            scale: 1.0,
+            state: &mut state,
+        };
+        let whole = rounded_rect(0.0, 0.0, 10.0, 10.0, 0.0).unwrap();
+        let left = rounded_rect(0.0, 0.0, 5.0, 10.0, 0.0);
+        push_clip(&mut target, left.as_ref()).unwrap();
+        fill_shape(&mut target, &whole, (255, 0, 0, 255), None, None).unwrap();
+        pop_clip(&mut target).unwrap();
+        assert!(pop_clip(&mut target).is_err());
+        // An empty clip draws nothing.
+        push_clip(&mut target, None).unwrap();
+        fill_shape(&mut target, &whole, (0, 0, 255, 255), None, None).unwrap();
+        pop_clip(&mut target).unwrap();
+
+        push_opacity(&mut target, 0.5).unwrap();
+        push_clip(&mut target, left.as_ref()).unwrap();
+        assert!(pop_opacity(&mut target).is_err());
+        pop_clip(&mut target).unwrap();
+        fill_shape(&mut target, &whole, (0, 0, 0, 255), None, None).unwrap();
+        pop_opacity(&mut target).unwrap();
+        assert!(pop_opacity(&mut target).is_err());
+
+        let (r, _, _, _) = red_at(&pixmap, 2, 5);
+        assert!(r > 100 && r < 160, "red under half black: {}", r);
+        let (r, g, _, a) = red_at(&pixmap, 7, 5);
+        assert!(
+            r > 100 && r < 160 && g == r && a == 255,
+            "{} {} {}",
+            r,
+            g,
+            a
+        );
+    }
+
+    #[test]
+    fn gradients_and_shadows_paint() {
+        let mut pixmap = Pixmap::new(40, 40).unwrap();
+        pixmap.fill(Color::WHITE);
+        let mut state = DrawState::default();
+        let mut target = Target {
+            pixmap: &mut pixmap,
+            scale: 1.0,
+            state: &mut state,
+        };
+        let rect = rounded_rect(10.0, 10.0, 20.0, 20.0, 0.0).unwrap();
+        // Black to white across the rectangle, with a black shadow.
+        let gradient = [0.0, 10.0, 0.0, 30.0, 0.0, 0.0, 255.0, 1.0, 4294967295.0];
+        let shadow = [8.0, 0.0, 0.0, 0.0, 255.0];
+        fill_shape(
+            &mut target,
+            &rect,
+            (0, 0, 0, 255),
+            Some(&gradient),
+            Some(&shadow),
+        )
+        .unwrap();
+        let (left, ..) = red_at(&pixmap, 11, 20);
+        let (right, ..) = red_at(&pixmap, 28, 20);
+        assert!(left < 60 && right > 190, "{} {}", left, right);
+        let (halo, ..) = red_at(&pixmap, 8, 20);
+        assert!(halo < 250, "shadow reaches outside the shape: {}", halo);
+        let (far, ..) = red_at(&pixmap, 0, 0);
+        assert_eq!(far, 255);
+    }
 }
