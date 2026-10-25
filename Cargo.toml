@@ -89,6 +89,16 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 
 [target.'cfg(windows)'.dependencies]
 schannel = ">=0.1.23, <0.1.28"
+# `os.protect` seals secrets with DPAPI (CryptProtectData) for the current
+# user. 0.59 is the generation that still links through import libraries,
+# for the same windows-gnu reason as `schannel` above.
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography"] }
+
+# Elsewhere `os.protect` keeps a random AES-256-GCM key in the OS keychain:
+# Keychain Services on macOS, the Secret Service over the pure-Rust `zbus`
+# D-Bus client on Linux and the BSDs (no libdbus needed to build or run).
+[target.'cfg(not(windows))'.dependencies]
+keyring = { version = "3.6", features = ["apple-native", "async-secret-service", "async-io", "crypto-rust"] }
 
 # On Wayland, XTest only reaches XWayland windows, so `@neyuki/hid` drives the
 # compositor's virtual keyboard and pointer itself. enigo's own Wayland
