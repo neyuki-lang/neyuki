@@ -9,7 +9,7 @@ pub mod version;
 
 pub use cli::run_pkg_cli;
 pub use lockfile::{LockedPackage, Lockfile};
-pub use manifest::PackageManifest;
+pub use manifest::{AppManifest, PackageManifest};
 pub use resolver::{AvailablePackage, DependencyResolver};
 pub use store::PackageStore;
 pub use version::{Version, VersionReq};
