@@ -66,8 +66,10 @@ fallible-iterator = "0.2"
 mysql = { version = "28", default-features = false, features = ["minimal-rust", "native-tls", "buffer-pool"] }
 
 # `@neyuki/ui` opens windows through `winit`, blits CPU-rendered frames with
-# `softbuffer` and draws them with `tiny-skia` and `fontdue`; `png` loads
-# images. All pure Rust, so no GPU, GL or C compiler is needed. On Linux the
+# `softbuffer` and draws them with `tiny-skia` and `fontdue`. `image` decodes
+# PNG, JPEG, WebP, GIF and BMP (animations included) through its pure-Rust
+# codecs (`png`, `zune-jpeg`, `image-webp`, `gif`); only those formats are
+# enabled. All pure Rust, so no GPU, GL or C compiler is needed. On Linux the
 # X11, Wayland and xkbcommon client libraries are loaded at runtime (dlopen)
 # rather than linked, so a build machine needs none of them and a headless
 # machine still runs everything else.
@@ -75,7 +77,7 @@ winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11
 softbuffer = "0.4"
 tiny-skia = "0.11"
 fontdue = "0.9"
-png = "0.18"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }
 
 # `@neyuki/hid` drives the keyboard and mouse through `enigo` (SendInput on
 # Windows, CoreGraphics on macOS, XTest over the pure-Rust `x11rb` on X11)

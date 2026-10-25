@@ -9,7 +9,8 @@
 //! the drawing natives paint into that window's back buffer, `__ui_present`
 //! shows it and `__ui_poll` pumps the OS event loop and hands back whatever
 //! happened as a list of event tables. `lib/ui.nyk` builds the `Window`,
-//! `Image` and `Font` objects and the `run` loop on top of these.
+//! `Image` and `Font` objects and the `run` loop on top of these. Image
+//! decoding, resampling and compositing live in `ui/images.rs`.
 //!
 //! Every coordinate crossing the boundary is in logical pixels; the back
 //! buffer is kept at the window's physical size and drawing is scaled by the
@@ -21,16 +22,15 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::BufReader;
+use std::io::Read;
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::time::Duration;
 
 use fontdue::layout::{CoordinateSystem, GlyphRasterConfig, Layout, LayoutSettings, TextStyle};
 use tiny_skia::{
-    Color, ColorU8, FillRule, FilterQuality, Paint, Path, PathBuilder, Pixmap, PixmapPaint,
-    PremultipliedColorU8, Rect, Stroke, Transform,
+    Color, FillRule, Paint, Path, PathBuilder, Pixmap, PremultipliedColorU8, Rect, Stroke,
+    Transform,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -43,6 +43,10 @@ use winit::window::{Window, WindowId};
 use crate::vm::libs::args::array as new_table;
 use crate::vm::machine::VM;
 use crate::vm::value::{NativeDef, StrRef, Value, VmTable};
+
+mod images;
+
+use images::{Decoded, Fit, Limits};
 
 pub(crate) const NATIVES: &[NativeDef] = &[
     NativeDef {
@@ -108,6 +112,14 @@ pub(crate) const NATIVES: &[NativeDef] = &[
     NativeDef {
         name: "__ui_load_image",
         func: builtin_load_image,
+    },
+    NativeDef {
+        name: "__ui_decode_image",
+        func: builtin_decode_image,
+    },
+    NativeDef {
+        name: "__ui_resize_image",
+        func: builtin_resize_image,
     },
     NativeDef {
         name: "__ui_free_image",
@@ -178,7 +190,7 @@ thread_local! {
     static EVENT_LOOP: RefCell<Option<Result<EventLoop<()>, String>>> = const { RefCell::new(None) };
     static WINDOWS: RefCell<HashMap<u64, Win>> = RefCell::new(HashMap::new());
     static WINDOW_IDS: RefCell<HashMap<WindowId, u64>> = RefCell::new(HashMap::new());
-    static IMAGES: RefCell<HashMap<u64, Pixmap>> = RefCell::new(HashMap::new());
+    static IMAGES: RefCell<HashMap<u64, ImageEntry>> = RefCell::new(HashMap::new());
     static FONTS: RefCell<HashMap<u64, FontEntry>> = RefCell::new(HashMap::new());
     static EVENTS: RefCell<Vec<Value>> = const { RefCell::new(Vec::new()) };
     static PENDING_OPEN: RefCell<Option<OpenRequest>> = const { RefCell::new(None) };
@@ -854,46 +866,131 @@ fn draw_text(
 
 // IMAGES -------------------------------------------------------------------
 
-fn decode_png(path: &str) -> Result<Pixmap, String> {
-    let file = File::open(path).map_err(|err| format!("cannot open {}: {}", path, err))?;
-    let mut decoder = png::Decoder::new(BufReader::new(file));
-    decoder.set_transformations(png::Transformations::normalize_to_color8());
-    let mut reader = decoder
-        .read_info()
-        .map_err(|err| format!("cannot decode {}: {}", path, err))?;
-    let size = reader
-        .output_buffer_size()
-        .ok_or_else(|| format!("cannot decode {}: image too large", path))?;
-    let mut buffer = vec![0; size];
-    let info = reader
-        .next_frame(&mut buffer)
-        .map_err(|err| format!("cannot decode {}: {}", path, err))?;
-    let bytes = &buffer[..info.buffer_size()];
-    let rgba: Vec<u8> = match info.color_type {
-        png::ColorType::Rgba => bytes.to_vec(),
-        png::ColorType::Rgb => bytes
-            .chunks(3)
-            .flat_map(|p| [p[0], p[1], p[2], 255])
-            .collect(),
-        png::ColorType::Grayscale => bytes.iter().flat_map(|&g| [g, g, g, 255]).collect(),
-        png::ColorType::GrayscaleAlpha => bytes
-            .chunks(2)
-            .flat_map(|p| [p[0], p[0], p[0], p[1]])
-            .collect(),
-        png::ColorType::Indexed => {
-            return Err(format!("cannot decode {}: unexpected indexed output", path));
-        }
-    };
-    rgba_to_pixmap(&rgba, info.width, info.height)
-        .ok_or_else(|| format!("cannot decode {}: image too large", path))
+/// Scaled copies an image may keep for redrawing at the same size. A full
+/// HD animation scaled to a window keeps one copy per frame until this is
+/// reached, then starts over, so it rescales each frame at most once per
+/// loop instead of on every draw.
+const SCALED_CACHE_BYTES: usize = 128 * 1024 * 1024;
+
+/// A decoded image parked under an id. Drawing only reads `frames`, so an
+/// off-screen canvas can later be stored and drawn the same way.
+struct ImageEntry {
+    frames: Vec<ImageFrame>,
+    delays: Vec<f64>,
+    loop_count: u32,
+    /// The limits it was decoded under, which `resized` copies keep.
+    limits: Limits,
+    /// The last prepared (scaled or cropped) copy of each frame.
+    scaled: HashMap<usize, Scaled>,
+    scaled_bytes: usize,
 }
 
-fn rgba_to_pixmap(rgba: &[u8], width: u32, height: u32) -> Option<Pixmap> {
-    let mut pixmap = Pixmap::new(width, height)?;
-    for (pixel, source) in pixmap.pixels_mut().iter_mut().zip(rgba.chunks(4)) {
-        *pixel = ColorU8::from_rgba(source[0], source[1], source[2], source[3]).premultiply();
+struct ImageFrame {
+    pixmap: Pixmap,
+    opaque: bool,
+}
+
+/// What a prepared copy was made from: the source rectangle and the size
+/// in physical pixels.
+#[derive(Clone, Copy, PartialEq)]
+struct ScaleKey {
+    src: images::RectF,
+    width: u32,
+    height: u32,
+}
+
+struct Scaled {
+    key: ScaleKey,
+    frame: ImageFrame,
+}
+
+impl ImageEntry {
+    fn new(decoded: Decoded, limits: Limits) -> ImageEntry {
+        let frames = decoded
+            .frames
+            .into_iter()
+            .map(|pixmap| ImageFrame {
+                opaque: images::is_opaque(&pixmap),
+                pixmap,
+            })
+            .collect();
+        ImageEntry {
+            frames,
+            delays: decoded.delays,
+            loop_count: decoded.loop_count,
+            limits,
+            scaled: HashMap::new(),
+            scaled_bytes: 0,
+        }
     }
-    Some(pixmap)
+
+    fn width(&self) -> u32 {
+        self.frames[0].pixmap.width()
+    }
+
+    fn height(&self) -> u32 {
+        self.frames[0].pixmap.height()
+    }
+
+    /// Frame `index` prepared at `key`'s crop and size, from the cache when
+    /// the last draw of this frame used the same ones.
+    fn prepared(&mut self, index: usize, key: ScaleKey) -> Option<&ImageFrame> {
+        let hit = self.scaled.get(&index).is_some_and(|s| s.key == key);
+        if !hit {
+            let pixmap =
+                images::resample(&self.frames[index].pixmap, key.src, key.width, key.height)?;
+            let bytes = pixmap.data().len();
+            if let Some(old) = self.scaled.remove(&index) {
+                self.scaled_bytes -= old.frame.pixmap.data().len();
+            }
+            if self.scaled_bytes + bytes > SCALED_CACHE_BYTES {
+                self.scaled.clear();
+                self.scaled_bytes = 0;
+            }
+            self.scaled_bytes += bytes;
+            let frame = ImageFrame {
+                opaque: images::is_opaque(&pixmap),
+                pixmap,
+            };
+            self.scaled.insert(index, Scaled { key, frame });
+        }
+        self.scaled.get(&index).map(|s| &s.frame)
+    }
+}
+
+/// The optional `maxPixels` and `maxBytes` limits at `index` and after.
+fn limits_arg(args: &[Value], index: usize) -> Result<Limits, String> {
+    let defaults = Limits::default();
+    let limit = |offset: usize, name: &str, default: u64| match args.get(index + offset) {
+        None | Some(Value::Nil) => Ok(default),
+        _ => match integer_arg(args, index + offset, name)? {
+            0 => Err(format!("{} must be positive", name)),
+            value => Ok(value),
+        },
+    };
+    Ok(Limits {
+        max_pixels: limit(0, "maxPixels", defaults.max_pixels)?,
+        max_bytes: limit(1, "maxBytes", defaults.max_bytes)?,
+    })
+}
+
+/// Parks a decoded image and returns what `lib/ui.nyk` builds the `Image`
+/// from: id, width, height, frame count, loop count and frame delays.
+fn register_image(entry: ImageEntry) -> Vec<Value> {
+    let (width, height) = (entry.width(), entry.height());
+    let frames = entry.frames.len();
+    let loop_count = entry.loop_count;
+    let delays = entry.delays.iter().map(|d| Value::Float(*d)).collect();
+    let id = next_id();
+    IMAGES.with(|images| images.borrow_mut().insert(id, entry));
+    vec![
+        integer(id),
+        integer(width as u64),
+        integer(height as u64),
+        integer(frames as u64),
+        integer(loop_count as u64),
+        new_table(delays),
+    ]
 }
 
 // NATIVES ------------------------------------------------------------------
@@ -1175,19 +1272,86 @@ fn builtin_measure_text(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, Stri
     ])
 }
 
-/// `__ui_load_image(path)` decodes a PNG and returns its id, width and
-/// height.
+/// `__ui_load_image(path, maxPixels?, maxBytes?)` decodes a PNG, JPEG,
+/// WebP, GIF or BMP file and returns what `register_image` describes.
 fn builtin_load_image(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let path = string_arg(args, 0, "path")?;
-    let pixmap = decode_png(&path)?;
-    let (width, height) = (pixmap.width(), pixmap.height());
-    let id = next_id();
-    IMAGES.with(|images| images.borrow_mut().insert(id, pixmap));
-    Ok(vec![
-        integer(id),
-        integer(width as u64),
-        integer(height as u64),
-    ])
+    let limits = limits_arg(args, 1)?;
+    let file =
+        std::fs::File::open(&path).map_err(|err| format!("cannot open {}: {}", path, err))?;
+    // No image format compresses worse than raw pixels by much, so a file
+    // over the memory limit could not decode within it anyway.
+    let mut bytes = Vec::new();
+    file.take(limits.max_bytes + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|err| format!("cannot read {}: {}", path, err))?;
+    if bytes.len() as u64 > limits.max_bytes {
+        return Err(format!(
+            "cannot decode {}: file is over {} bytes (maxBytes)",
+            path, limits.max_bytes
+        ));
+    }
+    let decoded =
+        images::decode(&bytes, limits).map_err(|err| format!("cannot decode {}: {}", path, err))?;
+    Ok(register_image(ImageEntry::new(decoded, limits)))
+}
+
+/// `__ui_decode_image(data, maxPixels?, maxBytes?)` decodes an image held
+/// in a buffer or string, like `__ui_load_image`.
+fn builtin_decode_image(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let limits = limits_arg(args, 1)?;
+    let decoded = match args.first() {
+        Some(Value::Buffer(buffer)) => images::decode(&buffer.borrow().data, limits),
+        Some(Value::String(s)) => images::decode(s.0.str.as_bytes(), limits),
+        Some(value) => {
+            return Err(format!(
+                "data must be a buffer or string, got {}",
+                value.type_name()
+            ));
+        }
+        None => return Err("data must be provided".to_string()),
+    }
+    .map_err(|err| format!("cannot decode image: {}", err))?;
+    Ok(register_image(ImageEntry::new(decoded, limits)))
+}
+
+/// `__ui_resize_image(image, width, height)` makes a new image with every
+/// frame resampled to `width` × `height` pixels.
+fn builtin_resize_image(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = integer_arg(args, 0, "image")?;
+    let width = integer_arg(args, 1, "width")?;
+    let height = integer_arg(args, 2, "height")?;
+    if width == 0 || height == 0 || width > u32::MAX as u64 || height > u32::MAX as u64 {
+        return Err("width and height must be positive whole numbers".to_string());
+    }
+    let (width, height) = (width as u32, height as u32);
+    let entry = IMAGES.with(|images| {
+        let images = images.borrow();
+        let source = images
+            .get(&id)
+            .ok_or_else(|| "image was freed".to_string())?;
+        let frame_bytes = images::check_size(width, height, source.limits)?;
+        if frame_bytes * source.frames.len() as u64 > source.limits.max_bytes {
+            return Err(format!(
+                "resized image needs more than {} bytes (maxBytes)",
+                source.limits.max_bytes
+            ));
+        }
+        let full = (0.0, 0.0, source.width() as f32, source.height() as f32);
+        let frames = source
+            .frames
+            .iter()
+            .map(|frame| images::resample(&frame.pixmap, full, width, height))
+            .collect::<Option<Vec<Pixmap>>>()
+            .ok_or_else(|| "cannot resize image".to_string())?;
+        let decoded = Decoded {
+            frames,
+            delays: source.delays.clone(),
+            loop_count: source.loop_count,
+        };
+        Ok(ImageEntry::new(decoded, source.limits))
+    })?;
+    Ok(register_image(entry))
 }
 
 /// `__ui_free_image(image)`.
@@ -1197,8 +1361,13 @@ fn builtin_free_image(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String
     Ok(vec![])
 }
 
-/// `__ui_draw_image(window, image, x, y, width?, height?)` draws an image
-/// at its own size or scaled to `width` × `height`.
+/// `__ui_draw_image(window, image, x, y, width?, height?, frame?, opacity?,
+/// radius?, fit?)` draws frame `frame` (from 1) of an image into the box at
+/// `(x, y)`, which is the image's own size unless `width` and/or `height`
+/// say otherwise, fitted by `fit` ("fill", "contain" or "cover").
+///
+/// The frame is resampled once to the physical size it covers and that copy
+/// is cached, so redrawing it at the same size is a plain blit.
 fn builtin_draw_image(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let id = integer_arg(args, 0, "window")?;
     let image = integer_arg(args, 1, "image")?;
@@ -1206,34 +1375,78 @@ fn builtin_draw_image(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String
     let y = float_arg(args, 3, "y")? as f32;
     let width = optional_float_arg(args, 4, "width", 0.0)? as f32;
     let height = optional_float_arg(args, 5, "height", 0.0)? as f32;
+    let frame = match args.get(6) {
+        None | Some(Value::Nil) => 1,
+        _ => integer_arg(args, 6, "frame")?,
+    };
+    let opacity = optional_float_arg(args, 7, "opacity", 1.0)? as f32;
+    let radius = optional_float_arg(args, 8, "radius", 0.0)? as f32;
+    let fit = match args.get(9) {
+        None | Some(Value::Nil) => Fit::Fill,
+        _ => Fit::parse(&string_arg(args, 9, "fit")?)?,
+    };
     if width < 0.0 || height < 0.0 {
         return Err("width and height must be non-negative".to_string());
     }
+    if !(0.0..=1.0).contains(&opacity) {
+        return Err("opacity must be from 0 to 1".to_string());
+    }
+    if radius < 0.0 {
+        return Err("radius must be non-negative".to_string());
+    }
     IMAGES.with(|images| {
-        let images = images.borrow();
-        let source = images
-            .get(&image)
+        let mut images = images.borrow_mut();
+        let entry = images
+            .get_mut(&image)
             .ok_or_else(|| "image was freed".to_string())?;
+        let count = entry.frames.len() as u64;
+        if frame == 0 || frame > count {
+            return Err(format!("frame must be from 1 to {}", count));
+        }
+        let index = (frame - 1) as usize;
+        let (image_w, image_h) = (entry.width() as f32, entry.height() as f32);
+        let target = (
+            x,
+            y,
+            if width > 0.0 { width } else { image_w },
+            if height > 0.0 { height } else { image_h },
+        );
+        let (src, dest) = images::place(image_w, image_h, target, fit);
         with_window(id, |win| {
-            let sx = if width > 0.0 {
-                width / source.width() as f32
+            let scale = win.scale as f32;
+            let (left, top, w, h) = images::snap((
+                dest.0 * scale,
+                dest.1 * scale,
+                dest.2 * scale,
+                dest.3 * scale,
+            ));
+            if w == 0 || h == 0 || opacity == 0.0 {
+                return Ok(());
+            }
+            let unscaled =
+                src == (0.0, 0.0, image_w, image_h) && (w, h) == (entry.width(), entry.height());
+            let prepared = if unscaled {
+                &entry.frames[index]
             } else {
-                1.0
+                let key = ScaleKey {
+                    src,
+                    width: w,
+                    height: h,
+                };
+                match entry.prepared(index, key) {
+                    Some(frame) => frame,
+                    None => return Ok(()),
+                }
             };
-            let sy = if height > 0.0 {
-                height / source.height() as f32
-            } else {
-                1.0
-            };
-            let transform = Transform::from_scale(sx, sy)
-                .post_translate(x, y)
-                .post_scale(win.scale as f32, win.scale as f32);
-            let paint = PixmapPaint {
-                quality: FilterQuality::Bilinear,
-                ..PixmapPaint::default()
-            };
-            win.pixmap
-                .draw_pixmap(0, 0, source.as_ref(), &paint, transform, None);
+            images::draw(
+                &mut win.pixmap,
+                prepared.pixmap.as_ref(),
+                prepared.opaque,
+                left,
+                top,
+                opacity,
+                radius * scale,
+            );
             Ok(())
         })
     })?;
@@ -1356,12 +1569,41 @@ mod tests {
     }
 
     #[test]
-    fn rgba_images_are_premultiplied() {
-        let pixmap = rgba_to_pixmap(&[255, 255, 255, 128, 0, 0, 0, 0], 2, 1).unwrap();
-        let pixels = pixmap.pixels();
-        assert_eq!(pixels[0].alpha(), 128);
-        assert!(pixels[0].red() <= 128);
-        assert_eq!(pixels[1].alpha(), 0);
+    fn image_limits_are_read_and_checked() {
+        let limits = limits_arg(&[Value::Nil], 1).unwrap();
+        assert_eq!(limits.max_pixels, images::DEFAULT_MAX_PIXELS);
+        assert_eq!(limits.max_bytes, images::DEFAULT_MAX_BYTES);
+        let limits = limits_arg(&[Value::Nil, Value::Int(10), Value::Int(20)], 1).unwrap();
+        assert_eq!((limits.max_pixels, limits.max_bytes), (10, 20));
+        let err = limits_arg(&[Value::Nil, Value::Int(0)], 1).unwrap_err();
+        assert!(err.contains("maxPixels must be positive"), "{}", err);
+    }
+
+    #[test]
+    fn scaled_frames_are_cached_per_size() {
+        let mut pixmap = Pixmap::new(8, 8).unwrap();
+        pixmap.fill(Color::BLACK);
+        let decoded = Decoded {
+            frames: vec![pixmap.clone(), pixmap],
+            delays: vec![0.1, 0.1],
+            loop_count: 0,
+        };
+        let mut entry = ImageEntry::new(decoded, Limits::default());
+        assert!(entry.frames[0].opaque);
+        let key = ScaleKey {
+            src: (0.0, 0.0, 8.0, 8.0),
+            width: 4,
+            height: 4,
+        };
+        let first = entry.prepared(0, key).unwrap().pixmap.data().as_ptr();
+        let again = entry.prepared(0, key).unwrap().pixmap.data().as_ptr();
+        assert_eq!(first, again, "the same size should reuse the cached copy");
+        entry.prepared(1, key).unwrap();
+        assert_eq!(entry.scaled.len(), 2, "each frame keeps its own copy");
+        assert_eq!(entry.scaled_bytes, 2 * 4 * 4 * 4);
+        let bigger = ScaleKey { width: 6, ..key };
+        assert_eq!(entry.prepared(0, bigger).unwrap().pixmap.width(), 6);
+        assert_eq!(entry.scaled_bytes, 4 * 4 * 4 + 6 * 4 * 4);
     }
 
     #[test]

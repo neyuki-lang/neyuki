@@ -55,3 +55,11 @@ This document outlines the architectural milestones and engineering trajectory f
 - [ ] Bytecode Version 4 freeze: guarantee long-term stability and binary portability across all 1.x releases.
 - [ ] Performance benchmarking suite validation against standard scripting workloads.
 - [ ] Full test coverage of standard libraries, security sandboxing, and memory leak regression tests.
+
+---
+
+## Desktop app platform
+- [x] `@neyuki/ui` image decoding: PNG, JPEG, WebP, GIF and BMP detected by magic bytes, from files (`ui.loadImage`) or memory (`ui.decodeImage`).
+  - [x] Animated GIF/WebP/PNG frames with browser-style delay clamping, `ui.animation` playback helper and `image:resized`.
+  - [x] `drawImage` options `frame`, `opacity`, `radius` and `fit` (`fill`, `contain`, `cover`) with cached smooth resampling.
+  - [x] Pixel-count and decoded-memory limits.
