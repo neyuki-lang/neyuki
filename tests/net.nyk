@@ -1,0 +1,84 @@
+-- Connections read and write without blocking the other tasks.
+
+local net = require("@neyuki/net")
+local http = require("@neyuki/http")
+
+local isWindows = os.getenv("OS") == "Windows_NT"
+
+local function waitFor(done)
+    local waited = 0
+    while not done() and waited < 10 do
+        waited += task.wait(0.005)
+    end
+end
+
+-- TCP: a task talks to the HTTP server the main chunk serves.
+-- The accept runs in a task too: the main chunk blocking in accept would
+-- keep the scheduler from resuming the connecting task.
+local server = http.listen({ host = "127.0.0.1", port = 0 })
+local port = server.port
+local request = nil
+task.spawn(function()
+    request = server:accept(10)
+end)
+local reply = nil
+task.spawn(function()
+    local conn = net.connect("127.0.0.1", port)
+    assert(conn:isOpen(), "a new connection is open")
+    conn:write("GET /tcp HTTP/1.0\r\nHost: localhost\r\n\r\n")
+    local data = conn:read(12)
+    reply = buffer.tostring(data)
+    conn:close()
+    assert(not conn:isOpen(), "a closed connection is not open")
+end)
+waitFor(function()
+    return request ~= nil
+end)
+assert(request ~= nil and request.path == "/tcp", "the raw request reaches the server")
+request:respond("tcp ok")
+waitFor(function()
+    return reply ~= nil
+end)
+assert(reply ~= nil and reply:sub(1, 8) == "HTTP/1.0", "the task reads the response: " .. tostring(reply))
+server:close()
+
+-- A refused connection raises, and try catches it.
+local ok, err = try(net.connect, "127.0.0.1", 1, 2)
+assert(not ok, "connecting to a closed port fails")
+local wsOk = try(net.websocket, "http://127.0.0.1/")
+assert(not wsOk, "a WebSocket URL must use ws:// or wss://")
+
+-- Child processes: stdin in, stdout out, exit code.
+local command = isWindows and { "findstr", "^" } or { "cat" }
+local p = os.spawn(command, { stdin = "pipe", stdout = "pipe" })
+assert(p.pid > 0 and p:isRunning(), "the process is running")
+local echoed = nil
+task.spawn(function()
+    p.stdin:write("hello\n")
+    p.stdin:close()
+    local data = p.stdout:read(1000)
+    echoed = buffer.tostring(data)
+end)
+waitFor(function()
+    return echoed ~= nil
+end)
+assert(echoed ~= nil and echoed:find("hello", 1, true) ~= nil, "the child echoes its stdin")
+local code = nil
+task.spawn(function()
+    code = p:wait()
+end)
+waitFor(function()
+    return code ~= nil
+end)
+assert(code == 0, "the child exits cleanly")
+assert(not p:isRunning(), "the process has ended")
+assert(p.stdout:read(10) == nil, "reading past the end gives nil")
+
+-- Killing a long-running process.
+local sleeper = os.spawn(isWindows and { "ping", "-n", "30", "127.0.0.1" } or { "sleep", "30" }, { stdout = "null" })
+assert(sleeper:isRunning(), "the sleeper runs")
+sleeper:kill()
+sleeper:wait()
+assert(not sleeper:isRunning(), "kill ends the process")
+
+print("[pass] net")

@@ -441,6 +441,10 @@ pub fn create_os_lib() -> Value {
     table.set_str("run", crate::native!("os.run", os_run));
     table.set_str("app", crate::native!("os.app", os_app));
     table.set_str(
+        "spawn",
+        crate::native!("os.spawn", crate::vm::libs::net::os_spawn),
+    );
+    table.set_str(
         "dataDir",
         crate::native!("os.dataDir", storage::os_data_dir),
     );

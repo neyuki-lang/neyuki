@@ -1,0 +1,56 @@
+local table = require("@neyuki/table")
+
+local net = {}
+
+-- Connections are native (src/vm/libs/net.rs): a reader thread per
+-- connection fills a buffer, so reads never stall the interpreter and, inside
+-- a task, wait by suspending only that task. This module validates arguments
+-- and hands out the connection objects; `os.spawn` returns the same kind of
+-- object for a child process's streams.
+
+function checkString(s: string, name: string)
+    if (s == nil) then error(name .. " must be provided") end
+    if (type(s) != "string") then error(name .. " must be a string") end
+end
+
+function checkTimeout(timeout: number?)
+    if (timeout != nil and type(timeout) != "number") then error("timeout must be a number of seconds") end
+end
+
+-- Opens a TCP connection to `host:port`. `timeout` is how many seconds to
+-- wait for the connection (default 10).
+function net.connect(host: string, port: number, timeout: number?): any
+    checkString(host, "host")
+    if (type(port) != "number") then error("port must be a number") end
+    checkTimeout(timeout)
+    return __net_connect(host, port, timeout)
+end
+
+-- Opens a local pipe: `\.\pipe\<name>` on Windows (a name that starts with
+-- `\` is used as given), the Unix domain socket at `name` elsewhere.
+function net.connectPipe(name: string, timeout: number?): any
+    checkString(name, "name")
+    checkTimeout(timeout)
+    return __net_connect_pipe(name, timeout)
+end
+
+-- Opens the Unix domain socket at `path`. Not available on Windows.
+function net.connectUnix(path: string): any
+    checkString(path, "path")
+    return __net_connect_unix(path)
+end
+
+-- Opens a WebSocket client connection to a `ws://` or `wss://` URL. `options`
+-- may carry `headers` (a { name = value } table) and `timeout`.
+function net.websocket(url: string, options: any?): any
+    checkString(url, "url")
+    if (options != nil and type(options) != "table") then error("options must be a table") end
+    return __net_websocket(url, options)
+end
+
+-- Same as `os.spawn`.
+function net.spawn(command: string | {string}, options: any?): any
+    return os.spawn(command, options)
+end
+
+return table.freeze(net)

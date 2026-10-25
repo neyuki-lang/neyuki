@@ -1,0 +1,85 @@
+-- Talks to a running Discord client over its local pipe and sets an activity,
+-- reconnecting when Discord restarts. Frames are `u32 opcode, u32 length`
+-- (little endian) followed by a JSON payload. Set CLIENT_ID to your
+-- application's id from the Discord developer portal.
+
+local net = require("@neyuki/net")
+
+local CLIENT_ID = os.getenv("DISCORD_CLIENT_ID") or "000000000000000000"
+
+local function pipePath(n)
+    if os.getenv("OS") == "Windows_NT" then
+        return "discord-ipc-" .. n
+    end
+    local dir = os.getenv("XDG_RUNTIME_DIR") or os.getenv("TMPDIR") or "/tmp"
+    return dir .. "/discord-ipc-" .. n
+end
+
+local function connect()
+    for n = 0, 9 do
+        local ok, conn = try(net.connectPipe, pipePath(n), 1)
+        if ok then return conn end
+    end
+    return nil
+end
+
+local function send(conn, opcode, payload)
+    local body = json.encode(payload)
+    local header = buffer.create(8)
+    buffer.writeu32(header, 0, opcode)
+    buffer.writeu32(header, 4, #body)
+    conn:write(header)
+    conn:write(body)
+end
+
+local function receive(conn)
+    local header = conn:read(8)
+    if header == nil or buffer.len(header) < 8 then return nil end
+    local length = buffer.readu32(header, 4)
+    local body = conn:read(length)
+    if body == nil then return nil end
+    return buffer.readu32(header, 0), json.decode(buffer.tostring(body))
+end
+
+local function session(conn)
+    send(conn, 0, { v = 1, client_id = CLIENT_ID })
+    local _, ready = receive(conn)
+    if ready == nil then return end
+    print("connected as", ready.data and ready.data.user and ready.data.user.username)
+
+    send(conn, 1, {
+        cmd = "SET_ACTIVITY",
+        nonce = tostring(os.time()),
+        args = {
+            pid = 1,
+            activity = {
+                type = 2, -- "Listening to"
+                details = "Track title",
+                state = "Artist",
+                timestamps = { start = os.time() },
+                assets = { large_image = "https://example.com/cover.png" },
+                buttons = { { label = "Open", url = "https://example.com" } },
+            },
+        },
+    })
+    while true do
+        local opcode = receive(conn)
+        if opcode == nil then return end -- Discord went away
+        if opcode == 3 then send(conn, 4, {}) end -- answer pings with pongs
+    end
+end
+
+-- The connection loop runs in a task, so a UI loop (ui.run) keeps drawing.
+task.spawn(function()
+    while true do
+        local conn = connect()
+        if conn ~= nil then
+            local ok, err = try(session, conn)
+            if not ok then print("session ended:", err) end
+            conn:close()
+        end
+        task.wait(5) -- Discord is not running or restarted: try again soon
+    end
+end)
+
+task.wait(60)

@@ -44,7 +44,7 @@ When `require(path)` is invoked, the runtime resolves the target in the followin
    If the canonical name has already been resolved and executed, the cached exported value is returned immediately without re-executing the module code.
 
 2. **Standard and Bundled Libraries (`@neyuki/`)**:
-   Paths matching `@neyuki/<name>` or `<name>` (where `<name>` is one of the built-in libraries: `bit`, `bit32`, `buffer`, `coroutine`, `crypto`, `debug`, `fs`, `hid`, `http`, `io`, `json`, `math`, `os`, `sql`, `string`, `table`, `task`, `ui`, `utf8`) are served directly from the embedded standard library distribution.
+   Paths matching `@neyuki/<name>` or `<name>` (where `<name>` is one of the built-in libraries: `bit`, `bit32`, `buffer`, `coroutine`, `crypto`, `debug`, `fs`, `hid`, `http`, `io`, `json`, `math`, `net`, `os`, `sql`, `string`, `table`, `task`, `ui`, `utf8`) are served directly from the embedded standard library distribution.
 
 3. **Package Manager Dependencies (`@pkg/`)**:
    Paths starting with `@pkg/<package_name>` resolve against packages installed in the local `neyuki_packages/` directory or global cache configured via `NEYUKI_PATH`.
