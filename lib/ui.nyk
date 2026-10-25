@@ -858,10 +858,28 @@ function ui.open(options: WindowOptions?): Window
         return s
     end
 
-    -- Shows everything drawn since the last call.
-    function window.present(self: Window): ()
+    -- Shows everything drawn since the last call. `options.dirty` lists the
+    -- `{x, y, w, h}` rectangles (logical pixels) that changed; only those
+    -- are sent to the screen. Drawing is not limited to them, so the script
+    -- must have redrawn everything that changed inside them.
+    function window.present(self: Window, options: {any}?): ()
         ensureOpen()
-        __ui_present(id)
+        checkOptionalTable(options, "options")
+        local flat = nil
+        local dirty = nil
+        if (options != nil) then dirty = options.dirty end
+        if (dirty != nil) then
+            checkOptionalTable(dirty, "dirty")
+            flat = {}
+            for i, rect in dirty do
+                if (type(rect) != "table") then error("dirty[" .. i .. "] must be {x, y, w, h}") end
+                for k = 1, 4 do
+                    checkNumber(rect[k], "dirty[" .. i .. "][" .. k .. "]")
+                    flat[#flat + 1] = rect[k]
+                end
+            end
+        end
+        __ui_present(id, flat)
     end
 
     addDrawing(window, id, ensureOpen, "#ffffff")
@@ -1112,24 +1130,37 @@ function ui.poll(timeout: number?): {Event}
     return events
 end
 
+-- Frame pacing state shared with the tween list below: how many tweens from
+-- `ui.animate` are still running, so `fps = "auto"` knows when to idle.
+local loopState = { tweens = 0 }
+
 -- Runs `handler(events, dt)` about 60 times a second until every window is
 -- closed, where `dt` is the seconds since the previous call. Tweens from
 -- `ui.animate` are stepped just before each call. `close` events
 -- are honoured before the handler sees them unless `options.autoClose` is
 -- false. An error inside the handler closes the windows and is re-raised.
+-- With `fps = "auto"` the loop runs at 60 fps only while a tween is running,
+-- events arrived or the handler returned `true` (it is animating); otherwise
+-- it sleeps in the event loop for up to a second between calls.
 function ui.run(handler: ({Event}, number) -> any, options: RunOptions?): ()
     checkFunction(handler, "handler")
     checkOptionalTable(options, "options")
     options = options ?? {}
     checkOptionalBoolean(options.autoClose, "autoClose")
-    checkOptionalNumber(options.fps, "fps")
+    local auto = options.fps == "auto"
+    if (not auto) then checkOptionalNumber(options.fps, "fps") end
     local autoClose = options.autoClose ?? true
-    local fps = options.fps ?? 60
+    local fps = 60
+    if (not auto) then fps = options.fps ?? 60 end
     if (fps <= 0) then error("fps must be positive") end
     local frame = 1 / fps
     local last = os.clock()
+    local busy = true
     while (openCount > 0) do
-        local events = ui.poll(frame)
+        local wait = frame
+        if (auto and not busy and loopState.tweens == 0) then wait = 1 end
+        local events = ui.poll(wait)
+        busy = #events > 0
         if (autoClose) then
             for _, event in events do
                 if (event.kind == "close") then event.window:close() end
@@ -1139,7 +1170,9 @@ function ui.run(handler: ({Event}, number) -> any, options: RunOptions?): ()
         local dt = now - last
         local ok, err = try(function(): any
             ui.update(dt)
-            return handler(events, dt)
+            local animating = handler(events, dt)
+            if (animating == true) then busy = true end
+            return nil
         end)
         last = now
         if (not ok) then
@@ -1150,6 +1183,15 @@ function ui.run(handler: ({Event}, number) -> any, options: RunOptions?): ()
             error(err)
         end
     end
+end
+
+-- STATS --------------------------------------------------------------------
+
+-- Timing of the last presented frame in milliseconds: `draw` (script and
+-- drawing between presents, without blur), `blur`, `present` and `frame`
+-- (all three), plus the `frames` presented so far.
+function ui.stats(): {number}
+    return __ui_stats()
 end
 
 -- MEDIA SESSION ------------------------------------------------------------
@@ -1463,6 +1505,7 @@ local running = {}
 function ui.animate(target: {any}, goal: {any}, duration: number, options: TweenOptions?): Tween
     local tween = ui.tween(target, goal, duration, options)
     running[#running + 1] = tween
+    loopState.tweens = #running
     return tween
 end
 
@@ -1479,6 +1522,7 @@ function ui.update(dt: number): number
     end
     for _, tween in running do still[#still + 1] = tween end
     running = still
+    loopState.tweens = #running
     return #running
 end
 

@@ -64,7 +64,9 @@ Without decorations, Windows 11 does not show the Snap Layouts flyout when hover
 
 ## ui.run(handler: (events: {table}, dt: number) -> any, options: table?): ()
 
-Calls `handler(events, dt)` about 60 times a second (`options.fps`) until every window is closed, where `dt` is the seconds since the previous call. Tweens from `ui.animate` are stepped just before each call. Close requests close their window unless `options.autoClose` is `false`. An error in the handler closes the windows and is raised again.
+Calls `handler(events, dt)` about 60 times a second (`options.fps`, or `"auto"`) until every window is closed, where `dt` is the seconds since the previous call. Tweens from `ui.animate` are stepped just before each call. Close requests close their window unless `options.autoClose` is `false`. An error in the handler closes the windows and is raised again.
+
+With `fps = "auto"` the loop runs at 60 fps only while a `ui.animate` tween is running, events arrived in the last step or the handler returned `true` (return it while an animated image is visible). Otherwise it waits in the event loop for up to a second, so an idle window uses almost no CPU.
 
 ## ui.poll(timeout: number?): {table}
 
@@ -85,6 +87,10 @@ Pumps the event loop and returns the events since the last call. Without a timeo
 - `maximize`, `minimize`, `restore`: the window changed state, by the user or by a call
 - `dropfile`: `path`, a file dropped on the window (one event per file)
 - `dpichange`: `scale`, the window moved to a display with another scale factor
+
+## ui.stats(): table
+
+Timing of the last presented frame in milliseconds, as `draw` (script and drawing since the previous present, without blur), `blur`, `present` and `frame` (the three together), plus `frames`, the number presented so far. Useful to pick a quality level.
 
 ## ui.isAvailable(): boolean
 
@@ -288,9 +294,9 @@ win:fillRect(16, 16, 240, h - 32, "#ffffff30", { radius = 16 })
 
 The color of the pixel under `(x, y)` as `r, g, b, a`, each from 0 to 255 (not premultiplied). It reads the back buffer, so it sees what has been drawn but not necessarily presented.
 
-## Window:present(): ()
+## Window:present(options: table?): ()
 
-Shows everything drawn since the last call. Every `pushClip` and `pushOpacity` must be closed first; otherwise the unfinished ones are dropped and an error is raised.
+Shows everything drawn since the last call. `options.dirty` may list the rectangles that changed as `{x, y, w, h}` in logical pixels, for example `win:present({ dirty = { { 0, 0, 200, 40 } } })`; only those regions are copied to the screen (where the platform can reuse the previous frame, otherwise the whole frame is shown). The back buffer is never cleared by `present`, so drawing only the changed parts works. Every `pushClip` and `pushOpacity` must be closed first; otherwise the unfinished ones are dropped and an error is raised.
 
 ## Window:size(): (number, number)
 

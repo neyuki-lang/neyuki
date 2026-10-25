@@ -218,6 +218,10 @@ pub(crate) const NATIVES: &[NativeDef] = &[
         func: builtin_present,
     },
     NativeDef {
+        name: "__ui_stats",
+        func: builtin_stats,
+    },
+    NativeDef {
         name: "__ui_media_session",
         func: builtin_media_session,
     },
@@ -484,7 +488,30 @@ thread_local! {
     static EVENTS: RefCell<Vec<Value>> = const { RefCell::new(Vec::new()) };
     static PENDING_OPEN: RefCell<Option<OpenRequest>> = const { RefCell::new(None) };
     static OPENED: RefCell<Option<Result<(u64, f64), String>>> = const { RefCell::new(None) };
+    static STATS: RefCell<Stats> = RefCell::new(Stats::default());
     static NEXT_ID: Cell<u64> = const { Cell::new(1) };
+}
+
+/// Frame timing for `__ui_stats`. `blur` collects the seconds spent in
+/// gaussian blurs since the last present; the `_ms` fields describe the last
+/// presented frame.
+#[derive(Default)]
+struct Stats {
+    frames: u64,
+    last_end: Option<Instant>,
+    blur: f64,
+    draw_ms: f64,
+    blur_ms: f64,
+    present_ms: f64,
+    frame_ms: f64,
+}
+
+/// Runs a blur and charges its time to the current frame.
+fn timed_blur(pixmap: &mut Pixmap, sigma: f32) {
+    let start = Instant::now();
+    effects::blur(pixmap, sigma);
+    let spent = start.elapsed().as_secs_f64();
+    STATS.with(|stats| stats.borrow_mut().blur += spent);
 }
 
 fn next_id() -> u64 {
@@ -1147,7 +1174,7 @@ fn create_window(event_loop: &ActiveEventLoop, request: OpenRequest) -> Result<(
     // Wayland only maps a window once it has a frame, so show the blank
     // canvas straight away; a failure here just means the first real
     // `present` does it.
-    let _ = blit(&mut win);
+    let _ = blit(&mut win, None);
     WINDOW_IDS.with(|ids| ids.borrow_mut().insert(window.id(), id));
     WINDOWS.with(|windows| windows.borrow_mut().insert(id, win));
     Ok((id, scale))
@@ -1196,7 +1223,7 @@ fn translate_event(id: u64, win: &mut Win, event: WindowEvent, out: &mut Vec<Val
             }
         }
         WindowEvent::RedrawRequested => {
-            let _ = blit(win);
+            let _ = blit(win, None);
             push("redraw", vec![]);
         }
         WindowEvent::ModifiersChanged(modifiers) => {
@@ -1439,7 +1466,7 @@ fn with_target<T>(
 /// composited color. A transparent window also gets the alpha in the top
 /// byte, premultiplied as compositors expect; backends that read only
 /// `0RGB` ignore it.
-fn blit(win: &mut Win) -> Result<(), String> {
+fn blit(win: &mut Win, dirty: Option<&[(i32, i32, i32, i32)]>) -> Result<(), String> {
     let (width, height) = (win.pixmap.width(), win.pixmap.height());
     let (Some(w), Some(h)) = (NonZeroU32::new(width), NonZeroU32::new(height)) else {
         return Ok(());
@@ -1451,10 +1478,64 @@ fn blit(win: &mut Win) -> Result<(), String> {
         .surface
         .buffer_mut()
         .map_err(|err| format!("cannot present window: {}", err))?;
-    pack_pixels(win.pixmap.pixels(), &mut buffer, win.transparent);
-    buffer
-        .present()
-        .map_err(|err| format!("cannot present window: {}", err))
+    // Only a buffer that still holds the previous frame can be updated in
+    // part; any other age is stale or new and needs every pixel.
+    let rects = match dirty {
+        Some(rects) if buffer.age() == 1 => clamp_rects(rects, width, height),
+        _ => None,
+    };
+    match rects {
+        Some(rects) => {
+            let stride = width as usize;
+            let pixels = win.pixmap.pixels();
+            let mut damage = Vec::with_capacity(rects.len());
+            for (x, y, rw, rh) in rects {
+                for row in y..y + rh {
+                    let from = row as usize * stride + x as usize;
+                    let to = from + rw as usize;
+                    pack_pixels(&pixels[from..to], &mut buffer[from..to], win.transparent);
+                }
+                if let (Some(rw), Some(rh)) = (NonZeroU32::new(rw), NonZeroU32::new(rh)) {
+                    damage.push(softbuffer::Rect {
+                        x,
+                        y,
+                        width: rw,
+                        height: rh,
+                    });
+                }
+            }
+            buffer
+                .present_with_damage(&damage)
+                .map_err(|err| format!("cannot present window: {}", err))
+        }
+        None => {
+            pack_pixels(win.pixmap.pixels(), &mut buffer, win.transparent);
+            buffer
+                .present()
+                .map_err(|err| format!("cannot present window: {}", err))
+        }
+    }
+}
+
+/// Clips physical `(x, y, w, h)` rectangles to a `width` x `height` surface,
+/// dropping empty ones. `None` when nothing is left, which presents the
+/// whole frame instead.
+fn clamp_rects(
+    rects: &[(i32, i32, i32, i32)],
+    width: u32,
+    height: u32,
+) -> Option<Vec<(u32, u32, u32, u32)>> {
+    let mut out = Vec::with_capacity(rects.len());
+    for &(x, y, w, h) in rects {
+        let x0 = (x as i64).max(0);
+        let y0 = (y as i64).max(0);
+        let x1 = (x as i64 + w as i64).min(width as i64);
+        let y1 = (y as i64 + h as i64).min(height as i64);
+        if x1 > x0 && y1 > y0 {
+            out.push((x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32));
+        }
+    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 fn pack_pixels(pixels: &[PremultipliedColorU8], out: &mut [u32], alpha: bool) {
@@ -2573,6 +2654,14 @@ fn blend_mask(
                 continue;
             }
             let index = (y * pw + x) as usize;
+            if alpha == 255 {
+                // Fully covered and opaque: the glyph replaces what is below.
+                if let Some(solid) = PremultipliedColorU8::from_rgba(r as u8, g as u8, b as u8, 255)
+                {
+                    pixels[index] = solid;
+                }
+                continue;
+            }
             let dst = pixels[index];
             let inverse = 255 - alpha;
             let na = alpha + dst.alpha() as u32 * inverse / 255;
@@ -3563,7 +3652,7 @@ fn builtin_blur_region(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, Strin
             region.data_mut()[row * rw * 4..(row + 1) * rw * 4]
                 .copy_from_slice(&source[from..from + rw * 4]);
         }
-        effects::blur(&mut region, sigma as f32 * scale);
+        timed_blur(&mut region, sigma as f32 * scale);
         let mut cover =
             Mask::new(rw as u32, rh as u32).ok_or_else(|| "cannot allocate blur".to_string())?;
         if let Some(path) = rounded_rect(
@@ -3611,7 +3700,7 @@ fn builtin_blur_image(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String
             .iter()
             .map(|frame| {
                 let mut pixmap = frame.pixmap.clone();
-                effects::blur(&mut pixmap, sigma as f32);
+                timed_blur(&mut pixmap, sigma as f32);
                 pixmap
             })
             .collect();
@@ -3780,9 +3869,16 @@ fn builtin_set_fallback_fonts(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>
     Ok(vec![])
 }
 
-/// `__ui_present(window)` shows what has been drawn since the last call.
+/// `__ui_present(window, dirty?)` shows what has been drawn since the last
+/// call. `dirty` is a flat `{x, y, w, h, ...}` array of logical rectangles
+/// that changed; when given, only those are copied to the screen.
 fn builtin_present(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let id = integer_arg(args, 0, "window")?;
+    let dirty = match args.get(1) {
+        None | Some(Value::Nil) => None,
+        _ => Some(points_arg(args, 1, "dirty")?),
+    };
+    let started = Instant::now();
     with_window(id, |win| {
         if !win.state.groups.is_empty() || !win.state.clips.is_empty() {
             // Drop the unfinished layers so the next frame starts clean.
@@ -3792,9 +3888,55 @@ fn builtin_present(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
             }
             return Err("popClip or popOpacity is missing before present".to_string());
         }
-        blit(win)
+        let rects = dirty.as_ref().map(|points| {
+            let scale = win.scale as f32;
+            points
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&[(x, y), (w, h)]| {
+                    let (x0, y0) = ((x * scale).floor(), (y * scale).floor());
+                    let (x1, y1) = (((x + w) * scale).ceil(), ((y + h) * scale).ceil());
+                    (x0 as i32, y0 as i32, (x1 - x0) as i32, (y1 - y0) as i32)
+                })
+                .collect::<Vec<_>>()
+        });
+        blit(win, rects.as_deref())
     })?;
+    let now = Instant::now();
+    STATS.with(|stats| {
+        let mut stats = stats.borrow_mut();
+        let present = now.duration_since(started).as_secs_f64();
+        let since = stats
+            .last_end
+            .map_or(0.0, |end| started.duration_since(end).as_secs_f64());
+        stats.draw_ms = (since - stats.blur).max(0.0) * 1000.0;
+        stats.blur_ms = stats.blur * 1000.0;
+        stats.present_ms = present * 1000.0;
+        stats.frame_ms = (since + present) * 1000.0;
+        stats.blur = 0.0;
+        stats.frames += 1;
+        stats.last_end = Some(now);
+    });
     Ok(vec![])
+}
+
+/// `__ui_stats()` returns the timing of the last presented frame in
+/// milliseconds: `draw` (everything between presents except blur), `blur`,
+/// `present` and `frame` (all three together), plus the `frames` presented so
+/// far.
+fn builtin_stats(_vm: &mut VM, _args: &[Value]) -> Result<Vec<Value>, String> {
+    let stats = STATS.with(|stats| {
+        let stats = stats.borrow();
+        record(vec![
+            ("frames", integer(stats.frames)),
+            ("draw", Value::Float(stats.draw_ms)),
+            ("blur", Value::Float(stats.blur_ms)),
+            ("present", Value::Float(stats.present_ms)),
+            ("frame", Value::Float(stats.frame_ms)),
+        ])
+    });
+    Ok(vec![stats])
 }
 
 /// A non-negative number of seconds small enough for every backend's clock.
@@ -4786,6 +4928,21 @@ mod tests {
         let bigger = ScaleKey { width: 6, ..key };
         assert_eq!(entry.prepared(0, bigger).unwrap().pixmap.width(), 6);
         assert_eq!(entry.scaled_bytes, 4 * 4 * 4 + 6 * 4 * 4);
+    }
+
+    #[test]
+    fn damage_rects_are_clamped_to_the_surface() {
+        let rects = [
+            (-5, -5, 10, 10),
+            (95, 95, 20, 20),
+            (200, 0, 5, 5),
+            (3, 3, 0, 4),
+        ];
+        assert_eq!(
+            clamp_rects(&rects, 100, 100),
+            Some(vec![(0, 0, 5, 5), (95, 95, 5, 5)])
+        );
+        assert_eq!(clamp_rects(&[(200, 0, 5, 5)], 100, 100), None);
     }
 
     #[test]
