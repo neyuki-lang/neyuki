@@ -429,7 +429,7 @@ fn finish_request(_vm: &mut VM, raw: RawResponse) -> Result<Vec<Value>, String> 
         ResponseBody::Complete(bytes) => ("body", Value::string(bytes_to_string(bytes))),
         ResponseBody::Stream(reader) => {
             let id = next_id();
-            STREAMS.with(|streams| streams.borrow_mut().insert(id, Some(reader)));
+            STREAMS.with(|streams| streams.borrow_mut().insert(id, Some(*reader)));
             ("stream", integer(id))
         }
     };
@@ -498,7 +498,7 @@ fn builtin_read(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
                 if chunk.is_empty() || !streams.contains_key(&id) {
                     streams.remove(&id);
                 } else {
-                    streams.insert(id, Some(reader));
+                    streams.insert(id, Some(*reader));
                 }
             });
             if chunk.is_empty() {
