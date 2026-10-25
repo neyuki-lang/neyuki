@@ -64,4 +64,4 @@ A few limits keep one script from exhausting the machine: integers are capped at
 
 ## Platform notes
 
-The runtime is a single Rust executable with no C dependencies. `@neyuki/ui` and `@neyuki/hid` need a desktop session (on Linux, X11 or Wayland); everything else runs headless. TLS for `@neyuki/http` and `@neyuki/sql` uses the operating system's own library (SChannel, Secure Transport or OpenSSL).
+The runtime is a single Rust executable with no C dependencies. `@neyuki/ui` and `@neyuki/hid` need a desktop session (on Linux, X11 or Wayland); everything else runs headless, except that `os.protect` on Linux needs a Secret Service (such as GNOME Keyring or KWallet) to keep its key in. TLS for `@neyuki/http` and `@neyuki/sql` uses the operating system's own library (SChannel, Secure Transport or OpenSSL).
