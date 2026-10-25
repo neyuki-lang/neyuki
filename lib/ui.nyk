@@ -6,7 +6,7 @@ local os = require("@neyuki/os")
 local ui = {}
 
 -- Windows, drawing and input on top of the `__ui_*` natives in
--- src/vm/libs/ui.rs (winit, tiny-skia, fontdue and softbuffer: pure Rust, CPU
+-- src/vm/libs/ui.rs (winit, tiny-skia, fontdue and softbuffer: CPU
 -- rendered, one code path for X11, Wayland, macOS and Windows).
 --
 -- Natives cannot call back into Neyuki, so there are no callbacks: the

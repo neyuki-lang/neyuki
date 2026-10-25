@@ -1,8 +1,8 @@
 //! Native windowing primitives backing `@neyuki/ui`.
 //!
 //! Windows come from `winit`, frames are drawn on the CPU with `tiny-skia`
-//! and `fontdue` and blitted with `softbuffer`, so no GPU, GL or C toolchain
-//! is involved and one code path serves X11, Wayland, macOS and Windows.
+//! and `fontdue` and blitted with `softbuffer`, so no GPU or GL
+//! driver is needed and one code path serves X11, Wayland, macOS and Windows.
 //!
 //! Like the HTTP server, the design is pull-based because natives cannot call
 //! back into Neyuki functions: `__ui_open` parks a window here under an id,

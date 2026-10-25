@@ -1,6 +1,6 @@
 # @neyuki/sql
 
-PostgreSQL, MySQL and MariaDB through pure-Rust drivers, with TLS through the operating system's own library.
+PostgreSQL, MySQL and MariaDB through drivers built into the executable (no libpq or MySQL client library needed), with TLS through the operating system's own library.
 
 ```lua
 local sql = require("@neyuki/sql")
