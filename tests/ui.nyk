@@ -177,6 +177,13 @@ expectError(ui.open, "title must be a string", "open checks the title", { title 
 expectError(ui.open, "width must be a number", "open checks the width", { width = "wide" })
 expectError(ui.open, "width and height must be positive", "open rejects empty windows", { width = 0 })
 expectError(ui.open, "resizable must be a boolean", "open checks resizable", { resizable = 1 })
+expectError(ui.open, "decorations must be a boolean", "open checks decorations", { decorations = "no" })
+expectError(ui.open, "minWidth must be a number", "open checks minWidth", { minWidth = "x" })
+expectError(ui.open, "non-negative", "open rejects negative minimum sizes", { minHeight = -1 })
+expectError(ui.open, "transparent must be a boolean", "open checks transparent", { transparent = 1 })
+expectError(ui.open, "shadow must be a boolean", "open checks shadow", { shadow = 1 })
+expectError(ui.open, "icon must be a PNG path", "open checks the icon", { icon = 5 })
+expectError(ui.open, "cannot open", "open reports a missing icon", { icon = "tests/fixtures/missing.png" })
 expectError(ui.poll, "timeout must be a number", "poll checks the timeout", "soon")
 expectError(ui.poll, "non-negative", "poll rejects negative timeouts", -1)
 expectError(ui.run, "handler must be a function", "run needs a handler")
@@ -185,6 +192,20 @@ expectError(ui.loadFont, "path must be provided", "loadFont checks the path")
 expectError(ui.loadFont, "cannot open", "loadFont reports a missing file", "tests/fixtures/missing.ttf")
 expectError(ui.loadImage, "cannot open", "loadImage reports a missing file", "tests/fixtures/missing.png")
 expectError(ui.loadImage, "cannot decode", "loadImage rejects non-PNG files", "tests/ui.nyk")
+
+-- LINKS AND CLIPBOARD (no display needed) -----------------------------------
+--
+-- Only refusals are tested: opening a link would start a browser, and the
+-- clipboard needs a desktop session.
+
+expectError(ui.openUrl, "url must be provided", "openUrl needs a url")
+expectError(ui.openUrl, "http://, https:// or mailto:", "openUrl refuses files", "file:///etc/passwd")
+expectError(ui.openUrl, "http://, https:// or mailto:", "openUrl refuses paths", "C:\\Windows\\notepad.exe")
+expectError(ui.openUrl, "http://, https:// or mailto:", "openUrl refuses scripts", "javascript:alert(1)")
+expectError(ui.openUrl, "spaces", "openUrl refuses spaces", "https://example.com/a b")
+expectError(ui.openUrl, "nothing after", "openUrl needs more than a scheme", "https://")
+expectError(ui.clipboard.set, "text must be provided", "clipboard.set needs text")
+assert(type(ui.clipboard.get) == "function", "ui.clipboard.get exists")
 
 -- IMAGES (no display needed) ------------------------------------------------
 
@@ -238,6 +259,31 @@ expectError(function() win:circle(0, 0, -1, "#000") end, "non-negative", "circle
 expectError(function() win:text(0, 0, 5) end, "text must be a string", "text checks its string")
 expectError(function() win:drawImage("x", 0, 0) end, "must be an image", "drawImage checks the image")
 expectError(function() win:setSize(0, 10) end, "must be positive", "setSize checks its arguments")
+
+-- Window chrome calls that do not change what is on screen.
+assert(type(win:isMaximized()) == "boolean", "isMaximized reports a boolean")
+win:setCursor("pointer")
+win:setCursor("hidden")
+win:setCursor("default")
+expectError(function() win:setCursor("hand") end, "unknown cursor", "setCursor checks the name")
+expectError(function() win:startResize("up") end, "unknown resize direction", "startResize checks the direction")
+expectError(function() win:startResize() end, "direction must be provided", "startResize needs a direction")
+win:setTextInput(true, { x = 10, y = 10, w = 100, h = 20 })
+win:setTextInput(true, { 10, 10 })
+win:setTextInput(false)
+expectError(function() win:setTextInput("yes") end, "enabled must be a boolean", "setTextInput checks enabled")
+expectError(function() win:setTextInput(true, { x = "a", y = 0 }) end, "area.x must be a number", "setTextInput checks the area")
+expectError(function() win:setFullscreen(1) end, "fullscreen must be a boolean", "setFullscreen checks its argument")
+win:setIcon("tests/fixtures/dot.png")
+local icon = ui.loadImage("tests/fixtures/dot.png")
+win:setIcon(icon)
+icon:close()
+expectError(function() win:setIcon(icon) end, "image was freed", "setIcon rejects freed images")
+win:setIcon(nil)
+local framed = ui.open({ width = 120, height = 80, visible = false, decorations = false,
+    minWidth = 60, minHeight = 40, icon = "tests/fixtures/dot.png", shadow = false })
+assert(framed:isOpen(), "a frameless window opens")
+framed:close()
 
 local events = ui.poll()
 assert(type(events) == "table", "poll returns a table")

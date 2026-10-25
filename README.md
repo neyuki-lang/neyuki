@@ -28,11 +28,11 @@ print(`total: {total}`)
 - **Exact integers.** Integers never overflow or lose precision; `2 ^ 100` is exact.
 - **Optional types, checked before running.** `local n: number = "x"` is reported with its line before anything executes, and `neyuki lint` shows the same diagnostics in your editor.
 - **Batteries for daily work.** Files and paths, JSON, dates, running programs, HTTP client and server, PostgreSQL and MySQL, hashing and encryption, windows with 2D drawing and animation, and keyboard and mouse automation.
-- **One executable.** Pure Rust, no C toolchain, no runtime to install. Scripts can also be compiled to verified bytecode.
+- **One executable.** No runtime to install; on Linux, TLS uses the system's OpenSSL. Scripts can also be compiled to verified bytecode.
 
 ## Install
 
-Build from source with a recent stable Rust:
+Build from source with a recent stable Rust and a C compiler (on Linux also `pkg-config` and the OpenSSL headers; see [CONTRIBUTING.md](CONTRIBUTING.md#building) for each OS):
 
 ```bash
 git clone https://github.com/neyuki-lang/neyuki

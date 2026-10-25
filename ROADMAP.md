@@ -60,3 +60,5 @@ This document outlines the architectural milestones and engineering trajectory f
 
 ## Desktop app platform
 - [x] `@neyuki/ui` text: font fallback chains for apps that ship their own CJK fonts (`ui.setFallbackFonts`, per-call `fallback`, `ui.loadFont` from a buffer, `ui.systemFont`), plus ellipsis, clip and wrap overflow, alignment, line height and letter spacing.
+- [x] Per-user storage in `@neyuki/os`: `dataDir`, `configDir` and `cacheDir` following each platform's conventions, and `protect`/`unprotect` for secrets (DPAPI on Windows, an OS keychain key elsewhere).
+- [x] `@neyuki/ui` window chrome and input: frameless windows with app-drawn title bars (`startDrag`, `startResize`, minimize/maximize/restore, fullscreen, minimum size, icon, drop shadow), pointer cursors, IME text input (`textinput` and `ime` events), click counts for double-click, window state, file drop and DPI change events, `ui.clipboard` and `ui.openUrl`.
