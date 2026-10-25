@@ -72,6 +72,7 @@ pub(crate) fn new_coroutine(vm: &mut VM, func: Value) -> Value {
         yield_retc: 0,
         yield_values: Vec::new(),
         open_upvalues: Vec::new(),
+        resume_error: None,
     };
     let state_rc = Rc::new(RefCell::new(state));
     // The map holds only a WEAK reference: the handle owns the state
@@ -147,6 +148,26 @@ pub(crate) fn coroutine_resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>
     res
 }
 
+/// Resumes a suspended coroutine by raising `message` at the call it is
+/// suspended in, as if that call had failed, instead of returning values
+/// there. The scheduler uses it for background work that failed. Returns
+/// what `coroutine.resume` would.
+pub(crate) fn resume_with_error(
+    vm: &mut VM,
+    thread: &Value,
+    message: String,
+) -> Result<Vec<Value>, String> {
+    let id = live_coroutine(vm, Some(thread), "coroutine.resume")?;
+    if let Some(co) = id.and_then(|id| vm.co_state(id)) {
+        // Only a coroutine that has started is suspended at a call.
+        let started = !co.borrow().frames.is_empty();
+        if started {
+            co.borrow_mut().resume_error = Some(message);
+        }
+    }
+    coroutine_resume(vm, std::slice::from_ref(thread))
+}
+
 fn resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let Some(co_id) = live_coroutine(vm, args.first(), "coroutine.resume")? else {
         return Ok(vec![
@@ -196,8 +217,17 @@ fn resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     }
 
     let resume_args = &args[1..];
+    let pending_error = if is_initial {
+        None
+    } else {
+        co_rc.borrow_mut().resume_error.take()
+    };
 
-    if is_initial {
+    if pending_error.is_some() {
+        // Raised at the call the coroutine is suspended in, so the traceback
+        // points there.
+        vm.error_trace = Some(vm.capture_trace());
+    } else if is_initial {
         let func = co_rc.borrow().func.clone();
         match func {
             Value::Closure(c) => {
@@ -271,7 +301,10 @@ fn resume(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         }
     }
 
-    let run_res = vm.run_to_depth(0);
+    let run_res = match pending_error {
+        Some(err) => Err(err),
+        None => vm.run_to_depth(0),
+    };
 
     match run_res {
         Err(ref _err) if vm.is_yielding => {

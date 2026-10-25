@@ -2,15 +2,24 @@
 //!
 //! Every task is a coroutine. `task.spawn` runs one right away,
 //! `task.defer` queues it for the next scheduler pass and `task.delay` and
-//! `task.wait` park it until a deadline. The scheduler runs whenever the
-//! main thread blocks in `task.wait`, and after the main chunk returns the
-//! program keeps running until no task is left waiting.
+//! `task.wait` park it until a deadline. Natives that block (`http.request`,
+//! `os.run`, ...) park a task too: they hand their work to a worker thread
+//! through `background::run`, and the worker pushes the result onto a
+//! completion queue that the scheduler drains on every pass.
+//!
+//! The scheduler runs whenever the main thread blocks in `task.wait`, on
+//! every `ui.poll` (so `ui.run` drives it once per frame, within a time
+//! budget), and after the main chunk returns, when the program keeps running
+//! until no task is left waiting.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::rc::Rc;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::vm::libs::background::Completion;
 use crate::vm::libs::coroutine;
 use crate::vm::machine::VM;
 use crate::vm::value::{Value, VmTable};
@@ -19,13 +28,37 @@ use crate::vm::value::{Value, VmTable};
 enum Wake {
     /// A `task.wait` call: the seconds actually waited since `since`.
     Elapsed(Instant),
-    /// A `task.delay` call: the arguments it was given.
+    /// A `task.delay` call or finished background work: these values.
     Args(Vec<Value>),
+    /// Background work that failed: this error is raised in the task.
+    Fail(String),
+}
+
+/// Called from a worker thread after it queued a completion, to wake an
+/// interpreter that is blocked somewhere other than the completion queue
+/// (`ui.poll` waiting for window events).
+pub(crate) type Waker = Box<dyn Fn() + Send>;
+
+/// The worker side of the completion queue.
+pub(crate) struct CompletionSender {
+    tx: Sender<Completion>,
+    waker: Arc<Mutex<Option<Waker>>>,
+}
+
+impl CompletionSender {
+    /// Queues a completion and wakes the interpreter. A VM that is gone has
+    /// no use for it, so a closed queue just drops it.
+    pub(crate) fn send(self, completion: Completion) {
+        if self.tx.send(completion).is_ok()
+            && let Some(wake) = &*self.waker.lock().unwrap_or_else(|e| e.into_inner())
+        {
+            wake();
+        }
+    }
 }
 
 /// Tasks waiting for the scheduler. The values held here are coroutine
 /// handles, which keeps them alive while nothing else references them.
-#[derive(Default)]
 pub struct Scheduler {
     /// Tasks for the next pass, in the order they were queued.
     deferred: VecDeque<(Value, Vec<Value>)>,
@@ -33,8 +66,41 @@ pub struct Scheduler {
     /// the same deadline in the order they started waiting.
     sleeping: BTreeMap<(Instant, u64), (Value, Wake)>,
     next_seq: u64,
+    /// Tasks that are due but have not been resumed yet: finished
+    /// background work, and whatever a pass left over when it ran out of
+    /// its time budget. They go first on the next pass.
+    ready: VecDeque<(Value, Wake)>,
+    /// Tasks waiting for background work, by job id.
+    waiting: HashMap<u64, Value>,
+    next_job: u64,
+    completions: Receiver<Completion>,
+    sender: Sender<Completion>,
+    waker: Arc<Mutex<Option<Waker>>>,
+    /// Coroutine ids of the threads started by `spawn`, `defer` or `delay`.
+    /// Only these yield inside blocking natives; any other coroutine (a
+    /// generator, say) keeps the blocking behavior it always had.
+    task_ids: HashSet<usize>,
     /// How many tasks ended in an error since the last `run_until_idle`.
     failed: usize,
+}
+
+impl Default for Scheduler {
+    fn default() -> Self {
+        let (sender, completions) = mpsc::channel();
+        Scheduler {
+            deferred: VecDeque::new(),
+            sleeping: BTreeMap::new(),
+            next_seq: 0,
+            ready: VecDeque::new(),
+            waiting: HashMap::new(),
+            next_job: 0,
+            completions,
+            sender,
+            waker: Arc::new(Mutex::new(None)),
+            task_ids: HashSet::new(),
+            failed: 0,
+        }
+    }
 }
 
 impl Scheduler {
@@ -45,15 +111,29 @@ impl Scheduler {
     }
 
     fn is_idle(&self) -> bool {
-        self.deferred.is_empty() && self.sleeping.is_empty()
+        self.deferred.is_empty()
+            && self.sleeping.is_empty()
+            && self.ready.is_empty()
+            && self.waiting.is_empty()
     }
 
-    /// Drops every queued resumption of `thread`.
+    /// Drops every queued resumption of `thread`. Background work it was
+    /// waiting for still runs to the end, but its result is discarded.
     fn forget(&mut self, thread: &Rc<RefCell<VmTable>>) {
         let same = |v: &Value| matches!(v, Value::Table(t) if Rc::ptr_eq(t, thread));
         self.deferred.retain(|(t, _)| !same(t));
         self.sleeping.retain(|_, (t, _)| !same(t));
+        self.ready.retain(|(t, _)| !same(t));
+        self.waiting.retain(|_, t| !same(t));
+        if let Some(id) = coroutine_id(thread) {
+            self.task_ids.remove(&id);
+        }
     }
+}
+
+/// The `_id` of a coroutine handle.
+fn coroutine_id(thread: &Rc<RefCell<VmTable>>) -> Option<usize> {
+    thread.borrow().get_str("_id").as_usize()
 }
 
 pub fn create_task_lib() -> Value {
@@ -70,23 +150,30 @@ pub fn create_task_lib() -> Value {
 }
 
 /// The thread for a `spawn`/`defer`/`delay` argument: a function becomes a
-/// new coroutine, a thread is used as it is.
+/// new coroutine, a thread is used as it is. Either way it is remembered as
+/// a task.
 fn task_thread(
     vm: &mut VM,
     arg: Option<&Value>,
     func: &str,
     index: usize,
 ) -> Result<Value, String> {
-    match arg {
-        Some(f @ (Value::Closure(_) | Value::Native(_))) => {
-            Ok(coroutine::new_coroutine(vm, f.clone()))
+    let thread = match arg {
+        Some(f @ (Value::Closure(_) | Value::Native(_))) => coroutine::new_coroutine(vm, f.clone()),
+        Some(t @ Value::Table(_)) if t.type_name() == "thread" => t.clone(),
+        _ => {
+            return Err(format!(
+                "bad argument #{} to '{}' (function or thread expected)",
+                index, func
+            ));
         }
-        Some(t @ Value::Table(_)) if t.type_name() == "thread" => Ok(t.clone()),
-        _ => Err(format!(
-            "bad argument #{} to '{}' (function or thread expected)",
-            index, func
-        )),
+    };
+    if let Value::Table(t) = &thread
+        && let Some(id) = coroutine_id(t)
+    {
+        vm.tasks.task_ids.insert(id);
     }
+    Ok(thread)
 }
 
 /// A delay in seconds; nil means "as soon as possible".
@@ -123,22 +210,47 @@ fn deadline(now: Instant, seconds: f64) -> Instant {
 /// Resumes `thread` with `args` if it is still suspended. A task that ends
 /// in an error is reported on stderr and counted; the other tasks go on.
 fn resume_task(vm: &mut VM, thread: Value, args: Vec<Value>) {
-    if !coroutine::is_suspended(vm, &thread) {
-        return;
+    resume_with(vm, thread, Wake::Args(args));
+}
+
+/// Resumes `thread` the way `wake` says (with values, or by raising an
+/// error where it is suspended) if it is still suspended.
+fn resume_with(vm: &mut VM, thread: Value, wake: Wake) {
+    if coroutine::is_suspended(vm, &thread) {
+        let outcome = match wake {
+            Wake::Elapsed(since) => coroutine::coroutine_resume(
+                vm,
+                &[thread.clone(), Value::Float(since.elapsed().as_secs_f64())],
+            ),
+            Wake::Args(args) => {
+                let mut resume_args = Vec::with_capacity(args.len() + 1);
+                resume_args.push(thread.clone());
+                resume_args.extend(args);
+                coroutine::coroutine_resume(vm, &resume_args)
+            }
+            Wake::Fail(message) => coroutine::resume_with_error(vm, &thread, message),
+        };
+        let failure = match outcome {
+            Ok(res) => match res.first() {
+                Some(Value::Bool(false)) => {
+                    Some(res.get(1).map(|v| v.to_string()).unwrap_or_default())
+                }
+                _ => None,
+            },
+            Err(err) => Some(err),
+        };
+        if let Some(message) = failure {
+            eprintln!("task error: {}", message);
+            vm.tasks.failed += 1;
+        }
     }
-    let mut resume_args = Vec::with_capacity(args.len() + 1);
-    resume_args.push(thread);
-    resume_args.extend(args);
-    let failure = match coroutine::coroutine_resume(vm, &resume_args) {
-        Ok(res) => match res.first() {
-            Some(Value::Bool(false)) => Some(res.get(1).map(|v| v.to_string()).unwrap_or_default()),
-            _ => None,
-        },
-        Err(err) => Some(err),
-    };
-    if let Some(message) = failure {
-        eprintln!("task error: {}", message);
-        vm.tasks.failed += 1;
+    // A finished task is no longer one; dropping it here keeps the set from
+    // growing with every task a long-running program starts.
+    if !coroutine::is_suspended(vm, &thread)
+        && let Value::Table(t) = &thread
+        && let Some(id) = coroutine_id(t)
+    {
+        vm.tasks.task_ids.remove(&id);
     }
 }
 
@@ -186,7 +298,8 @@ fn task_wait(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     Ok(vec![Value::Float(start.elapsed().as_secs_f64())])
 }
 
-/// `task.cancel(thread)`: unschedules a task and closes its coroutine.
+/// `task.cancel(thread)`: unschedules a task and closes its coroutine. If
+/// it was waiting for background work, that work's result is dropped.
 fn task_cancel(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let Some(Value::Table(thread)) = args.first().filter(|v| v.type_name() == "thread") else {
         return Err("bad argument #1 to 'task.cancel' (thread expected)".to_string());
@@ -198,39 +311,115 @@ fn task_cancel(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     }
 }
 
-/// Runs every task that is due now: the deferred queue and the sleepers
-/// whose deadline has passed. Tasks queued while the pass runs wait for
-/// the next one, so `task.wait()` in a loop cannot starve the scheduler.
-/// Returns whether anything was resumed.
-fn run_pass(vm: &mut VM) -> bool {
-    let now = Instant::now();
+// BACKGROUND WORK ------------------------------------------------------------
+
+/// Installs the function worker threads call after queuing a completion,
+/// replacing any earlier one. `ui.poll` uses it to wake its event loop.
+pub(crate) fn set_waker(vm: &mut VM, waker: Waker) {
+    *vm.tasks.waker.lock().unwrap_or_else(|e| e.into_inner()) = Some(waker);
+}
+
+/// Whether a waker is installed.
+pub(crate) fn has_waker(vm: &VM) -> bool {
+    vm.tasks
+        .waker
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some()
+}
+
+/// The running task's thread, if a blocking native called right here should
+/// yield: inside a coroutine started by the task library, and not under a
+/// native that called back into Neyuki.
+pub(crate) fn current_task(vm: &VM) -> Option<Value> {
+    let id = vm.current_co?;
+    if !vm.tasks.task_ids.contains(&id) {
+        return None;
+    }
+    coroutine::yieldable_handle(vm).map(Value::Table)
+}
+
+/// Parks `thread` until a new background job completes, returning the
+/// job's id and the sender its worker reports through.
+pub(crate) fn expect_completion(vm: &mut VM, thread: Value) -> (u64, CompletionSender) {
+    let id = vm.tasks.next_job;
+    vm.tasks.next_job += 1;
+    vm.tasks.waiting.insert(id, thread);
+    let sender = CompletionSender {
+        tx: vm.tasks.sender.clone(),
+        waker: vm.tasks.waker.clone(),
+    };
+    (id, sender)
+}
+
+/// Makes a completed job's task ready, running the job's `finish` here on
+/// the interpreter thread. The completion of a cancelled task is dropped
+/// without running `finish`.
+fn file_completion(vm: &mut VM, completion: Completion) {
+    let Some(thread) = vm.tasks.waiting.remove(&completion.id) else {
+        return;
+    };
+    let wake = match (completion.finish)(vm) {
+        Ok(values) => Wake::Args(values),
+        Err(err) => Wake::Fail(err),
+    };
+    vm.tasks.ready.push_back((thread, wake));
+}
+
+/// Files every completion that has arrived so far.
+fn drain_completions(vm: &mut VM) {
+    while let Ok(completion) = vm.tasks.completions.try_recv() {
+        file_completion(vm, completion);
+    }
+}
+
+// SCHEDULING -----------------------------------------------------------------
+
+/// Runs every task that is due now: finished background work, the
+/// deferred queue and the sleepers whose deadline has passed. Tasks queued
+/// while the pass runs wait for the next one, so `task.wait()` in a loop
+/// cannot starve the scheduler. With a `budget`, the pass stops once that
+/// much time has gone by and leaves the rest for the next pass (one task
+/// still runs until it yields, so the budget is not a hard limit). Returns
+/// whether anything was resumed.
+fn run_pass(vm: &mut VM, budget: Option<Duration>) -> bool {
+    let start = Instant::now();
+    drain_completions(vm);
     let deferred = std::mem::take(&mut vm.tasks.deferred);
-    let mut due = Vec::new();
+    vm.tasks.ready.extend(
+        deferred
+            .into_iter()
+            .map(|(thread, args)| (thread, Wake::Args(args))),
+    );
     while let Some(entry) = vm.tasks.sleeping.first_entry() {
-        if entry.key().0 > now {
+        if entry.key().0 > start {
             break;
         }
-        due.push(entry.remove());
+        let due = entry.remove();
+        vm.tasks.ready.push_back(due);
     }
-    let ran = !deferred.is_empty() || !due.is_empty();
-    for (thread, args) in deferred {
-        resume_task(vm, thread, args);
-    }
-    for (thread, wake) in due {
-        let args = match wake {
-            Wake::Elapsed(since) => vec![Value::Float(since.elapsed().as_secs_f64())],
-            Wake::Args(args) => args,
+    let due = vm.tasks.ready.len();
+    let mut ran = false;
+    for _ in 0..due {
+        if ran && budget.is_some_and(|b| start.elapsed() >= b) {
+            break;
+        }
+        let Some((thread, wake)) = vm.tasks.ready.pop_front() else {
+            break;
         };
-        resume_task(vm, thread, args);
+        resume_with(vm, thread, wake);
+        ran = true;
     }
     ran
 }
 
 /// Runs tasks until `until` passes, or with `None` until no task is left
-/// waiting, sleeping the thread while nothing is due.
+/// waiting, sleeping the thread while nothing is due. While background work
+/// is outstanding it sleeps on the completion queue instead, so a finished
+/// job wakes it at once.
 fn run_until(vm: &mut VM, until: Option<Instant>) {
     loop {
-        let ran = run_pass(vm);
+        let ran = run_pass(vm, None);
         if until.is_some_and(|u| u <= Instant::now()) {
             return;
         }
@@ -239,14 +428,35 @@ fn run_until(vm: &mut VM, until: Option<Instant>) {
         }
         let next = vm.tasks.sleeping.first_key_value().map(|(k, _)| k.0);
         let wake = match (next, until) {
-            (Some(n), Some(u)) => n.min(u),
-            (Some(n), None) => n,
-            (None, Some(u)) => u,
-            (None, None) => return,
+            (Some(n), Some(u)) => Some(n.min(u)),
+            (Some(n), None) => Some(n),
+            (None, Some(u)) => Some(u),
+            (None, None) if vm.tasks.waiting.is_empty() => return,
+            (None, None) => None,
         };
-        let now = Instant::now();
-        if wake > now {
-            std::thread::sleep(wake - now);
+        if vm.tasks.waiting.is_empty() {
+            let now = Instant::now();
+            if let Some(wake) = wake
+                && wake > now
+            {
+                std::thread::sleep(wake - now);
+            }
+            continue;
+        }
+        let received = match wake {
+            Some(wake) => vm
+                .tasks
+                .completions
+                .recv_timeout(wake.saturating_duration_since(Instant::now())),
+            // The scheduler holds a sender itself, so this cannot fail.
+            None => vm
+                .tasks
+                .completions
+                .recv()
+                .map_err(|_| RecvTimeoutError::Disconnected),
+        };
+        if let Ok(completion) = received {
+            file_completion(vm, completion);
         }
     }
 }
@@ -267,17 +477,38 @@ pub fn run_until_idle(vm: &mut VM) -> Result<(), String> {
 /// Runs the tasks that are due right now without blocking (the REPL calls
 /// this after each chunk and whenever a task wakes up between lines).
 pub fn run_due(vm: &mut VM) {
-    run_pass(vm);
+    run_pass(vm, None);
     vm.tasks.failed = 0;
 }
 
-/// When the next task is due: now if one is deferred, otherwise the
-/// earliest deadline, or `None` when no task is waiting.
-pub fn next_due(vm: &VM) -> Option<Instant> {
-    if !vm.tasks.deferred.is_empty() {
-        return Some(Instant::now());
+/// Runs the tasks that are due right now for about `budget` at most and
+/// leaves the rest for the next call (`ui.poll` calls this every frame).
+/// Task errors are reported and counted as always, so a script that ends
+/// afterwards still exits with a failure.
+pub(crate) fn run_for(vm: &mut VM, budget: Duration) {
+    run_pass(vm, Some(budget));
+}
+
+/// How often a caller that cannot sleep on the completion queue and has no
+/// waker installed (the REPL) should look for finished background work.
+const COMPLETION_POLL: Duration = Duration::from_millis(20);
+
+/// When the next task is due: now if one is ready or deferred, otherwise
+/// the earliest deadline, or `None` when no task is waiting. While
+/// background work is outstanding and no waker is installed, it is at most
+/// `COMPLETION_POLL` away.
+pub fn next_due(vm: &mut VM) -> Option<Instant> {
+    drain_completions(vm);
+    let now = Instant::now();
+    if !vm.tasks.deferred.is_empty() || !vm.tasks.ready.is_empty() {
+        return Some(now);
     }
-    vm.tasks.sleeping.first_key_value().map(|(k, _)| k.0)
+    let sleeper = vm.tasks.sleeping.first_key_value().map(|(k, _)| k.0);
+    if vm.tasks.waiting.is_empty() || has_waker(vm) {
+        return sleeper;
+    }
+    let poll = now + COMPLETION_POLL;
+    Some(sleeper.map_or(poll, |s| s.min(poll)))
 }
 
 #[cfg(test)]
@@ -287,6 +518,14 @@ mod tests {
 
     fn run_program(vm: &mut VM, src: &str) -> Result<Value, String> {
         let proto = crate::compiler::compile_program(src, "test", crate::compiler::Options::RUN)?;
+        vm.execute_program(proto)
+    }
+
+    /// Like `run_program`, without the checker, which does not know about
+    /// natives a test registers itself.
+    fn run_native_program(vm: &mut VM, src: &str) -> Result<Value, String> {
+        let proto =
+            crate::compiler::compile_program(src, "test", crate::compiler::Options::UNCHECKED)?;
         vm.execute_program(proto)
     }
 
@@ -333,5 +572,115 @@ mod tests {
         assert_eq!(err, "2 tasks raised an error");
         assert!(matches!(global(&vm, "main_done"), Value::Bool(true)));
         assert!(matches!(global(&vm, "ran"), Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_budgeted_passes_leave_the_rest_for_later() {
+        let mut vm = VM::new();
+        vm.execute(
+            crate::compiler::compile_program(
+                "_G.count = 0\n\
+                 for i = 1, 5 do\n\
+                 \u{20} task.defer(function()\n\
+                 \u{20}   local t = os.clock()\n\
+                 \u{20}   while os.clock() - t < 0.01 do end\n\
+                 \u{20}   _G.count += 1\n\
+                 \u{20} end)\n\
+                 end",
+                "test",
+                crate::compiler::Options::RUN,
+            )
+            .expect("compiles"),
+        )
+        .expect("runs");
+        super::run_for(&mut vm, std::time::Duration::from_millis(1));
+        assert_eq!(global(&vm, "count").to_string(), "1");
+        super::run_until_idle(&mut vm).expect("the rest run");
+        assert_eq!(global(&vm, "count").to_string(), "5");
+    }
+
+    /// A task can use `background::run` and get the result back, and a
+    /// failure is raised inside the task, not in the main program.
+    #[test]
+    fn test_background_work_resumes_tasks() {
+        fn slow_double(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+            let n = crate::vm::libs::args::number_arg(args, 0, "n")?;
+            crate::vm::libs::background::run(
+                vm,
+                move || {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    if n < 0.0 {
+                        Err("negative".to_string())
+                    } else {
+                        Ok(n * 2.0)
+                    }
+                },
+                |_vm, doubled| Ok(vec![Value::Float(doubled)]),
+            )
+        }
+        let mut vm = VM::new();
+        vm.register_native(crate::native_def!("slow_double", slow_double));
+        let start = std::time::Instant::now();
+        let err = run_native_program(
+            &mut vm,
+            "_G.sum = 0\n\
+             for i = 1, 5 do\n\
+             \u{20} task.spawn(function() local d = slow_double(i) _G.sum += d end)\n\
+             end\n\
+             task.spawn(function() slow_double(-1) _G.after = true end)\n\
+             _G.direct = slow_double(21)",
+        )
+        .expect_err("the failing task fails the program");
+        assert_eq!(err, "a task raised an error");
+        assert_eq!(global(&vm, "direct").to_string(), "42");
+        assert_eq!(global(&vm, "sum").to_string(), "30");
+        assert!(matches!(global(&vm, "after"), Value::Nil));
+        // Six jobs of 100 ms plus one in place: well under the 700 ms they
+        // would take one after another.
+        assert!(start.elapsed() < std::time::Duration::from_millis(500));
+        assert!(vm.tasks.is_idle());
+    }
+
+    #[test]
+    fn test_cancel_drops_background_results() {
+        fn slow(vm: &mut VM, _args: &[Value]) -> Result<Vec<Value>, String> {
+            crate::vm::libs::background::run(
+                vm,
+                || {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    Ok(())
+                },
+                |_vm, ()| Ok(vec![Value::Bool(true)]),
+            )
+        }
+        let mut vm = VM::new();
+        vm.register_native(crate::native_def!("slow", slow));
+        run_native_program(
+            &mut vm,
+            "local t = task.spawn(function() _G.got = slow() end)\n\
+             task.cancel(t)\n\
+             task.wait(0.15)",
+        )
+        .expect("program runs");
+        assert!(matches!(global(&vm, "got"), Value::Nil));
+        assert!(vm.tasks.is_idle());
+    }
+
+    /// Plain coroutines are not tasks: blocking natives inside them block
+    /// instead of yielding, so generators keep working.
+    #[test]
+    fn test_plain_coroutines_do_not_yield_for_background_work() {
+        fn slow(vm: &mut VM, _args: &[Value]) -> Result<Vec<Value>, String> {
+            crate::vm::libs::background::run(vm, || Ok(7), |_vm, n| Ok(vec![Value::Int(n)]))
+        }
+        let mut vm = VM::new();
+        vm.register_native(crate::native_def!("slow", slow));
+        run_native_program(
+            &mut vm,
+            "local gen = coroutine.wrap(function() coroutine.yield(slow()) end)\n\
+             _G.got = gen()",
+        )
+        .expect("program runs");
+        assert_eq!(global(&vm, "got").to_string(), "7");
     }
 }

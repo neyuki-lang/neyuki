@@ -30,7 +30,9 @@ tiny_http = { package = "tiny_http_dh", version = "0.12.2" }
 # Transport, OpenSSL on Linux) so certificates come from the OS trust store.
 # schannel 0.1.28+ links Windows APIs with `raw-dylib`, which needs `dlltool`
 # on the windows-gnu toolchain; older versions use prebuilt import libraries.
-ureq = { version = "3", default-features = false, features = ["native-tls", "gzip", "charset"] }
+# `gzip` and `brotli` let it advertise and transparently decode compressed
+# responses (brotli through the pure-Rust `brotli-decompressor`).
+ureq = { version = "3", default-features = false, features = ["native-tls", "gzip", "brotli", "charset"] }
 # Not used directly: naming `flate2` with `zlib-rs` switches the deflate
 # backend that `ureq` (gzip responses) and `mysql` (compressed protocol) share
 # from `miniz_oxide` to `zlib-rs`, which decompresses noticeably faster and

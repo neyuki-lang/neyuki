@@ -213,7 +213,7 @@ fn string_field(table: &VmTable, name: &str) -> Result<Option<String>, String> {
 /// involved. `options` may hold `cwd`, `env` (variables to add or override),
 /// `stdin` (text to feed it) and `capture` (default true; false lets output
 /// go straight to the terminal). Returns `{ ok, code, stdout, stderr }`.
-fn os_run(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+fn os_run(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
@@ -317,23 +317,34 @@ fn os_run(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     if capture {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
     }
-    let mut child = command
-        .spawn()
-        .map_err(|err| format!("cannot run command: {}", err))?;
-    if let Some(text) = input
-        && let Some(mut stdin) = child.stdin.take()
-    {
-        // Fed from a thread so a program that writes before reading all of
-        // its input cannot deadlock against us.
-        let bytes = text.as_bytes().to_vec();
-        std::thread::spawn(move || {
-            let _ = stdin.write_all(&bytes);
-        });
-    }
-    let output = child
-        .wait_with_output()
-        .map_err(|err| format!("cannot run command: {}", err))?;
+    // Inside a task the program runs and is waited for on a worker thread,
+    // so only that task waits; see `background::run`.
+    crate::vm::libs::background::run(
+        vm,
+        move || {
+            let mut child = command
+                .spawn()
+                .map_err(|err| format!("cannot run command: {}", err))?;
+            if let Some(text) = input
+                && let Some(mut stdin) = child.stdin.take()
+            {
+                // Fed from a thread so a program that writes before reading
+                // all of its input cannot deadlock against us.
+                let bytes = text.into_bytes();
+                std::thread::spawn(move || {
+                    let _ = stdin.write_all(&bytes);
+                });
+            }
+            child
+                .wait_with_output()
+                .map_err(|err| format!("cannot run command: {}", err))
+        },
+        |_vm, output| Ok(vec![run_result(output)]),
+    )
+}
 
+/// The `{ ok, code, stdout, stderr }` table `run` returns.
+fn run_result(output: std::process::Output) -> Value {
     let mut result = VmTable::new();
     result.set_str("ok", Value::Bool(output.status.success()));
     result.set_str(
@@ -351,7 +362,7 @@ fn os_run(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         "stderr",
         Value::string(String::from_utf8_lossy(&output.stderr).into_owned()),
     );
-    Ok(vec![Value::Table(Rc::new(RefCell::new(result)))])
+    Value::Table(Rc::new(RefCell::new(result)))
 }
 
 /// Blocks the script for `seconds` (fractions allowed).

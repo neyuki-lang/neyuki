@@ -5,6 +5,7 @@
 //! and built on the `__`-prefixed natives registered here.
 
 pub mod args;
+pub mod background;
 pub mod bit;
 pub mod buffer;
 pub mod coroutine;

@@ -67,6 +67,7 @@ This document outlines the architectural milestones and engineering trajectory f
   - [x] Rectangle and path clipping (`pushClip`, `pushClipPath`), group opacity (`pushOpacity`), linear/radial gradients and box shadows on fills.
   - [x] Gaussian blur: `blurRegion` backdrop blur with rounded masks and `Image:blur`.
   - [x] CPU render performance: `present({ dirty })` partial present, `ui.run({ fps = "auto" })` idle throttling, `ui.stats()` frame timing and an opaque glyph fast path. A GPU backend (wgpu) is left out unless these prove too slow.
+- [x] Async I/O: `http.request`, `os.run` and `fs.read` suspend only the calling task and run on background threads; `ui.run` pumps the completions every frame so windows stay responsive.
 - [ ] Tray icon with a menu whose items arrive as events.
 - [ ] Single-instance apps: a second launch signals and focuses the first.
 - [ ] Auto-update support.

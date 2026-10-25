@@ -105,13 +105,17 @@ fn builtin_open(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     Ok(vec![Value::Bool(true)])
 }
 
-fn builtin_read(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let path = str_arg(args, 0, "path")?;
-    if let Some(bytes) = read_bundled(path) {
+/// Files at least this large are read on a worker thread when `read` is
+/// called inside a task; smaller ones are not worth the hop.
+const BACKGROUND_READ: u64 = 1024 * 1024;
+
+fn builtin_read(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let path = str_arg(args, 0, "path")?.to_string();
+    if let Some(bytes) = read_bundled(&path) {
         let text = String::from_utf8(bytes?).map_err(|_| {
             io_error(
                 "read",
-                path,
+                &path,
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     "stream did not contain valid UTF-8",
@@ -120,8 +124,17 @@ fn builtin_read(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         })?;
         return Ok(vec![Value::string(text)]);
     }
-    let text = fs::read_to_string(path).map_err(|err| io_error("read", path, err))?;
-    Ok(vec![Value::string(text)])
+    let large = fs::metadata(&path).is_ok_and(|meta| meta.len() >= BACKGROUND_READ);
+    if !large {
+        let text = fs::read_to_string(&path).map_err(|err| io_error("read", &path, err))?;
+        return Ok(vec![Value::string(text)]);
+    }
+    // Inside a task only that task waits; see `background::run`.
+    crate::vm::libs::background::run(
+        vm,
+        move || fs::read_to_string(&path).map_err(|err| io_error("read", &path, err)),
+        |_vm, text| Ok(vec![Value::string(text)]),
+    )
 }
 
 fn builtin_write(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {

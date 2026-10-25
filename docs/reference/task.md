@@ -34,3 +34,9 @@ Suspends the current task for `seconds` (fractions allowed) and returns the seco
 ## task.cancel(thread: thread)
 
 Unschedules a task and closes its coroutine, so it never runs again. A running task cannot cancel itself.
+
+## Blocking calls
+
+Inside a task, calls that would block on the outside world (`http.request` and the helpers built on it, `os.run` and reading files with `fs.read`) suspend only that task. The work runs on a background thread, the other tasks keep running, and the task resumes with the result (or the error) once the work finishes. Under `ui.run` finished work is picked up every frame, so the window stays responsive while a request is in flight.
+
+Where a task cannot yield (the main program, a plain coroutine or a function a native called back, such as a `try` body) these calls block as before. A task cancelled while its work runs never resumes; the work itself runs to its end, so give requests a `timeout`.

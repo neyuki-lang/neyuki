@@ -1,0 +1,66 @@
+-- Blocking natives (http.request, os.run, fs.read) park only the task that
+-- calls them; the other tasks keep running meanwhile.
+
+local http = require("@neyuki/http")
+local os = require("@neyuki/os")
+
+-- Waits until `done()` holds, running the scheduler meanwhile.
+local function waitFor(done)
+    local waited = 0
+    while not done() and waited < 10 do
+        waited += task.wait(0.005)
+    end
+end
+
+-- A task that requests a page from a server served by the main chunk: this
+-- only works because the request does not block the interpreter.
+local server = http.listen({ host = "127.0.0.1", port = 0 })
+local result = nil
+local ticks = 0
+task.spawn(function()
+    result = http.get(server.url .. "/hello", { timeout = 10 })
+end)
+task.spawn(function()
+    while result == nil do
+        task.wait(0.005)
+        ticks += 1
+    end
+end)
+local request = server:accept(10)
+assert(request ~= nil, "the task's request should arrive")
+assert(request.path == "/hello", "the request path should be kept")
+task.wait(0.05)
+assert(ticks > 0, "other tasks run while a request is in flight")
+request:respond("hi")
+waitFor(function()
+    return result ~= nil
+end)
+assert(result ~= nil and result.status == 200 and result.body == "hi", "the task gets the response")
+server:close()
+
+-- A failing request raises inside the task, where try can catch it.
+local failed = nil
+task.spawn(function()
+    local ok, err = try(http.get, "http://127.0.0.1:1/", { timeout = 2 })
+    failed = { ok = ok, err = err }
+end)
+waitFor(function()
+    return failed ~= nil
+end)
+assert(failed ~= nil and not failed.ok, "a failed request errors inside the task")
+
+-- Tasks cancelled while their work runs never resume.
+local resumed = false
+local sleeper = task.spawn(function()
+    os.run("echo cancelled")
+    resumed = true
+end)
+task.cancel(sleeper)
+task.wait(0.2)
+assert(not resumed, "a cancelled task stays dead")
+
+-- Outside a task the calls simply block, as before.
+local direct = os.run("echo direct")
+assert(direct.ok, "blocking call in the main chunk still works")
+
+print("[pass] async io")
