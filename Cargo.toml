@@ -85,6 +85,10 @@ softbuffer = "0.4"
 tiny-skia = "0.11"
 fontdue = "0.9"
 png = "0.18"
+# `ui.openUrl` hands links to the default browser or mail client through
+# `open` (ShellExecuteW on Windows, `open` on macOS, xdg-open and friends on
+# Linux) instead of spawning shell commands by hand.
+open = "5"
 
 # `@neyuki/hid` drives the keyboard and mouse through `enigo` (SendInput on
 # Windows, CoreGraphics on macOS, XTest over the pure-Rust `x11rb` on X11)
@@ -107,6 +111,16 @@ mimalloc = ["dep:mimalloc"]
 
 [target.'cfg(windows)'.dependencies]
 schannel = ">=0.1.23, <0.1.28"
+# `os.protect` seals secrets with DPAPI (CryptProtectData) for the current
+# user. 0.59 is the generation that still links through import libraries,
+# for the same windows-gnu reason as `schannel` above.
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography"] }
+
+# Elsewhere `os.protect` keeps a random AES-256-GCM key in the OS keychain:
+# Keychain Services on macOS, the Secret Service over the pure-Rust `zbus`
+# D-Bus client on Linux and the BSDs (no libdbus needed to build or run).
+[target.'cfg(not(windows))'.dependencies]
+keyring = { version = "3.6", features = ["apple-native", "async-secret-service", "async-io", "crypto-rust"] }
 
 # On Wayland, XTest only reaches XWayland windows, so `@neyuki/hid` drives the
 # compositor's virtual keyboard and pointer itself. enigo's own Wayland

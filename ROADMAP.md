@@ -55,3 +55,9 @@ This document outlines the architectural milestones and engineering trajectory f
 - [ ] Bytecode Version 4 freeze: guarantee long-term stability and binary portability across all 1.x releases.
 - [ ] Performance benchmarking suite validation against standard scripting workloads.
 - [ ] Full test coverage of standard libraries, security sandboxing, and memory leak regression tests.
+
+---
+
+## Desktop app platform
+- [x] Per-user storage in `@neyuki/os`: `dataDir`, `configDir` and `cacheDir` following each platform's conventions, and `protect`/`unprotect` for secrets (DPAPI on Windows, an OS keychain key elsewhere).
+- [x] `@neyuki/ui` window chrome and input: frameless windows with app-drawn title bars (`startDrag`, `startResize`, minimize/maximize/restore, fullscreen, minimum size, icon, drop shadow), pointer cursors, IME text input (`textinput` and `ime` events), click counts for double-click, window state, file drop and DPI change events, `ui.clipboard` and `ui.openUrl`.
