@@ -50,16 +50,28 @@ This document outlines the architectural milestones and engineering trajectory f
 
 ---
 
+## Milestone: Desktop app platform
+- [x] `neyuki build`: package an entry script and an asset folder into a standalone executable with an embedded read-only file system.
+- [x] `[app]` manifest section: name, identifier, icon, publisher, copyright; no console window by default on Windows.
+- [x] `os.app()`: read the app's name, version and identifier at runtime.
+- [x] Per-user storage in `@neyuki/os`: `dataDir`, `configDir` and `cacheDir` following each platform's conventions, and `protect`/`unprotect` for secrets (DPAPI on Windows, an OS keychain key elsewhere).
+- [x] `@neyuki/ui` window chrome and input: frameless windows with app-drawn title bars (`startDrag`, `startResize`, minimize/maximize/restore, fullscreen, minimum size, icon, drop shadow), pointer cursors, IME text input (`textinput` and `ime` events), click counts for double-click, window state, file drop and DPI change events, `ui.clipboard` and `ui.openUrl`.
+- [x] `@neyuki/ui` text: font fallback chains for apps that ship their own CJK fonts (`ui.setFallbackFonts`, per-call `fallback`, `ui.loadFont` from a buffer, `ui.systemFont`), plus ellipsis, clip and wrap overflow, alignment, line height and letter spacing.
+- [x] OS media integration for `@neyuki/ui`: now-playing metadata in the system media controls (`ui.mediaSession`) and global media keys as `mediakey` events.
+- [x] `@neyuki/ui` image decoding: PNG, JPEG, WebP, GIF and BMP detected by magic bytes, from files (`ui.loadImage`) or memory (`ui.decodeImage`).
+  - [x] Animated GIF/WebP/PNG frames with browser-style delay clamping, `ui.animation` playback helper and `image:resized`.
+  - [x] `drawImage` options `frame`, `opacity`, `radius` and `fit` (`fill`, `contain`, `cover`) with cached smooth resampling.
+  - [x] Pixel-count and decoded-memory limits.
+- [x] Async I/O: `http.request`, `os.run` and `fs.read` suspend only the calling task and run on background threads; `ui.run` pumps the completions every frame so windows stay responsive.
+- [x] `@neyuki/net`: named pipes, Unix sockets, TCP sockets and a WebSocket client with reader threads and buffered reads that suspend only the calling task, plus `os.spawn` for child processes with streamed stdin, stdout and stderr.
+- [ ] Tray icon with a menu whose items arrive as events.
+- [ ] Single-instance apps: a second launch signals and focuses the first.
+- [ ] Auto-update support.
+
+---
+
 ## Milestone 5: Version 1.0 Production Freeze (v1.0.0)
 - [ ] Language syntax freeze: no further breaking grammar modifications.
 - [ ] Bytecode Version 4 freeze: guarantee long-term stability and binary portability across all 1.x releases.
 - [ ] Performance benchmarking suite validation against standard scripting workloads.
 - [ ] Full test coverage of standard libraries, security sandboxing, and memory leak regression tests.
-
----
-
-## Desktop app platform
-- [x] Per-user storage in `@neyuki/os`: `dataDir`, `configDir` and `cacheDir` following each platform's conventions, and `protect`/`unprotect` for secrets (DPAPI on Windows, an OS keychain key elsewhere).
-- [x] `@neyuki/ui` window chrome and input: frameless windows with app-drawn title bars (`startDrag`, `startResize`, minimize/maximize/restore, fullscreen, minimum size, icon, drop shadow), pointer cursors, IME text input (`textinput` and `ime` events), click counts for double-click, window state, file drop and DPI change events, `ui.clipboard` and `ui.openUrl`.
-- [x] Async I/O: `http.request`, `os.run` and `fs.read` suspend only the calling task and run on background threads; `ui.run` pumps the completions every frame so windows stay responsive.
-- [x] `@neyuki/net`: named pipes, Unix sockets, TCP sockets and a WebSocket client with reader threads and buffered reads that suspend only the calling task, plus `os.spawn` for child processes with streamed stdin, stdout and stderr.

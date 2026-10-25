@@ -54,6 +54,17 @@ local name = os.args()[1] ?? "world"
 print("hello, " .. name)
 ```
 
+## os.app(): table
+
+Describes the app that is running. In an executable built with `neyuki build` it returns `{ bundled = true, name, version, identifier }`, taken from the `[package]` and `[app]` sections of `neyuki.toml` (`identifier` is present only when the manifest sets it). Under `neyuki run` it returns `{ bundled = false }`. The table is frozen.
+
+```lua
+local app = os.app()
+if app.bundled then
+    print(app.name .. " " .. app.version)
+end
+```
+
 ## os.run(command: string | {string}, options: table?): table
 
 Runs a program, waits for it and returns `{ ok, code, stdout, stderr }`, where `ok` is true for exit code 0. A string runs through the system shell (`cmd /C` on Windows, `sh -c` elsewhere), so pipes and redirection work; a list runs its first element with the rest as arguments and no shell, so nothing needs quoting. `options` may hold `cwd` (the directory to run in), `env` (a table of variables to add or override), `stdin` (text to feed the program) and `capture` (default `true`; `false` lets the output go straight to the terminal). A program that cannot be started raises an error; one that fails just returns `ok = false`.

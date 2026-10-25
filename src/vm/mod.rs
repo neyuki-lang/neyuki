@@ -25,6 +25,16 @@ pub fn execute_bytecode(bytes: &[u8]) -> Result<Value, String> {
 
 pub fn run_file_with_options(path: &str, options: crate::compiler::Options) -> Result<(), String> {
     let bytes = fs::read(path).map_err(|e| format!("failed to read {}: {}", path, e))?;
+    run_bytes(path, bytes, options)
+}
+
+/// Runs a script's source or bytecode that was read from `path` (a file on
+/// disk or a path inside an app bundle).
+pub fn run_bytes(
+    path: &str,
+    bytes: Vec<u8>,
+    options: crate::compiler::Options,
+) -> Result<(), String> {
     if bytes.starts_with(crate::bytecode::MAGIC) {
         return execute_bytecode(&bytes).map(|_| ());
     }

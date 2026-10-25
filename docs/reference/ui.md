@@ -80,6 +80,8 @@ Pumps the event loop and returns the events since the last call. Without a timeo
 - `mousedown`: `button` (`"left"`, `"right"`, `"middle"`), `x`, `y`, `clicks` (1, then 2 for a double click, 3 for a triple click: presses of the same button within 500 ms and 4 pixels)
 - `mouseup`: `button`, `x`, `y`. After `startDrag` or `startResize` the window system keeps the release, so it may not arrive
 - `scroll`: `dx`, `dy`, `unit` (`"lines"` or `"pixels"`), `x`, `y`
+- `mediakey`: `key` (`"playpause"`, `"play"`, `"pause"`, `"next"`, `"previous"`, `"stop"`), from a media key, a headset button or the OS media controls; see `ui.mediaSession`
+- `mediasession`: `action` (`"seek"` with `position` in seconds or a relative `offset`, `"raise"` or `"quit"`), from the OS media controls
 - `maximize`, `minimize`, `restore`: the window changed state, by the user or by a call
 - `dropfile`: `path`, a file dropped on the window (one event per file)
 - `dpichange`: `scale`, the window moved to a display with another scale factor
@@ -88,6 +90,18 @@ Pumps the event loop and returns the events since the last call. Without a timeo
 
 Whether a display can be reached. On a headless machine the other window functions raise an error.
 
+## ui.mediaSession(info: table?): (boolean, string?)
+
+Shows what is playing in the OS media controls (the volume flyout and lock screen on Windows, MPRIS applets on Linux, Control Center on macOS) and starts receiving their commands as `mediakey` and `mediasession` events. Once a session exists, the global media keys (keyboards, headsets) reach the app even while it is in the background; without one, they arrive only while a window has focus.
+
+`info` may hold `title`, `artist`, `album`, `artwork` (an `Image`, a file path or an `http(s)` URL), `duration` and `position` in seconds, `playing` (default `false`) and the `window` to attach to (default: the first open one). Each call replaces what is shown; fields left out are cleared. `ui.mediaSession(nil)` ends the session, and closing its window does too. Returns `true`, or `false` and the reason when the OS has no media controls to offer (no D-Bus session bus, say).
+
+```lua
+ui.mediaSession({ title = "Second Wind", artist = "The Placeholders", duration = 212, position = 0, playing = true })
+for _, event in ui.poll(0.1) do
+    if event.kind == "mediakey" and event.key == "playpause" then togglePlayback() end
+end
+```
 ## ui.clipboard.get(): string?
 
 The clipboard's text, or nil when it holds something else or nothing. The same clipboard as `@neyuki/hid`.
@@ -104,17 +118,49 @@ Opens a link in the default browser or mail client and returns without waiting. 
 
 Packs any color form into a `0xRRGGBBAA` integer, to avoid re-parsing a color every frame.
 
-## ui.loadFont(path: string): Font
+## ui.loadFont(source: string | buffer): Font
 
-Loads a TrueType or OpenType font for `text` and `measureText`. Without one, text uses the bundled Noto Sans. `font:close()` frees it.
+Loads a TrueType or OpenType font for `text` and `measureText`, from a file path or from a buffer of its bytes (an app can embed its own CJK font this way). Without one, text uses the bundled Noto Sans. The `Font` has `name` and, when loaded from a path, `path`. `font:close()` frees it and drops it from the fallback list.
 
-## ui.loadImage(path: string): Image
+## ui.systemFont(family: string, options: table?): Font?
 
-Decodes a PNG file into an `Image` with `width` and `height`. `image:close()` frees it.
+Loads the installed font whose family or PostScript name is `family` (ignoring case), or returns `nil` when there is none. `options.weight` (100 to 900, default 400) and `options.italic` pick the closest face. The installed fonts are scanned on the first call.
 
-## ui.measureText(s: string, options: table?): (number, number)
+## ui.setFallbackFonts(fonts: {Font}?): ()
 
-The width and height `window:text` would cover for `s`, with the same `size` and `font` options.
+Sets the fonts every text searches, in order, for characters its own font lacks (kana, kanji, Hangul, emoji). The bundled font is always tried last. An empty list or `nil` clears them. A `fallback` option on a single call replaces this list for that call.
+
+## ui.loadImage(path: string, options: table?): Image
+
+Decodes a PNG, JPEG, WebP, GIF or BMP file into an `Image`. The format is detected from the file's first bytes, not its name. Animated GIF, WebP and PNG files decode every frame.
+
+An `Image` has `width`, `height`, `frames` (1 for stills), `loopCount` (0 plays forever) and `path`. `options.maxPixels` (default 64 million) and `options.maxBytes` (memory for all decoded frames, default 512 MiB) reject oversized images with an error. `image:close()` frees it.
+
+## ui.decodeImage(data: buffer | string, options: table?): Image
+
+Like `loadImage`, from the bytes of an image held in memory, such as an HTTP response body.
+
+## Image:frameDelay(i: number): number
+
+The seconds frame `i` (from 1) stays on screen. Delays of 10 ms or less are read as 100 ms, as browsers do. Stills report 0.
+
+## Image:resized(w: number, h: number): Image
+
+A new image with every frame resampled to `w` x `h` pixels, for shrinking a large animation once instead of scaling it on every draw.
+
+## ui.animation(image: Image, options: table?): ImageAnimation
+
+Plays an animated image from elapsed time. `anim:update(dt)` advances `anim.frame` by the image's frame delays and returns it; `anim:reset()` starts over. `options.speed` scales time (default 1) and `options.loop = true` repeats forever whatever the image's `loopCount`. When the loops are used up, `anim.finished` becomes true on the last frame. `anim.playing` can be set to `false` to pause.
+
+```lua
+local anim = ui.animation(img)
+anim:update(dt)
+win:drawImage(img, 0, 0, { width = w, height = h, fit = "cover", frame = anim.frame })
+```
+
+## ui.measureText(s: string, options: table?): (number, number, number)
+
+The width, height and number of lines `window:text` would cover for `s` with the same options (`size`, `font`, `fallback`, `maxWidth`, `overflow`, `lineHeight`, `letterSpacing`), truncation and wrapping included.
 
 ## Window:clear(color: any?): ()
 
@@ -140,13 +186,20 @@ A filled circle, or an outline of `options.width` when `options.fill` is `false`
 
 A closed shape through the points of a flat `{ x1, y1, x2, y2, ... }` list, filled unless `options.fill` is `false`.
 
-## Window:text(x: number, y: number, s: string, options: table?): number
+## Window:text(x: number, y: number, s: string, options: table?): (number, number)
 
-Draws text with the top-left corner of its first line at `(x, y)`; `"\n"` starts a new line. `options` may hold `size` (default 16), `color` (default black) and `font`. Returns the width drawn.
+Draws text with the top-left corner of its first line at `(x, y)`; `"
+"` starts a new line. Returns the width and height drawn. `options` may hold:
+
+- `size` (default 16), `color` (default black), `opacity` (0 to 1) and `font`.
+- `fallback`: fonts to try for characters `font` lacks, instead of the ones from `ui.setFallbackFonts`.
+- `maxWidth` with `overflow`: `"wrap"` (default) breaks lines, `"ellipsis"` shortens a line and ends it with `...`, `"clip"` cuts it at the width.
+- `align`: `"left"` (default), `"center"` or `"right"`. Within `maxWidth` the text aligns inside it; without it, centered text is centered on `x` and right-aligned text ends at `x`.
+- `lineHeight` (a multiple of the size) and `letterSpacing` (pixels).
 
 ## Window:drawImage(image: Image, x: number, y: number, options: table?): ()
 
-Draws an image at its own size, or scaled to `options.width` and/or `options.height`.
+Draws an image at its own size, or into the box given by `options.width` and/or `options.height`. More options: `frame` (which frame of an animation, from 1), `opacity` (0 to 1), `radius` (rounds the corners) and `fit`: `"fill"` (default) stretches the image to the box, `"contain"` shows all of it centered, `"cover"` fills the box and crops the overflow around the center. Scaling is smooth, and the scaled copy of a frame is cached, so redrawing it at the same size is cheap.
 
 ## Window:present(): ()
 

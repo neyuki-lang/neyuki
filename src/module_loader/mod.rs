@@ -73,12 +73,47 @@ impl ModuleLoader {
         }
     }
 
-    /// Resolves and reads module source or bytecode from disk.
+    /// Resolves and reads module source or bytecode: from the running app's
+    /// bundle when it has the module, otherwise from disk.
     pub fn read_module(&self, requested: &str) -> Result<(PathBuf, Vec<u8>), String> {
+        if let Some(found) = self.read_bundled_module(requested) {
+            return found;
+        }
         let resolved = self.resolve_module(requested)?;
         let bytes = std::fs::read(&resolved)
             .map_err(|e| format!("cannot read module '{}': {}", resolved.display(), e))?;
         Ok((resolved, bytes))
+    }
+
+    /// Looks a module up in the app bundle (see `crate::app`) under the same
+    /// names `resolve_module` tries on disk, in the same order.
+    fn read_bundled_module(&self, requested: &str) -> Option<Result<(PathBuf, Vec<u8>), String>> {
+        let bundle = crate::app::installed()?;
+        let dotted = requested.replace('.', "/");
+        let mut candidates: Vec<String> = self
+            .searcher
+            .patterns()
+            .iter()
+            .map(|pattern| pattern.replace('?', &dotted))
+            .collect();
+        if requested.ends_with(".nyk") || requested.ends_with(".nykb") {
+            candidates.push(requested.to_string());
+        } else {
+            for suffix in [".nyk", ".nykb", "/init.nyk", "/mod.nyk", "/index.nyk"] {
+                candidates.push(format!("{}{}", requested, suffix));
+            }
+        }
+        let path = candidates
+            .iter()
+            .find_map(|candidate| match bundle.entry(candidate) {
+                Some(crate::app::Entry::File { .. }) => crate::app::bundle::normalize(candidate),
+                _ => None,
+            })?;
+        let read = bundle.read(&path)?;
+        Some(
+            read.map(|bytes| (PathBuf::from(&path), bytes))
+                .map_err(|e| format!("cannot read module '{}': {}", path, e)),
+        )
     }
 
     /// Compiles module bytes into a verified `Proto`.
