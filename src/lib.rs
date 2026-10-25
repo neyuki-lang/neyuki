@@ -1,3 +1,4 @@
+pub mod app;
 pub mod ast;
 pub mod bytecode;
 pub mod compiler;

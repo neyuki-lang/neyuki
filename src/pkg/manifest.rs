@@ -14,6 +14,45 @@ pub struct PackageManifest {
     pub dependencies: BTreeMap<String, VersionReq>,
     pub dev_dependencies: BTreeMap<String, VersionReq>,
     pub scripts: BTreeMap<String, String>,
+    /// The `[app]` section read by `neyuki build`.
+    pub app: AppManifest,
+}
+
+/// `[app]`: how `neyuki build` packages the project as a desktop app.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AppManifest {
+    /// The product name shown to users (default: the package name).
+    pub name: Option<String>,
+    /// A reverse-DNS id for the macOS bundle (`CFBundleIdentifier`).
+    pub identifier: Option<String>,
+    /// An `.ico`, `.png` or `.icns` file.
+    pub icon: Option<String>,
+    /// Files and directories to bundle (default: `assets` when it exists).
+    pub assets: Option<Vec<String>>,
+    /// Keep the console window on Windows, for command-line apps.
+    pub console: bool,
+    pub publisher: Option<String>,
+    pub copyright: Option<String>,
+}
+
+impl AppManifest {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Reads `["a", "b"]` (or a single `"a"`) as a list of strings.
+fn parse_string_list(raw: &str) -> Vec<String> {
+    let inner = raw.trim();
+    let inner = inner
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(inner);
+    inner
+        .split(',')
+        .map(|item| item.trim().trim_matches('"').trim_matches('\'').to_string())
+        .filter(|item| !item.is_empty())
+        .collect()
 }
 
 impl Default for PackageManifest {
@@ -26,6 +65,7 @@ impl Default for PackageManifest {
             dependencies: BTreeMap::new(),
             dev_dependencies: BTreeMap::new(),
             scripts: BTreeMap::new(),
+            app: AppManifest::default(),
         }
     }
 }
@@ -60,6 +100,7 @@ impl PackageManifest {
                     "dependencies" => "dependencies",
                     "dev-dependencies" | "dev_dependencies" => "dev-dependencies",
                     "scripts" => "scripts",
+                    "app" => "app",
                     _ => "unknown",
                 };
                 continue;
@@ -89,6 +130,19 @@ impl PackageManifest {
                 }
                 "scripts" => {
                     manifest.scripts.insert(key.to_string(), val.to_string());
+                }
+                "app" => {
+                    let app = &mut manifest.app;
+                    match key {
+                        "name" => app.name = Some(val.to_string()),
+                        "identifier" => app.identifier = Some(val.to_string()),
+                        "icon" => app.icon = Some(val.to_string()),
+                        "assets" => app.assets = Some(parse_string_list(val_raw)),
+                        "console" => app.console = val == "true",
+                        "publisher" => app.publisher = Some(val.to_string()),
+                        "copyright" => app.copyright = Some(val.to_string()),
+                        _ => {}
+                    }
                 }
                 _ => {}
             }
@@ -127,6 +181,31 @@ impl PackageManifest {
             out.push_str("[scripts]\n");
             for (k, v) in &self.scripts {
                 out.push_str(&format!("{} = \"{}\"\n", k, v));
+            }
+            out.push('\n');
+        }
+
+        if !self.app.is_empty() {
+            let app = &self.app;
+            out.push_str("[app]\n");
+            let fields = [
+                ("name", &app.name),
+                ("identifier", &app.identifier),
+                ("icon", &app.icon),
+                ("publisher", &app.publisher),
+                ("copyright", &app.copyright),
+            ];
+            for (key, value) in fields {
+                if let Some(value) = value {
+                    out.push_str(&format!("{} = \"{}\"\n", key, value));
+                }
+            }
+            if let Some(assets) = &app.assets {
+                let quoted: Vec<String> = assets.iter().map(|a| format!("\"{}\"", a)).collect();
+                out.push_str(&format!("assets = [{}]\n", quoted.join(", ")));
+            }
+            if app.console {
+                out.push_str("console = true\n");
             }
             out.push('\n');
         }
