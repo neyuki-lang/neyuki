@@ -21,8 +21,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::BufReader;
+use std::io::Cursor;
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::time::Duration;
@@ -38,7 +37,7 @@ use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, ModifiersState, PhysicalKey};
 use winit::platform::pump_events::EventLoopExtPumpEvents;
-use winit::window::{Window, WindowId};
+use winit::window::{Icon, Window, WindowId};
 
 use crate::vm::libs::args::array as new_table;
 use crate::vm::machine::VM;
@@ -172,6 +171,7 @@ struct OpenRequest {
     height: f64,
     resizable: bool,
     visible: bool,
+    icon: Option<Icon>,
 }
 
 thread_local! {
@@ -431,11 +431,19 @@ fn create_pending(event_loop: &ActiveEventLoop) {
 }
 
 fn create_window(event_loop: &ActiveEventLoop, request: OpenRequest) -> Result<(u64, f64), String> {
-    let attributes = Window::default_attributes()
+    let icon = request.icon.or_else(executable_icon);
+    #[allow(unused_mut)]
+    let mut attributes = Window::default_attributes()
         .with_title(&request.title)
         .with_inner_size(LogicalSize::new(request.width, request.height))
         .with_resizable(request.resizable)
-        .with_visible(request.visible);
+        .with_visible(request.visible)
+        .with_window_icon(icon.clone());
+    #[cfg(windows)]
+    {
+        use winit::platform::windows::WindowAttributesExtWindows;
+        attributes = attributes.with_taskbar_icon(icon);
+    }
     let window = Rc::new(
         event_loop
             .create_window(attributes)
@@ -854,9 +862,23 @@ fn draw_text(
 
 // IMAGES -------------------------------------------------------------------
 
+/// The bytes of a font or image: from the app bundle when the path is
+/// bundled (see `crate::app`), otherwise from disk.
+fn read_asset(path: &str) -> Result<Vec<u8>, String> {
+    crate::app::read(path)
+        .unwrap_or_else(|| std::fs::read(path))
+        .map_err(|err| format!("cannot open {}: {}", path, err))
+}
+
 fn decode_png(path: &str) -> Result<Pixmap, String> {
-    let file = File::open(path).map_err(|err| format!("cannot open {}: {}", path, err))?;
-    let mut decoder = png::Decoder::new(BufReader::new(file));
+    let (rgba, width, height) = decode_png_rgba(path)?;
+    rgba_to_pixmap(&rgba, width, height)
+        .ok_or_else(|| format!("cannot decode {}: image too large", path))
+}
+
+/// Decodes a PNG into straight (not premultiplied) RGBA bytes.
+fn decode_png_rgba(path: &str) -> Result<(Vec<u8>, u32, u32), String> {
+    let mut decoder = png::Decoder::new(Cursor::new(read_asset(path)?));
     decoder.set_transformations(png::Transformations::normalize_to_color8());
     let mut reader = decoder
         .read_info()
@@ -884,8 +906,7 @@ fn decode_png(path: &str) -> Result<Pixmap, String> {
             return Err(format!("cannot decode {}: unexpected indexed output", path));
         }
     };
-    rgba_to_pixmap(&rgba, info.width, info.height)
-        .ok_or_else(|| format!("cannot decode {}: image too large", path))
+    Ok((rgba, info.width, info.height))
 }
 
 fn rgba_to_pixmap(rgba: &[u8], width: u32, height: u32) -> Option<Pixmap> {
@@ -896,6 +917,27 @@ fn rgba_to_pixmap(rgba: &[u8], width: u32, height: u32) -> Option<Pixmap> {
     Some(pixmap)
 }
 
+/// The icon `neyuki build` embedded in this executable, so an app's windows
+/// match its file icon without asking for one. Other platforms take the
+/// app icon from the bundle or desktop file instead.
+#[cfg(windows)]
+fn executable_icon() -> Option<Icon> {
+    use winit::platform::windows::IconExtWindows;
+    Icon::from_resource_name("MAINICON", None).ok()
+}
+
+#[cfg(not(windows))]
+fn executable_icon() -> Option<Icon> {
+    None
+}
+
+/// Loads a PNG as a window icon.
+fn load_icon(path: &str) -> Result<Icon, String> {
+    let (rgba, width, height) = decode_png_rgba(path)?;
+    Icon::from_rgba(rgba, width, height)
+        .map_err(|err| format!("cannot use {} as an icon: {}", path, err))
+}
+
 // NATIVES ------------------------------------------------------------------
 
 /// `__ui_available()` reports whether a display can be reached.
@@ -903,8 +945,8 @@ fn builtin_available(_vm: &mut VM, _args: &[Value]) -> Result<Vec<Value>, String
     Ok(vec![Value::Bool(with_event_loop(|_| ()).is_ok())])
 }
 
-/// `__ui_open(title, width, height, resizable, visible)` creates a window and
-/// returns its id and DPI scale factor.
+/// `__ui_open(title, width, height, resizable, visible, icon?)` creates a
+/// window and returns its id and DPI scale factor. `icon` is a PNG path.
 fn builtin_open(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let request = OpenRequest {
         title: string_arg(args, 0, "title")?,
@@ -912,6 +954,10 @@ fn builtin_open(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         height: float_arg(args, 2, "height")?,
         resizable: bool_arg(args, 3, "resizable", true)?,
         visible: bool_arg(args, 4, "visible", true)?,
+        icon: match args.get(5) {
+            None | Some(Value::Nil) => None,
+            Some(_) => Some(load_icon(&string_arg(args, 5, "icon")?)?),
+        },
     };
     if request.width <= 0.0 || request.height <= 0.0 {
         return Err("width and height must be positive".to_string());
@@ -1244,8 +1290,7 @@ fn builtin_draw_image(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String
 /// id.
 fn builtin_load_font(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let path = string_arg(args, 0, "path")?;
-    let bytes = std::fs::read(&path).map_err(|err| format!("cannot open {}: {}", path, err))?;
-    let entry = load_font(bytes)?;
+    let entry = load_font(read_asset(&path)?)?;
     let id = next_id();
     FONTS.with(|fonts| fonts.borrow_mut().insert(id, entry));
     Ok(vec![integer(id)])

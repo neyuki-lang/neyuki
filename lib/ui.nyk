@@ -203,12 +203,13 @@ function ui.open(options: WindowOptions?): Window
     checkOptionalNumber(options.height, "height")
     checkOptionalBoolean(options.resizable, "resizable")
     checkOptionalBoolean(options.visible, "visible")
+    checkOptionalString(options.icon, "icon")
     local width = options.width ?? 800
     local height = options.height ?? 600
     if (width <= 0 or height <= 0) then error("width and height must be positive") end
 
     local title = options.title ?? "Neyuki"
-    local id = __ui_open(title, width, height, options.resizable ?? true, options.visible ?? true)
+    local id = __ui_open(title, width, height, options.resizable ?? true, options.visible ?? true, options.icon)
     local closed = false
     local window = {}
     window.id = id

@@ -87,8 +87,18 @@ arboard = { version = "3", default-features = false }
 # operating system (Windows API bindings, /etc/localtime, CoreFoundation).
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
+# `neyuki build` sets the icon, version resource and subsystem of the Windows
+# executable it writes. `editpe` edits PE files on any host, so a Linux or
+# macOS machine can build a Windows app from a Windows runtime. `images` is
+# off: it pulls in the `image` crate only to resize icons, and `.png` icons
+# are wrapped into `.ico` files by `neyuki build` itself.
+editpe = { version = "0.2", default-features = false, features = ["std"] }
+
 [target.'cfg(windows)'.dependencies]
 schannel = ">=0.1.23, <0.1.28"
+# A built app runs without a console, so an error that ends it is shown in a
+# message box instead of being written to a stderr nobody sees.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 
 # On Wayland, XTest only reaches XWayland windows, so `@neyuki/hid` drives the
 # compositor's virtual keyboard and pointer itself. enigo's own Wayland

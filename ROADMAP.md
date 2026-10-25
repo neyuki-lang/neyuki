@@ -50,6 +50,14 @@ This document outlines the architectural milestones and engineering trajectory f
 
 ---
 
+## Milestone: Desktop app platform
+- [x] `neyuki build`: package an entry script and an asset folder into a standalone executable with an embedded read-only file system.
+- [x] `[app]` manifest section: name, identifier, icon, publisher, copyright; no console window by default on Windows.
+- [x] `os.app()`: read the app's name, version and identifier at runtime.
+- [ ] Auto-update support.
+
+---
+
 ## Milestone 5: Version 1.0 Production Freeze (v1.0.0)
 - [ ] Language syntax freeze: no further breaking grammar modifications.
 - [ ] Bytecode Version 4 freeze: guarantee long-term stability and binary portability across all 1.x releases.

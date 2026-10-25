@@ -818,6 +818,11 @@ pub(crate) const OS_METHODS: &[(&str, &str, &str)] = &[
         "os.run(command: string, options?: { stdin?: string, timeout?: int }): { stdout: string, stderr: string, code: int, success: boolean }",
         "Executes an external system command.",
     ),
+    (
+        "app",
+        "os.app(): { bundled: boolean, name: string?, version: string?, identifier: string? }",
+        "Describes the app built with `neyuki build` that is running; `bundled` is false under `neyuki run`.",
+    ),
 ];
 
 pub(crate) const STRING_METHODS: &[(&str, &str, &str)] = &[
