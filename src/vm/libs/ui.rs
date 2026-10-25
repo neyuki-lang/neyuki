@@ -3004,13 +3004,6 @@ fn builtin_present(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     Ok(vec![])
 }
 
-fn optional_string_arg(args: &[Value], index: usize, name: &str) -> Result<Option<String>, String> {
-    match args.get(index) {
-        None | Some(Value::Nil) => Ok(None),
-        _ => string_arg(args, index, name).map(Some),
-    }
-}
-
 /// A non-negative number of seconds small enough for every backend's clock.
 fn optional_seconds_arg(args: &[Value], index: usize, name: &str) -> Result<Option<f64>, String> {
     match args.get(index) {
