@@ -99,6 +99,7 @@ arboard = { version = "3", default-features = false }
 # `os.date` formats times and reads the local time zone through the
 # operating system (Windows API bindings, /etc/localtime, CoreFoundation).
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+fontdb = "0.23"
 
 # `neyuki build` sets the icon, version resource and subsystem of the Windows
 # executable it writes. `editpe` edits PE files on any host, so a Linux or

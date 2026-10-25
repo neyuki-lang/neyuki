@@ -26,7 +26,6 @@ use std::num::NonZeroU32;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use fontdue::layout::{CoordinateSystem, GlyphRasterConfig, Layout, LayoutSettings, TextStyle};
 use tiny_skia::{
     Color, ColorU8, FillRule, FilterQuality, Paint, Path, PathBuilder, Pixmap, PixmapPaint,
     PremultipliedColorU8, Rect, Stroke, Transform,
@@ -123,8 +122,20 @@ pub(crate) const NATIVES: &[NativeDef] = &[
         func: builtin_load_font,
     },
     NativeDef {
+        name: "__ui_load_font_bytes",
+        func: builtin_load_font_bytes,
+    },
+    NativeDef {
+        name: "__ui_system_font",
+        func: builtin_system_font,
+    },
+    NativeDef {
         name: "__ui_free_font",
         func: builtin_free_font,
+    },
+    NativeDef {
+        name: "__ui_set_fallback_fonts",
+        func: builtin_set_fallback_fonts,
     },
     NativeDef {
         name: "__ui_present",
@@ -189,9 +200,17 @@ pub(crate) const NATIVES: &[NativeDef] = &[
 const DEFAULT_FONT: &[u8] = include_bytes!("../../../lib/fonts/NotoSans-Regular.ttf");
 const DEFAULT_FONT_ID: u64 = 0;
 
-/// Glyph bitmaps are cached per font; past this many the cache starts over
-/// rather than growing with every size a script ever used.
-const GLYPH_CACHE_LIMIT: usize = 4096;
+/// Font files past this size are refused: fontdue keeps every glyph outline
+/// in memory, so a loaded font costs a few times its file size.
+const FONT_FILE_LIMIT: usize = 64 * 1024 * 1024;
+
+/// Rasterized glyphs are kept, across every font and size, until their
+/// bitmaps add up to this many bytes; then the least recently drawn go.
+const GLYPH_CACHE_BYTES: usize = 32 * 1024 * 1024;
+
+/// The largest text size, in logical pixels. A glyph is rasterized as one
+/// bitmap, so an unbounded size could ask for gigabytes.
+const MAX_TEXT_SIZE: f64 = 1000.0;
 
 /// How many times `__ui_open` pumps the loop waiting for the window to be
 /// created. macOS needs one pump to launch the application and another to
@@ -294,11 +313,6 @@ impl Clicks {
     }
 }
 
-struct FontEntry {
-    font: fontdue::Font,
-    glyphs: HashMap<GlyphRasterConfig, Rc<(fontdue::Metrics, Vec<u8>)>>,
-}
-
 /// What `__ui_open` asks the event loop to create. Windows can only be made
 /// from inside a winit callback, so the request is parked here and picked up
 /// by `App::resumed` / `App::about_to_wait` during the next pump.
@@ -321,7 +335,10 @@ thread_local! {
     static WINDOWS: RefCell<HashMap<u64, Win>> = RefCell::new(HashMap::new());
     static WINDOW_IDS: RefCell<HashMap<WindowId, u64>> = RefCell::new(HashMap::new());
     static IMAGES: RefCell<HashMap<u64, Pixmap>> = RefCell::new(HashMap::new());
-    static FONTS: RefCell<HashMap<u64, FontEntry>> = RefCell::new(HashMap::new());
+    static FONTS: RefCell<HashMap<u64, Rc<fontdue::Font>>> = RefCell::new(HashMap::new());
+    static FALLBACKS: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+    static GLYPHS: RefCell<GlyphCache> = RefCell::new(GlyphCache::default());
+    static SYSTEM_FONTS: RefCell<Option<fontdb::Database>> = const { RefCell::new(None) };
     static EVENTS: RefCell<Vec<Value>> = const { RefCell::new(Vec::new()) };
     static PENDING_OPEN: RefCell<Option<OpenRequest>> = const { RefCell::new(None) };
     static OPENED: RefCell<Option<Result<(u64, f64), String>>> = const { RefCell::new(None) };
@@ -347,6 +364,13 @@ fn string_arg(args: &[Value], index: usize, name: &str) -> Result<String, String
             value.type_name()
         )),
         None => Err(format!("{} must be provided", name)),
+    }
+}
+
+fn optional_string_arg(args: &[Value], index: usize, name: &str) -> Result<Option<String>, String> {
+    match args.get(index) {
+        None | Some(Value::Nil) => Ok(None),
+        _ => string_arg(args, index, name).map(Some),
     }
 }
 
@@ -393,6 +417,22 @@ fn integer_arg(args: &[Value], index: usize, name: &str) -> Result<u64, String> 
         return Err(format!("{} must be a non-negative integer", name));
     }
     Ok(number as u64)
+}
+
+/// An array of font ids.
+fn font_ids_arg(args: &[Value], index: usize, name: &str) -> Result<Vec<u64>, String> {
+    match args.get(index) {
+        Some(Value::Table(table)) => {
+            let ids = table.borrow().array.clone();
+            (0..ids.len()).map(|i| integer_arg(&ids, i, name)).collect()
+        }
+        Some(value) => Err(format!(
+            "{} must be a table, got {}",
+            name,
+            value.type_name()
+        )),
+        None => Err(format!("{} must be provided", name)),
+    }
 }
 
 /// A color packed as `0xRRGGBBAA`, the way `lib/ui.nyk` sends it.
@@ -1085,59 +1125,644 @@ fn rect_args(args: &[Value]) -> Result<(u64, f32, f32, f32, f32), String> {
 
 // FONTS --------------------------------------------------------------------
 
-fn load_font(bytes: Vec<u8>) -> Result<FontEntry, String> {
-    let font = fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default())
-        .map_err(|err| format!("cannot load font: {}", err))?;
-    Ok(FontEntry {
-        font,
-        glyphs: HashMap::new(),
-    })
+fn load_font(bytes: Vec<u8>, index: u32) -> Result<fontdue::Font, String> {
+    if bytes.len() > FONT_FILE_LIMIT {
+        return Err(format!(
+            "cannot load font: larger than {} MiB",
+            FONT_FILE_LIMIT / 1024 / 1024
+        ));
+    }
+    let settings = fontdue::FontSettings {
+        collection_index: index,
+        ..fontdue::FontSettings::default()
+    };
+    fontdue::Font::from_bytes(bytes, settings).map_err(|err| format!("cannot load font: {}", err))
 }
 
-/// Runs `body` on font `id`, loading the bundled font on first use.
-fn with_font<T>(
-    id: u64,
-    body: impl FnOnce(&mut FontEntry) -> Result<T, String>,
-) -> Result<T, String> {
+/// Parks a freshly loaded font under a new id and returns what the
+/// `__ui_load_font*` natives hand back: the id and the font's full name.
+fn register_font(font: fontdue::Font) -> Vec<Value> {
+    let name = font.name().map(text).unwrap_or(Value::Nil);
+    let id = next_id();
+    FONTS.with(|fonts| fonts.borrow_mut().insert(id, Rc::new(font)));
+    vec![integer(id), name]
+}
+
+/// Font `id`, loading the bundled font on first use.
+fn font(id: u64) -> Result<Rc<fontdue::Font>, String> {
     FONTS.with(|fonts| {
         let mut fonts = fonts.borrow_mut();
         if id == DEFAULT_FONT_ID && !fonts.contains_key(&id) {
-            fonts.insert(id, load_font(DEFAULT_FONT.to_vec())?);
+            fonts.insert(id, Rc::new(load_font(DEFAULT_FONT.to_vec(), 0)?));
         }
-        let entry = fonts
-            .get_mut(&id)
-            .ok_or_else(|| "font was freed".to_string())?;
-        body(entry)
+        fonts
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| "font was freed".to_string())
     })
 }
 
-/// Lays `text` out at `px` pixels per em, top-left at the origin, honouring
-/// newlines. Returns the layout and its width and height.
-fn layout_text(font: &fontdue::Font, text: &str, px: f32) -> (Layout, f32, f32) {
-    let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
-    layout.reset(&LayoutSettings::default());
-    layout.append(&[font], &TextStyle::new(text, px, 0));
-    let width = layout
-        .glyphs()
+/// The fonts a piece of text looks its glyphs up in, in order: the font it
+/// asked for, then its own fallbacks or else the global ones, then the
+/// bundled font, so Latin text still shows when a fallback lacks it.
+fn font_chain(
+    primary: u64,
+    fallback: Option<&[u64]>,
+) -> Result<Vec<(u64, Rc<fontdue::Font>)>, String> {
+    let global;
+    let fallback = match fallback {
+        Some(ids) => ids,
+        None => {
+            global = FALLBACKS.with(|fallbacks| fallbacks.borrow().clone());
+            &global
+        }
+    };
+    let mut ids = vec![primary];
+    for &id in fallback.iter().chain(&[DEFAULT_FONT_ID]) {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    ids.into_iter().map(|id| Ok((id, font(id)?))).collect()
+}
+
+/// Finds an installed font by family name (or PostScript name), ignoring
+/// case, and returns its file and the face index inside it. The system's
+/// fonts are scanned once, on first use.
+fn find_system_font(family: &str, weight: u16, italic: bool) -> Option<(std::path::PathBuf, u32)> {
+    SYSTEM_FONTS.with(|cell| {
+        let mut cell = cell.borrow_mut();
+        let db = cell.get_or_insert_with(|| {
+            let mut db = fontdb::Database::new();
+            db.load_system_fonts();
+            db
+        });
+        let canonical = db
+            .faces()
+            .flat_map(|face| face.families.iter())
+            .find(|(name, _)| name.eq_ignore_ascii_case(family))
+            .map(|(name, _)| name.clone());
+        let id = match canonical {
+            Some(name) => db.query(&fontdb::Query {
+                families: &[fontdb::Family::Name(&name)],
+                weight: fontdb::Weight(weight),
+                stretch: fontdb::Stretch::Normal,
+                style: if italic {
+                    fontdb::Style::Italic
+                } else {
+                    fontdb::Style::Normal
+                },
+            })?,
+            None => {
+                db.faces()
+                    .find(|face| face.post_script_name.eq_ignore_ascii_case(family))?
+                    .id
+            }
+        };
+        match db.face_source(id)? {
+            (fontdb::Source::File(path), index) => Some((path, index)),
+            (fontdb::Source::SharedFile(path, _), index) => Some((path, index)),
+            (fontdb::Source::Binary(_), _) => None,
+        }
+    })
+}
+
+// GLYPH CACHE --------------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct GlyphKey {
+    font: u64,
+    index: u16,
+    /// The pixel size's bits: sizes are compared exactly.
+    px: u32,
+}
+
+type Bitmap = Rc<(fontdue::Metrics, Vec<u8>)>;
+
+/// Rasterized glyphs, kept because text is redrawn every frame. Bounded by
+/// the bytes its bitmaps take; when they pass the limit, the least recently
+/// drawn are dropped until a quarter of the room is free again.
+#[derive(Default)]
+struct GlyphCache {
+    entries: HashMap<GlyphKey, (Bitmap, u64)>,
+    bytes: usize,
+    clock: u64,
+}
+
+impl GlyphCache {
+    fn get(
+        &mut self,
+        key: GlyphKey,
+        limit: usize,
+        rasterize: impl FnOnce() -> (fontdue::Metrics, Vec<u8>),
+    ) -> Bitmap {
+        self.clock += 1;
+        if let Some((bitmap, used)) = self.entries.get_mut(&key) {
+            *used = self.clock;
+            return bitmap.clone();
+        }
+        let bitmap = Rc::new(rasterize());
+        self.bytes += glyph_cost(&bitmap);
+        self.entries.insert(key, (bitmap.clone(), self.clock));
+        if self.bytes > limit {
+            self.trim(limit / 4 * 3);
+        }
+        bitmap
+    }
+
+    fn trim(&mut self, target: usize) {
+        let mut ages: Vec<(u64, GlyphKey)> = self
+            .entries
+            .iter()
+            .map(|(key, (_, used))| (*used, *key))
+            .collect();
+        ages.sort_unstable_by_key(|(used, _)| *used);
+        for (_, key) in ages {
+            if self.bytes <= target {
+                break;
+            }
+            if let Some((bitmap, _)) = self.entries.remove(&key) {
+                self.bytes -= glyph_cost(&bitmap);
+            }
+        }
+    }
+
+    fn forget_font(&mut self, font: u64) {
+        self.entries.retain(|key, _| key.font != font);
+        self.bytes = self
+            .entries
+            .values()
+            .map(|(bitmap, _)| glyph_cost(bitmap))
+            .sum();
+    }
+}
+
+/// What a cached glyph counts against the limit: its bitmap plus a rough
+/// allowance for the entry itself.
+fn glyph_cost(bitmap: &Bitmap) -> usize {
+    bitmap.1.len() + 64
+}
+
+// TEXT LAYOUT --------------------------------------------------------------
+//
+// Text is laid out here rather than with fontdue's `Layout` so that each
+// character can come from a different font (fallbacks), and so `text` and
+// `measureText` share one function: they cannot disagree. Layout works in
+// logical pixels at the requested size; drawing only rasterizes the placed
+// glyphs at the window's scale, so the measurements do not depend on DPI.
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Overflow {
+    Clip,
+    Ellipsis,
+    Wrap,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Align {
+    Left,
+    Center,
+    Right,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TextOptions {
+    size: f32,
+    max_width: Option<f32>,
+    overflow: Overflow,
+    align: Align,
+    /// A multiple of `size`; `None` keeps the font's own line spacing.
+    line_height: Option<f32>,
+    letter_spacing: f32,
+}
+
+#[cfg(test)]
+impl TextOptions {
+    /// Plain text at `size`, the defaults the natives start from.
+    fn sized(size: f32) -> TextOptions {
+        TextOptions {
+            size,
+            max_width: None,
+            overflow: Overflow::Wrap,
+            align: Align::Left,
+            line_height: None,
+            letter_spacing: 0.0,
+        }
+    }
+}
+
+/// A character resolved against the font chain: which font draws it, its
+/// glyph there, how far it advances the pen and the kerning against the
+/// character before it.
+#[derive(Clone, Copy, Debug)]
+struct Cluster {
+    font: usize,
+    index: u16,
+    advance: f32,
+    kern: f32,
+    ch: char,
+}
+
+impl Cluster {
+    fn is_space(&self) -> bool {
+        self.ch.is_whitespace()
+    }
+}
+
+/// A glyph ready to draw: the font (as a position in the chain), its index
+/// and its pen position and baseline relative to the text's origin.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Placed {
+    font: usize,
+    index: u16,
+    x: f32,
+    baseline: f32,
+}
+
+#[derive(Debug, Default)]
+struct TextLayout {
+    /// The size it was laid out at, which drawing rasterizes at (scaled).
+    size: f32,
+    glyphs: Vec<Placed>,
+    width: f32,
+    height: f32,
+    lines: usize,
+    /// The horizontal range glyphs are clipped to, for `overflow = "clip"`.
+    clip: Option<(f32, f32)>,
+}
+
+/// Characters that take no room and draw nothing: control characters,
+/// zero-width spaces and joiners, bidi marks, variation selectors (as in
+/// emoji presentation sequences) and tags.
+fn is_ignorable(ch: char) -> bool {
+    (ch.is_control() && ch != '\t')
+        || matches!(ch,
+            '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{FE00}'..='\u{FE0F}'
+            | '\u{FEFF}'
+            | '\u{E0000}'..='\u{E0FFF}')
+}
+
+/// The first font in the chain with a glyph for `ch`, falling back to the
+/// primary font's "missing glyph" box when none has one.
+fn resolve_glyph(chain: &[&fontdue::Font], ch: char) -> (usize, u16) {
+    chain
         .iter()
-        .map(|glyph| glyph.x + glyph.width as f32)
-        .fold(0.0_f32, f32::max);
-    let height = layout.height();
-    (layout, width, height)
+        .enumerate()
+        .find_map(|(slot, font)| match font.lookup_glyph_index(ch) {
+            0 => None,
+            index => Some((slot, index)),
+        })
+        .unwrap_or((0, 0))
+}
+
+/// Resolves one line of text (no newlines) to clusters.
+fn clusters(chain: &[&fontdue::Font], text: &str, size: f32) -> Vec<Cluster> {
+    let mut out: Vec<Cluster> = Vec::with_capacity(text.len());
+    for ch in text.chars() {
+        if is_ignorable(ch) {
+            continue;
+        }
+        // A tab is four spaces wide.
+        let (lookup, repeat) = if ch == '\t' { (' ', 4.0) } else { (ch, 1.0) };
+        let (font, index) = resolve_glyph(chain, lookup);
+        let advance = chain[font].metrics_indexed(index, size).advance_width * repeat;
+        let kern = match out.last() {
+            Some(prev) if prev.font == font => chain[font]
+                .horizontal_kern_indexed(prev.index, index, size)
+                .unwrap_or(0.0),
+            _ => 0.0,
+        };
+        out.push(Cluster {
+            font,
+            index,
+            advance,
+            kern,
+            ch,
+        });
+    }
+    out
+}
+
+/// The width of a run of clusters laid side by side.
+fn run_width(run: &[Cluster], spacing: f32) -> f32 {
+    let mut pen = 0.0;
+    for (i, cluster) in run.iter().enumerate() {
+        if i > 0 {
+            pen += spacing + cluster.kern;
+        }
+        pen += cluster.advance;
+    }
+    pen
+}
+
+/// Scripts written without spaces between words, where a line may break
+/// between any two characters: CJK ideographs, kana, Hangul and their
+/// punctuation and full-width forms.
+fn breaks_anywhere(ch: char) -> bool {
+    matches!(ch,
+        '\u{1100}'..='\u{11FF}'
+        | '\u{2E80}'..='\u{9FFF}'
+        | '\u{AC00}'..='\u{D7AF}'
+        | '\u{F900}'..='\u{FAFF}'
+        | '\u{FF00}'..='\u{FFEF}'
+        | '\u{20000}'..='\u{3FFFF}')
+}
+
+/// Characters a line may not start with (closing punctuation, small kana,
+/// the prolonged sound mark), the usual "kinsoku" rule.
+fn cannot_start_line(ch: char) -> bool {
+    matches!(
+        ch,
+        ')' | ']'
+            | '}'
+            | ','
+            | '.'
+            | ':'
+            | ';'
+            | '!'
+            | '?'
+            | '、'
+            | '。'
+            | '，'
+            | '．'
+            | '・'
+            | '：'
+            | '；'
+            | '？'
+            | '！'
+            | 'ー'
+            | '～'
+            | '）'
+            | '」'
+            | '』'
+            | '】'
+            | '〉'
+            | '》'
+            | '〕'
+            | '］'
+            | '｝'
+            | 'ぁ'
+            | 'ぃ'
+            | 'ぅ'
+            | 'ぇ'
+            | 'ぉ'
+            | 'っ'
+            | 'ゃ'
+            | 'ゅ'
+            | 'ょ'
+            | 'ゎ'
+            | 'ァ'
+            | 'ィ'
+            | 'ゥ'
+            | 'ェ'
+            | 'ォ'
+            | 'ッ'
+            | 'ャ'
+            | 'ュ'
+            | 'ョ'
+            | 'ヮ'
+            | 'ヵ'
+            | 'ヶ'
+            | 'ゝ'
+            | 'ゞ'
+            | 'ヽ'
+            | 'ヾ'
+            | '々'
+    )
+}
+
+/// Characters a line may not end with: opening brackets.
+fn cannot_end_line(ch: char) -> bool {
+    matches!(
+        ch,
+        '(' | '[' | '{' | '（' | '「' | '『' | '【' | '〈' | '《' | '〔' | '［' | '｛'
+    )
+}
+
+/// Whether a line may break between `before` and `after`: after a space,
+/// after a hyphen inside a word, or around CJK characters.
+fn can_break(before: &Cluster, after: &Cluster) -> bool {
+    if after.is_space() {
+        return false;
+    }
+    if before.is_space() {
+        return true;
+    }
+    if cannot_start_line(after.ch) || cannot_end_line(before.ch) {
+        return false;
+    }
+    before.ch == '-' || breaks_anywhere(before.ch) || breaks_anywhere(after.ch)
+}
+
+/// Splits a line into ranges no wider than `max` where it can, breaking at
+/// the last opportunity that fits, or mid-word when a word is wider than a
+/// whole line. Spaces at a break are dropped.
+fn wrap_lines(run: &[Cluster], max: f32, spacing: f32) -> Vec<(usize, usize)> {
+    if run.is_empty() {
+        return vec![(0, 0)];
+    }
+    let mut lines = Vec::new();
+    let mut start = 0;
+    while start < run.len() {
+        let mut pen = 0.0;
+        let mut opportunity = None;
+        let mut end = run.len();
+        for i in start..run.len() {
+            let cluster = &run[i];
+            if i > start && can_break(&run[i - 1], cluster) {
+                opportunity = Some(i);
+            }
+            let next = if i == start {
+                cluster.advance
+            } else {
+                pen + spacing + cluster.kern + cluster.advance
+            };
+            // Spaces may hang past the edge; they are trimmed below.
+            if i > start && !cluster.is_space() && next > max {
+                end = opportunity.unwrap_or(i);
+                break;
+            }
+            pen = next;
+        }
+        let mut line_end = end;
+        if end < run.len() {
+            while line_end > start && run[line_end - 1].is_space() {
+                line_end -= 1;
+            }
+        }
+        lines.push((start, line_end));
+        start = end;
+        if end < run.len() {
+            while start < run.len() && run[start].is_space() {
+                start += 1;
+            }
+        }
+    }
+    lines
+}
+
+/// Shortens a line wider than `max` to the longest start that still fits
+/// with `ellipsis` after it, dropping spaces before the ellipsis.
+fn ellipsize(run: &[Cluster], ellipsis: &[Cluster], max: f32, spacing: f32) -> Vec<Cluster> {
+    if run_width(run, spacing) <= max {
+        return run.to_vec();
+    }
+    let room = max - spacing - run_width(ellipsis, spacing);
+    let mut pen = 0.0;
+    let mut keep = 0;
+    for (i, cluster) in run.iter().enumerate() {
+        let next = if i == 0 {
+            cluster.advance
+        } else {
+            pen + spacing + cluster.kern + cluster.advance
+        };
+        if next > room {
+            break;
+        }
+        pen = next;
+        keep = i + 1;
+    }
+    while keep > 0 && run[keep - 1].is_space() {
+        keep -= 1;
+    }
+    let mut out = run[..keep].to_vec();
+    for (i, cluster) in ellipsis.iter().enumerate() {
+        out.push(Cluster {
+            kern: if i == 0 { 0.0 } else { cluster.kern },
+            ..*cluster
+        });
+    }
+    out
+}
+
+/// "…" from the first font that has it, or three full stops.
+fn ellipsis_clusters(chain: &[&fontdue::Font], size: f32) -> Vec<Cluster> {
+    let ellipsis = clusters(chain, "\u{2026}", size);
+    if ellipsis.iter().all(|cluster| cluster.index != 0) {
+        ellipsis
+    } else {
+        clusters(chain, "...", size)
+    }
+}
+
+/// Lays `text` out with its block's top-left corner at the origin (or, with
+/// no `max_width`, its top-center or top-right for centered and
+/// right-aligned text). Line boxes use the primary font's metrics, so a
+/// line keeps its height whichever fallbacks its characters come from.
+fn layout_text(chain: &[&fontdue::Font], text: &str, options: &TextOptions) -> TextLayout {
+    let size = options.size;
+    let spacing = options.letter_spacing;
+    let mut lines: Vec<Vec<Cluster>> = Vec::new();
+    if !text.is_empty() {
+        let mut ellipsis = None;
+        for paragraph in text.split('\n') {
+            let run = clusters(chain, paragraph, size);
+            match (options.max_width, options.overflow) {
+                (Some(max), Overflow::Wrap) => {
+                    for (start, end) in wrap_lines(&run, max, spacing) {
+                        lines.push(run[start..end].to_vec());
+                    }
+                }
+                (Some(max), Overflow::Ellipsis) => {
+                    let ellipsis = ellipsis.get_or_insert_with(|| ellipsis_clusters(chain, size));
+                    lines.push(ellipsize(&run, ellipsis, max, spacing));
+                }
+                _ => lines.push(run),
+            }
+        }
+    }
+
+    let (ascent, descent, natural) = match chain[0].horizontal_line_metrics(size) {
+        Some(metrics) => (metrics.ascent, metrics.descent, metrics.new_line_size),
+        None => (size * 0.8, -size * 0.2, size),
+    };
+    // An explicit line height spreads the extra room evenly above and
+    // below the glyphs, as CSS does.
+    let (advance, top) = match options.line_height {
+        Some(multiple) => (
+            multiple * size,
+            (multiple * size - (ascent - descent)) / 2.0,
+        ),
+        None => (natural, 0.0),
+    };
+
+    let widths: Vec<f32> = lines.iter().map(|line| run_width(line, spacing)).collect();
+    let widest = widths.iter().copied().fold(0.0_f32, f32::max);
+    let clipping = options.max_width.is_some() && options.overflow == Overflow::Clip;
+    let (box_width, origin) = match options.max_width {
+        Some(max) => (max, 0.0),
+        None => (
+            widest,
+            match options.align {
+                Align::Left => 0.0,
+                Align::Center => -widest / 2.0,
+                Align::Right => -widest,
+            },
+        ),
+    };
+
+    let mut glyphs = Vec::new();
+    for (row, line) in lines.iter().enumerate() {
+        let mut free = box_width - widths[row];
+        if clipping {
+            // A clipped line that overflows starts at the left edge.
+            free = free.max(0.0);
+        }
+        let mut pen = origin
+            + match options.align {
+                Align::Left => 0.0,
+                Align::Center => free / 2.0,
+                Align::Right => free,
+            };
+        let baseline = top + ascent + row as f32 * advance;
+        for (i, cluster) in line.iter().enumerate() {
+            if i > 0 {
+                pen += spacing + cluster.kern;
+            }
+            if !cluster.is_space() {
+                glyphs.push(Placed {
+                    font: cluster.font,
+                    index: cluster.index,
+                    x: pen,
+                    baseline,
+                });
+            }
+            pen += cluster.advance;
+        }
+    }
+
+    TextLayout {
+        size,
+        glyphs,
+        width: match options.max_width {
+            Some(max) if clipping => widest.min(max),
+            _ => widest,
+        },
+        height: lines.len() as f32 * advance,
+        lines: lines.len(),
+        clip: if clipping {
+            Some((origin, origin + box_width))
+        } else {
+            None
+        },
+    }
 }
 
 /// Composites an 8-bit coverage mask at `(x0, y0)` in `color` over the
-/// pixmap, clipping to its bounds.
+/// pixmap, clipping to its bounds and to the columns `clip.0..clip.1`.
 fn blend_mask(
     pixmap: &mut Pixmap,
-    x0: i32,
-    y0: i32,
-    width: usize,
-    height: usize,
+    (x0, y0): (i32, i32),
+    (width, height): (usize, usize),
     mask: &[u8],
     color: (u8, u8, u8, u8),
+    clip: (i32, i32),
 ) {
     let (pw, ph) = (pixmap.width() as i32, pixmap.height() as i32);
+    let (left, right) = (clip.0.max(0), clip.1.min(pw));
     let pixels = pixmap.pixels_mut();
     let (r, g, b, a) = (
         color.0 as u32,
@@ -1152,7 +1777,7 @@ fn blend_mask(
         }
         for column in 0..width {
             let x = x0 + column as i32;
-            if x < 0 || x >= pw {
+            if x < left || x >= right {
                 continue;
             }
             let coverage = mask[row * width + column] as u32;
@@ -1179,42 +1804,51 @@ fn blend_mask(
     }
 }
 
-/// Draws `text` with its line box's top-left corner at physical `(x, y)`.
-fn draw_text(
+/// Draws a laid-out text with its origin at logical `(x, y)`, rasterizing
+/// each glyph at the window's `scale` (through the glyph cache).
+fn draw_layout(
     pixmap: &mut Pixmap,
-    entry: &mut FontEntry,
-    text: &str,
-    px: f32,
-    x: f32,
-    y: f32,
+    cache: &mut GlyphCache,
+    chain: &[(u64, Rc<fontdue::Font>)],
+    layout: &TextLayout,
+    (x, y): (f32, f32),
+    scale: f32,
     color: (u8, u8, u8, u8),
-) -> f32 {
-    let (layout, width, _) = layout_text(&entry.font, text, px);
-    if entry.glyphs.len() > GLYPH_CACHE_LIMIT {
-        entry.glyphs.clear();
-    }
-    for glyph in layout.glyphs() {
-        if !glyph.char_data.rasterize() || glyph.width == 0 {
+) {
+    let px = layout.size * scale;
+    let clip = match layout.clip {
+        Some((left, right)) => (
+            ((x + left) * scale).floor() as i32,
+            ((x + right) * scale).ceil() as i32,
+        ),
+        None => (i32::MIN, i32::MAX),
+    };
+    for glyph in &layout.glyphs {
+        let (id, font) = &chain[glyph.font];
+        let key = GlyphKey {
+            font: *id,
+            index: glyph.index,
+            px: px.to_bits(),
+        };
+        let bitmap = cache.get(key, GLYPH_CACHE_BYTES, || {
+            font.rasterize_indexed(glyph.index, px)
+        });
+        let (metrics, mask) = &*bitmap;
+        if metrics.width == 0 || metrics.height == 0 {
             continue;
         }
-        let font = &entry.font;
-        let rasterized = entry
-            .glyphs
-            .entry(glyph.key)
-            .or_insert_with(|| Rc::new(font.rasterize_config(glyph.key)))
-            .clone();
-        let (metrics, bitmap) = &*rasterized;
+        let left = ((x + glyph.x) * scale).round() as i32 + metrics.xmin;
+        let top = ((y + glyph.baseline) * scale).round() as i32
+            + (-metrics.bounds.height - metrics.bounds.ymin).floor() as i32;
         blend_mask(
             pixmap,
-            (x + glyph.x).round() as i32,
-            (y + glyph.y).round() as i32,
-            metrics.width,
-            metrics.height,
-            bitmap,
+            (left, top),
+            (metrics.width, metrics.height),
+            mask,
             color,
+            clip,
         );
     }
-    width
 }
 
 // IMAGES -------------------------------------------------------------------
@@ -1521,59 +2155,121 @@ fn builtin_polygon(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     Ok(vec![])
 }
 
-/// `__ui_text(window, x, y, text, size, color, font?)` draws `text` with
-/// the top-left of its line box at `(x, y)` and returns the width drawn.
-fn builtin_text(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let id = integer_arg(args, 0, "window")?;
-    let x = float_arg(args, 1, "x")?;
-    let y = float_arg(args, 2, "y")?;
-    let text = string_arg(args, 3, "text")?;
-    let size = float_arg(args, 4, "size")?;
-    let color = color_arg(args, 5, "color")?;
-    let font = match args.get(6) {
-        None | Some(Value::Nil) => DEFAULT_FONT_ID,
-        _ => integer_arg(args, 6, "font")?,
-    };
+type FontChain = Vec<(u64, Rc<fontdue::Font>)>;
+
+/// Reads the text arguments `__ui_text` and `__ui_measure_text` share: the
+/// size at `size_index`, then from `font_index` on `font?, fallback?,
+/// maxWidth?, overflow?, align?, lineHeight?, letterSpacing?`. Returns the
+/// options and the font chain.
+fn text_args(
+    args: &[Value],
+    size_index: usize,
+    font_index: usize,
+) -> Result<(TextOptions, FontChain), String> {
+    let size = float_arg(args, size_index, "size")?;
     if size <= 0.0 {
         return Err("size must be positive".to_string());
     }
-    let width = with_window(id, |win| {
-        let scale = win.scale;
-        with_font(font, |entry| {
-            Ok(draw_text(
-                &mut win.pixmap,
-                entry,
-                &text,
-                (size * scale) as f32,
-                (x * scale) as f32,
-                (y * scale) as f32,
-                color,
-            ) as f64
-                / scale)
-        })
-    })?;
-    Ok(vec![Value::Float(width)])
+    if size > MAX_TEXT_SIZE {
+        return Err(format!("size must be at most {}", MAX_TEXT_SIZE));
+    }
+    let primary = match args.get(font_index) {
+        None | Some(Value::Nil) => DEFAULT_FONT_ID,
+        _ => integer_arg(args, font_index, "font")?,
+    };
+    let fallback = match args.get(font_index + 1) {
+        None | Some(Value::Nil) => None,
+        _ => Some(font_ids_arg(args, font_index + 1, "fallback")?),
+    };
+    let max_width = match args.get(font_index + 2) {
+        None | Some(Value::Nil) => None,
+        _ => {
+            let max = float_arg(args, font_index + 2, "maxWidth")?;
+            if max <= 0.0 {
+                return Err("maxWidth must be positive".to_string());
+            }
+            Some(max as f32)
+        }
+    };
+    let overflow = match optional_string_arg(args, font_index + 3, "overflow")?.as_deref() {
+        None | Some("wrap") => Overflow::Wrap,
+        Some("clip") => Overflow::Clip,
+        Some("ellipsis") => Overflow::Ellipsis,
+        Some(_) => return Err("overflow must be \"clip\", \"ellipsis\" or \"wrap\"".to_string()),
+    };
+    let align = match optional_string_arg(args, font_index + 4, "align")?.as_deref() {
+        None | Some("left") => Align::Left,
+        Some("center") => Align::Center,
+        Some("right") => Align::Right,
+        Some(_) => return Err("align must be \"left\", \"center\" or \"right\"".to_string()),
+    };
+    let line_height = match args.get(font_index + 5) {
+        None | Some(Value::Nil) => None,
+        _ => {
+            let multiple = float_arg(args, font_index + 5, "lineHeight")?;
+            if multiple <= 0.0 {
+                return Err("lineHeight must be positive".to_string());
+            }
+            Some(multiple as f32)
+        }
+    };
+    let letter_spacing = optional_float_arg(args, font_index + 6, "letterSpacing", 0.0)? as f32;
+    let options = TextOptions {
+        size: size as f32,
+        max_width,
+        overflow,
+        align,
+        line_height,
+        letter_spacing,
+    };
+    Ok((options, font_chain(primary, fallback.as_deref())?))
 }
 
-/// `__ui_measure_text(text, size, font?)` returns the logical width and
-/// height `__ui_text` would cover.
-fn builtin_measure_text(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-    let text = string_arg(args, 0, "text")?;
-    let size = float_arg(args, 1, "size")?;
-    let font = match args.get(2) {
-        None | Some(Value::Nil) => DEFAULT_FONT_ID,
-        _ => integer_arg(args, 2, "font")?,
-    };
-    if size <= 0.0 {
-        return Err("size must be positive".to_string());
-    }
-    let (width, height) = with_font(font, |entry| {
-        let (_, width, height) = layout_text(&entry.font, &text, size as f32);
-        Ok((width, height))
+/// `__ui_text(window, x, y, text, size, color, font?, fallback?, maxWidth?,
+/// overflow?, align?, lineHeight?, letterSpacing?)` draws `text` with the
+/// top-left of its block at `(x, y)` and returns the width and height it
+/// covers.
+fn builtin_text(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = integer_arg(args, 0, "window")?;
+    let x = float_arg(args, 1, "x")? as f32;
+    let y = float_arg(args, 2, "y")? as f32;
+    let text = string_arg(args, 3, "text")?;
+    let color = color_arg(args, 5, "color")?;
+    let (options, chain) = text_args(args, 4, 6)?;
+    let fonts: Vec<&fontdue::Font> = chain.iter().map(|(_, font)| font.as_ref()).collect();
+    let layout = layout_text(&fonts, &text, &options);
+    with_window(id, |win| {
+        GLYPHS.with(|cache| {
+            draw_layout(
+                &mut win.pixmap,
+                &mut cache.borrow_mut(),
+                &chain,
+                &layout,
+                (x, y),
+                win.scale as f32,
+                color,
+            )
+        });
+        Ok(())
     })?;
     Ok(vec![
-        Value::Float(width as f64),
-        Value::Float(height as f64),
+        Value::Float(layout.width as f64),
+        Value::Float(layout.height as f64),
+    ])
+}
+
+/// `__ui_measure_text(text, size, font?, fallback?, maxWidth?, overflow?,
+/// align?, lineHeight?, letterSpacing?)` returns the logical width and
+/// height `__ui_text` would cover, and the number of lines.
+fn builtin_measure_text(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let text = string_arg(args, 0, "text")?;
+    let (options, chain) = text_args(args, 1, 2)?;
+    let fonts: Vec<&fontdue::Font> = chain.iter().map(|(_, font)| font.as_ref()).collect();
+    let layout = layout_text(&fonts, &text, &options);
+    Ok(vec![
+        Value::Float(layout.width as f64),
+        Value::Float(layout.height as f64),
+        integer(layout.lines as u64),
     ])
 }
 
@@ -1643,13 +2339,46 @@ fn builtin_draw_image(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String
 }
 
 /// `__ui_load_font(path)` reads a TrueType or OpenType font and returns its
-/// id.
+/// id and full name.
 fn builtin_load_font(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let path = string_arg(args, 0, "path")?;
-    let entry = load_font(read_asset(&path)?)?;
-    let id = next_id();
-    FONTS.with(|fonts| fonts.borrow_mut().insert(id, entry));
-    Ok(vec![integer(id)])
+    Ok(register_font(load_font(read_asset(&path)?, 0)?))
+}
+
+/// `__ui_load_font_bytes(buffer)` is `__ui_load_font` for a font already in
+/// memory.
+fn builtin_load_font_bytes(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let bytes = match args.first() {
+        Some(Value::Buffer(buffer)) => buffer.borrow().data.clone(),
+        Some(value) => {
+            return Err(format!(
+                "font must be a path or a buffer, got {}",
+                value.type_name()
+            ));
+        }
+        None => return Err("font must be provided".to_string()),
+    };
+    Ok(register_font(load_font(bytes, 0)?))
+}
+
+/// `__ui_system_font(family, weight?, italic?)` loads the installed font
+/// that best matches and returns its id, full name and path, or nothing
+/// when no installed font has that family.
+fn builtin_system_font(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let family = string_arg(args, 0, "family")?;
+    let weight = optional_float_arg(args, 1, "weight", 400.0)?;
+    if !(1.0..=1000.0).contains(&weight) {
+        return Err("weight must be from 1 to 1000".to_string());
+    }
+    let italic = bool_arg(args, 2, "italic", false)?;
+    let Some((path, index)) = find_system_font(&family, weight as u16, italic) else {
+        return Ok(vec![Value::Nil]);
+    };
+    let shown = path.display().to_string();
+    let bytes = std::fs::read(&path).map_err(|err| format!("cannot open {}: {}", shown, err))?;
+    let mut result = register_font(load_font(bytes, index)?);
+    result.push(Value::string(shown));
+    Ok(result)
 }
 
 /// `__ui_free_font(font)`.
@@ -1659,6 +2388,19 @@ fn builtin_free_font(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String>
         return Err("the default font cannot be freed".to_string());
     }
     FONTS.with(|fonts| fonts.borrow_mut().remove(&id));
+    FALLBACKS.with(|fallbacks| fallbacks.borrow_mut().retain(|&other| other != id));
+    GLYPHS.with(|cache| cache.borrow_mut().forget_font(id));
+    Ok(vec![])
+}
+
+/// `__ui_set_fallback_fonts(fonts)` sets the fonts every text looks in, in
+/// order, for characters its own font lacks.
+fn builtin_set_fallback_fonts(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let ids = font_ids_arg(args, 0, "fonts")?;
+    for &id in &ids {
+        font(id)?;
+    }
+    FALLBACKS.with(|fallbacks| *fallbacks.borrow_mut() = ids);
     Ok(vec![])
 }
 
@@ -1994,7 +2736,15 @@ mod tests {
         let mut pixmap = Pixmap::new(4, 4).unwrap();
         pixmap.fill(Color::WHITE);
         // A 2×2 fully covered mask drawn half outside the pixmap.
-        blend_mask(&mut pixmap, 3, 3, 2, 2, &[255; 4], (255, 0, 0, 255));
+        let open = (i32::MIN, i32::MAX);
+        blend_mask(
+            &mut pixmap,
+            (3, 3),
+            (2, 2),
+            &[255; 4],
+            (255, 0, 0, 255),
+            open,
+        );
         let pixels = pixmap.pixels();
         assert_eq!(
             (pixels[15].red(), pixels[15].green(), pixels[15].blue()),
@@ -2005,33 +2755,511 @@ mod tests {
             (255, 255, 255)
         );
         // Half coverage of an opaque color leaves a blend.
-        blend_mask(&mut pixmap, 0, 0, 1, 1, &[128], (0, 0, 255, 255));
+        blend_mask(&mut pixmap, (0, 0), (1, 1), &[128], (0, 0, 255, 255), open);
         let blended = pixmap.pixels()[0];
         assert!(blended.red() < 255 && blended.red() > 0);
         assert_eq!(blended.alpha(), 255);
+        // Columns outside the clip range are left alone.
+        blend_mask(
+            &mut pixmap,
+            (0, 1),
+            (4, 1),
+            &[255; 4],
+            (0, 0, 0, 255),
+            (1, 3),
+        );
+        let row: Vec<u8> = pixmap.pixels()[4..8].iter().map(|p| p.red()).collect();
+        assert_eq!(row, vec![255, 0, 0, 255]);
+    }
+
+    // TEXT -----------------------------------------------------------------
+
+    /// The text from the fallback acceptance case: kana and kanji, an em
+    /// dash and an emoji around Latin text.
+    const MIXED: &str = "ループザルーム (feat. 初音ミク) — rusino 🎵";
+
+    /// Builds a minimal TrueType font in which each of `chars` is a filled
+    /// box `advance` units wide (1000 units per em, ascender 800, descender
+    /// -200), with an empty "missing glyph". Small, made from nothing, and
+    /// enough to test fallback without shipping a real CJK font.
+    fn box_font(chars: &[char], advance: u16) -> Vec<u8> {
+        fn u16s(out: &mut Vec<u8>, values: &[u16]) {
+            for value in values {
+                out.extend_from_slice(&value.to_be_bytes());
+            }
+        }
+        fn u32s(out: &mut Vec<u8>, values: &[u32]) {
+            for value in values {
+                out.extend_from_slice(&value.to_be_bytes());
+            }
+        }
+        let mut chars = chars.to_vec();
+        chars.sort_unstable();
+        chars.dedup();
+        let glyphs = chars.len() as u16 + 1;
+        let (left, right, top) = (100u16, advance - 100, 700u16);
+
+        // cmap: one format 12 subtable (Windows, full Unicode).
+        let mut cmap = Vec::new();
+        u16s(&mut cmap, &[0, 1, 3, 10]);
+        u32s(&mut cmap, &[12]);
+        u16s(&mut cmap, &[12, 0]);
+        u32s(
+            &mut cmap,
+            &[16 + 12 * chars.len() as u32, 0, chars.len() as u32],
+        );
+        for (i, &ch) in chars.iter().enumerate() {
+            u32s(&mut cmap, &[ch as u32, ch as u32, i as u32 + 1]);
+        }
+
+        // glyf and loca: glyph 0 is empty, the rest are the same box,
+        // drawn clockwise from its bottom-left corner.
+        let mut glyph = Vec::new();
+        u16s(&mut glyph, &[1, left, 0, right, top, 3, 0]);
+        glyph.extend_from_slice(&[1, 1, 1, 1]);
+        u16s(&mut glyph, &[left, 0, right - left, 0]);
+        u16s(&mut glyph, &[0, top, 0, (-(top as i16)) as u16]);
+        glyph.resize(glyph.len().next_multiple_of(4), 0);
+        let mut glyf = Vec::new();
+        let mut loca = Vec::new();
+        u32s(&mut loca, &[0, 0]);
+        for _ in &chars {
+            glyf.extend_from_slice(&glyph);
+            u32s(&mut loca, &[glyf.len() as u32]);
+        }
+
+        let mut head = Vec::new();
+        u32s(&mut head, &[0x0001_0000, 0x0001_0000, 0, 0x5F0F_3CF5]);
+        u16s(&mut head, &[0x000B, 1000]);
+        head.extend_from_slice(&[0; 16]);
+        u16s(&mut head, &[left, 0, right, top, 0, 8, 2, 1, 0]);
+
+        let mut hhea = Vec::new();
+        u32s(&mut hhea, &[0x0001_0000]);
+        u16s(
+            &mut hhea,
+            &[800, (-200i16) as u16, 0, advance, left, 100, right, 1],
+        );
+        u16s(&mut hhea, &[0, 0, 0, 0, 0, 0, 0, glyphs]);
+
+        let mut hmtx = Vec::new();
+        for _ in 0..glyphs {
+            u16s(&mut hmtx, &[advance, left]);
+        }
+
+        let mut maxp = Vec::new();
+        u32s(&mut maxp, &[0x0000_5000]);
+        u16s(&mut maxp, &[glyphs]);
+
+        let tables: [(&[u8; 4], Vec<u8>); 7] = [
+            (b"cmap", cmap),
+            (b"glyf", glyf),
+            (b"head", head),
+            (b"hhea", hhea),
+            (b"hmtx", hmtx),
+            (b"loca", loca),
+            (b"maxp", maxp),
+        ];
+        let mut font = Vec::new();
+        u32s(&mut font, &[0x0001_0000]);
+        u16s(&mut font, &[tables.len() as u16, 64, 2, 48]);
+        let mut offset = 12 + 16 * tables.len();
+        for (tag, data) in &tables {
+            let padded = {
+                let mut padded = data.clone();
+                padded.resize(data.len().next_multiple_of(4), 0);
+                padded
+            };
+            let checksum = padded
+                .chunks(4)
+                .map(|word| u32::from_be_bytes([word[0], word[1], word[2], word[3]]))
+                .fold(0u32, u32::wrapping_add);
+            font.extend_from_slice(*tag);
+            u32s(&mut font, &[checksum, offset as u32, data.len() as u32]);
+            offset += padded.len();
+        }
+        for (_, data) in &tables {
+            font.extend_from_slice(data);
+            font.resize(font.len().next_multiple_of(4), 0);
+        }
+        font
+    }
+
+    /// The CJK fixture: the kana and kanji of `MIXED` plus a few for the
+    /// wrapping tests, full-width.
+    fn cjk_fixture() -> Vec<u8> {
+        let chars: Vec<char> = "ループザルーム初音ミク、。漢字日本語のテキスト"
+            .chars()
+            .collect();
+        box_font(&chars, 1000)
+    }
+
+    /// The symbol fixture: just the emoji of `MIXED`, a little wider.
+    fn symbol_fixture() -> Vec<u8> {
+        box_font(&['🎵'], 1200)
+    }
+
+    fn fonts() -> (fontdue::Font, fontdue::Font, fontdue::Font) {
+        (
+            load_font(DEFAULT_FONT.to_vec(), 0).unwrap(),
+            load_font(cjk_fixture(), 0).unwrap(),
+            load_font(symbol_fixture(), 0).unwrap(),
+        )
     }
 
     #[test]
-    fn default_font_renders_glyphs() {
-        let mut entry = load_font(DEFAULT_FONT.to_vec()).unwrap();
-        let mut pixmap = Pixmap::new(64, 32).unwrap();
-        pixmap.fill(Color::WHITE);
-        let width = draw_text(
-            &mut pixmap,
-            &mut entry,
-            "Ab",
-            20.0,
-            2.0,
-            2.0,
-            (0, 0, 0, 255),
-        );
-        assert!(width > 10.0 && width < 40.0, "unexpected width {}", width);
-        assert!(pixmap.pixels().iter().any(|p| p.red() < 128));
-        assert!(!entry.glyphs.is_empty());
+    fn fixture_fonts_cover_their_characters() {
+        // The .nyk suite loads the same box fonts from disk.
+        for (path, covered) in [
+            ("tests/fixtures/fallback-cjk.ttf", "ループザルーム初音ミク"),
+            ("tests/fixtures/fallback-symbols.ttf", "🎵"),
+        ] {
+            let font = load_font(std::fs::read(path).unwrap(), 0).unwrap();
+            for ch in covered.chars() {
+                assert_ne!(font.lookup_glyph_index(ch), 0, "{} lacks {:?}", path, ch);
+            }
+            assert_eq!(
+                font.lookup_glyph_index('a'),
+                0,
+                "{} should lack Latin",
+                path
+            );
+        }
+    }
 
-        let (_, w, h) = layout_text(&entry.font, "line\nline", 16.0);
-        assert!(h > 24.0, "two lines should be taller than one: {}", h);
-        assert!(w > 0.0);
+    #[test]
+    fn fallback_fonts_cover_missing_glyphs() {
+        let (noto, cjk, symbols) = fonts();
+        // Alone, the bundled font has no kana, kanji or emoji.
+        let alone = clusters(&[&noto], MIXED, 16.0);
+        assert!(alone.iter().any(|c| c.index == 0 && c.ch == 'ル'));
+        assert!(alone.iter().any(|c| c.index == 0 && c.ch == '🎵'));
+
+        // With fallbacks, every character finds a real glyph, each in the
+        // first font of the chain that has it.
+        let chain = [&noto, &cjk, &symbols];
+        for cluster in clusters(&chain, MIXED, 16.0) {
+            assert_ne!(cluster.index, 0, "{:?} fell through to tofu", cluster.ch);
+            let expected = match cluster.ch {
+                '🎵' => 2,
+                ch if breaks_anywhere(ch) => 1,
+                _ => 0,
+            };
+            assert_eq!(
+                cluster.font, expected,
+                "{:?} came from the wrong font",
+                cluster.ch
+            );
+        }
+        // Whichever font comes first, a character it lacks comes from the
+        // next one that has it.
+        let latin = clusters(&[&cjk, &noto], "a", 16.0);
+        assert_eq!(latin[0].font, 1);
+    }
+
+    #[test]
+    fn ellipsis_truncates_to_the_width() {
+        let (noto, cjk, symbols) = fonts();
+        let chain = [&noto, &cjk, &symbols];
+        let full = layout_text(&chain, MIXED, &TextOptions::sized(14.0));
+        let options = TextOptions {
+            max_width: Some(160.0),
+            overflow: Overflow::Ellipsis,
+            ..TextOptions::sized(14.0)
+        };
+        let short = layout_text(&chain, MIXED, &options);
+        assert!(
+            full.width > 160.0,
+            "the fixture should overflow: {}",
+            full.width
+        );
+        assert!(
+            short.width <= 160.0 && short.width > 120.0,
+            "{}",
+            short.width
+        );
+        assert_eq!(short.lines, 1);
+        let last = short.glyphs.last().unwrap();
+        assert_eq!((last.font, last.index), (0, noto.lookup_glyph_index('…')));
+        assert!(short.glyphs.len() < full.glyphs.len());
+
+        // Text that fits is left alone.
+        let fits = layout_text(&chain, "ループ", &options);
+        assert_eq!(fits.glyphs.len(), 3);
+        assert!(fits.glyphs.iter().all(|g| g.font == 1));
+    }
+
+    #[test]
+    fn ellipsis_falls_back_to_full_stops() {
+        let cjk = load_font(cjk_fixture(), 0).unwrap();
+        let noto = load_font(DEFAULT_FONT.to_vec(), 0).unwrap();
+        let options = TextOptions {
+            max_width: Some(40.0),
+            overflow: Overflow::Ellipsis,
+            ..TextOptions::sized(10.0)
+        };
+        // The fixture has no "…" and no "."; with the bundled font after it
+        // the "…" comes from there.
+        let layout = layout_text(&[&cjk, &noto], "ループザルーム初音ミク", &options);
+        assert_eq!(layout.glyphs.last().unwrap().font, 1);
+        let ellipsis = ellipsis_clusters(&[&cjk], 10.0);
+        assert_eq!(ellipsis.len(), 3, "no font has \"…\", so three dots");
+    }
+
+    #[test]
+    fn measuring_agrees_with_drawing() {
+        let (noto, cjk, symbols) = fonts();
+        let chain = vec![
+            (DEFAULT_FONT_ID, Rc::new(noto)),
+            (101, Rc::new(cjk)),
+            (102, Rc::new(symbols)),
+        ];
+        let fonts: Vec<&fontdue::Font> = chain.iter().map(|(_, f)| f.as_ref()).collect();
+        let options = TextOptions {
+            max_width: Some(200.0),
+            overflow: Overflow::Ellipsis,
+            ..TextOptions::sized(16.0)
+        };
+        for scale in [1.0_f32, 2.0] {
+            let layout = layout_text(&fonts, MIXED, &options);
+            let mut pixmap = Pixmap::new((260.0 * scale) as u32, (40.0 * scale) as u32).unwrap();
+            pixmap.fill(Color::WHITE);
+            let mut cache = GlyphCache::default();
+            let color = (0, 0, 0, 255);
+            draw_layout(
+                &mut pixmap,
+                &mut cache,
+                &chain,
+                &layout,
+                (10.0, 5.0),
+                scale,
+                color,
+            );
+            let width = pixmap.width() as usize;
+            let inked: Vec<usize> = pixmap
+                .pixels()
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.red() < 200)
+                .map(|(i, _)| i % width)
+                .collect();
+            let first = *inked.iter().min().unwrap() as f32 / scale;
+            let last = (*inked.iter().max().unwrap() + 1) as f32 / scale;
+            // Ink sits inside the measured box, give or take side bearings
+            // and rounding to whole pixels.
+            assert!((first - 10.0).abs() <= 2.0, "ink starts at {}", first);
+            assert!(
+                (last - (10.0 + layout.width)).abs() <= 2.0,
+                "ink ends at {} but the text measures {}",
+                last,
+                layout.width
+            );
+            assert!(!cache.entries.is_empty(), "glyphs should be cached");
+        }
+    }
+
+    #[test]
+    fn layout_does_not_depend_on_scale() {
+        // Drawing scales the layout rather than redoing it, so a HiDPI
+        // window measures exactly what measureText reports.
+        let (noto, cjk, _) = fonts();
+        let options = TextOptions {
+            max_width: Some(90.0),
+            ..TextOptions::sized(13.0)
+        };
+        let a = layout_text(&[&noto, &cjk], "wrap these words 初音ミク", &options);
+        let b = layout_text(&[&noto, &cjk], "wrap these words 初音ミク", &options);
+        assert_eq!(a.glyphs, b.glyphs);
+        assert_eq!((a.width, a.height, a.lines), (b.width, b.height, b.lines));
+    }
+
+    #[test]
+    fn wrapping_breaks_at_spaces_and_between_cjk_characters() {
+        let (noto, cjk, _) = fonts();
+        let hello = layout_text(&[&noto], "hello", &TextOptions::sized(16.0));
+        let world = layout_text(&[&noto], "world", &TextOptions::sized(16.0));
+        let one_width = hello.width.max(world.width);
+        let options = TextOptions {
+            max_width: Some(one_width + 4.0),
+            ..TextOptions::sized(16.0)
+        };
+        let wrapped = layout_text(&[&noto], "hello world", &options);
+        assert_eq!(wrapped.lines, 2);
+        assert!(wrapped.width <= one_width + 4.0);
+        // The second line starts with "w" at the left edge.
+        let second: Vec<&Placed> = wrapped
+            .glyphs
+            .iter()
+            .filter(|g| g.baseline > wrapped.glyphs[0].baseline)
+            .collect();
+        assert_eq!(second[0].index, noto.lookup_glyph_index('w'));
+        assert_eq!(second[0].x, 0.0);
+
+        // Full-width characters are 16 px at 16 px, so 50 px holds three.
+        let options = TextOptions {
+            max_width: Some(50.0),
+            ..TextOptions::sized(16.0)
+        };
+        let cjk_wrapped = layout_text(&[&cjk, &noto], "漢字日本語のテキスト", &options);
+        assert_eq!(cjk_wrapped.lines, 4);
+        assert!(cjk_wrapped.width <= 50.0);
+
+        // A word wider than the line is broken where it overflows.
+        let long = layout_text(&[&noto], "abcdefghijklmnopqrstuvwxyz", &options);
+        assert!(long.lines > 1 && long.width <= 50.0);
+    }
+
+    #[test]
+    fn wrapping_keeps_closing_marks_off_the_line_start() {
+        let (noto, cjk, _) = fonts();
+        let chain = [&cjk, &noto];
+        let run = clusters(&chain, "テルーム", 16.0);
+        // Two characters fit on a line; "ー" may not start one, so "ル"
+        // moves down with it.
+        let lines = wrap_lines(&run, 40.0, 0.0);
+        assert_eq!(lines, vec![(0, 1), (1, 3), (3, 4)]);
+        assert!(!can_break(&run[1], &run[2]));
+        assert!(can_break(&run[2], &run[3]));
+    }
+
+    #[test]
+    fn alignment_moves_lines_inside_the_box() {
+        let noto = load_font(DEFAULT_FONT.to_vec(), 0).unwrap();
+        let chain = [&noto];
+        let natural = layout_text(&chain, "Hi", &TextOptions::sized(16.0));
+        let center = TextOptions {
+            align: Align::Center,
+            ..TextOptions::sized(16.0)
+        };
+        let right = TextOptions {
+            align: Align::Right,
+            ..TextOptions::sized(16.0)
+        };
+        // Without a width, x is the left edge, center or right edge.
+        assert_eq!(
+            layout_text(&chain, "Hi", &center).glyphs[0].x,
+            -natural.width / 2.0
+        );
+        assert_eq!(
+            layout_text(&chain, "Hi", &right).glyphs[0].x,
+            -natural.width
+        );
+        // With one, lines are placed inside [0, maxWidth].
+        let boxed = TextOptions {
+            max_width: Some(100.0),
+            ..right
+        };
+        let layout = layout_text(&chain, "Hi", &boxed);
+        assert!((layout.glyphs[0].x - (100.0 - natural.width)).abs() < 1e-4);
+        assert_eq!(layout.width, natural.width);
+    }
+
+    #[test]
+    fn clipping_limits_the_width() {
+        let noto = load_font(DEFAULT_FONT.to_vec(), 0).unwrap();
+        let options = TextOptions {
+            max_width: Some(30.0),
+            overflow: Overflow::Clip,
+            align: Align::Center,
+            ..TextOptions::sized(16.0)
+        };
+        let layout = layout_text(&[&noto], "a long line of text", &options);
+        assert_eq!(layout.width, 30.0);
+        assert_eq!(layout.clip, Some((0.0, 30.0)));
+        // An overflowing clipped line starts at the left edge.
+        assert_eq!(layout.glyphs[0].x, 0.0);
+        assert_eq!(layout.lines, 1);
+    }
+
+    #[test]
+    fn spacing_options_change_the_metrics() {
+        let noto = load_font(DEFAULT_FONT.to_vec(), 0).unwrap();
+        let chain = [&noto];
+        let plain = layout_text(&chain, "abcd", &TextOptions::sized(20.0));
+        let spaced = TextOptions {
+            letter_spacing: 2.0,
+            ..TextOptions::sized(20.0)
+        };
+        let wide = layout_text(&chain, "abcd", &spaced);
+        assert!(
+            (wide.width - plain.width - 6.0).abs() < 1e-3,
+            "three gaps of 2 px"
+        );
+
+        let tall = TextOptions {
+            line_height: Some(1.5),
+            ..TextOptions::sized(20.0)
+        };
+        let lines = layout_text(&chain, "a\nb\nc", &tall);
+        assert_eq!((lines.lines, lines.height), (3, 90.0));
+
+        let natural = layout_text(&chain, "a\nb", &TextOptions::sized(20.0));
+        assert!(natural.height > 40.0, "{}", natural.height);
+        assert_eq!(
+            layout_text(&chain, "", &TextOptions::sized(20.0)).height,
+            0.0
+        );
+    }
+
+    #[test]
+    fn spaces_count_but_invisible_characters_do_not() {
+        let noto = load_font(DEFAULT_FONT.to_vec(), 0).unwrap();
+        let chain = [&noto];
+        let options = TextOptions::sized(16.0);
+        let a = layout_text(&chain, "a", &options).width;
+        // A caret after a trailing space needs the space measured.
+        assert!(layout_text(&chain, "a ", &options).width > a);
+        let ab = layout_text(&chain, "ab", &options);
+        let joined = layout_text(&chain, "a\u{200D}\u{FE0F}b\r", &options);
+        assert_eq!(ab.width, joined.width);
+        assert_eq!(ab.glyphs.len(), joined.glyphs.len());
+        let tab = layout_text(&chain, "\t", &options).width;
+        let spaces = layout_text(&chain, "    ", &options).width;
+        assert!((tab - spaces).abs() < 1e-3);
+    }
+
+    #[test]
+    fn glyph_cache_drops_the_least_recently_used() {
+        let mut cache = GlyphCache::default();
+        let bitmap = |bytes: usize| (fontdue::Metrics::default(), vec![0u8; bytes]);
+        let key = |font: u64, index: u16| GlyphKey {
+            font,
+            index,
+            px: 16f32.to_bits(),
+        };
+        // Each entry costs 936 + 64 = 1000 bytes against a 4000 byte limit.
+        for index in 0..4 {
+            cache.get(key(1, index), 4000, || bitmap(936));
+        }
+        assert_eq!(cache.bytes, 4000);
+        // Touch glyph 0 so glyph 1 is the oldest, then overflow.
+        let mut rasterized = false;
+        cache.get(key(1, 0), 4000, || {
+            rasterized = true;
+            bitmap(936)
+        });
+        assert!(!rasterized, "a cached glyph is not rasterized again");
+        cache.get(key(2, 0), 4000, || bitmap(936));
+        assert!(
+            cache.bytes <= 3000,
+            "trimmed to three quarters: {}",
+            cache.bytes
+        );
+        assert!(cache.entries.contains_key(&key(1, 0)));
+        assert!(cache.entries.contains_key(&key(2, 0)));
+        assert!(!cache.entries.contains_key(&key(1, 1)));
+
+        cache.forget_font(1);
+        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(cache.bytes, 1000);
+    }
+
+    #[test]
+    fn fonts_are_size_checked() {
+        let err = load_font(vec![0; FONT_FILE_LIMIT + 1], 0).unwrap_err();
+        assert!(err.contains("larger than"), "{}", err);
+        let err = load_font(vec![1, 2, 3], 0).unwrap_err();
+        assert!(err.contains("cannot load font"), "{}", err);
     }
 
     #[test]
