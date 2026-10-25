@@ -96,6 +96,15 @@ arboard = { version = "3", default-features = false }
 # operating system (Windows API bindings, /etc/localtime, CoreFoundation).
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
+# Opt-in global allocator for the `neyuki` binary (`--features mimalloc`).
+# The VM allocates many small, short-lived tables, strings and closures, the
+# workload mimalloc is built for; it needs a C compiler. Off by default until
+# `neyuki bench` numbers on each release platform justify turning it on.
+mimalloc = { version = "0.1", default-features = false, optional = true }
+
+[features]
+mimalloc = ["dep:mimalloc"]
+
 [target.'cfg(windows)'.dependencies]
 schannel = ">=0.1.23, <0.1.28"
 
