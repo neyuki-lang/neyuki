@@ -13,8 +13,14 @@ local function waitFor(done)
 end
 
 -- TCP: a task talks to the HTTP server the main chunk serves.
+-- The accept runs in a task too: the main chunk blocking in accept would
+-- keep the scheduler from resuming the connecting task.
 local server = http.listen({ host = "127.0.0.1", port = 0 })
 local port = server.port
+local request = nil
+task.spawn(function()
+    request = server:accept(10)
+end)
 local reply = nil
 task.spawn(function()
     local conn = net.connect("127.0.0.1", port)
@@ -25,7 +31,9 @@ task.spawn(function()
     conn:close()
     assert(not conn:isOpen(), "a closed connection is not open")
 end)
-local request = server:accept(10)
+waitFor(function()
+    return request ~= nil
+end)
 assert(request ~= nil and request.path == "/tcp", "the raw request reaches the server")
 request:respond("tcp ok")
 waitFor(function()
