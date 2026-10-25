@@ -173,7 +173,182 @@ small:close()
 local bmp = ui.decodeImage(buffer.fromhex("424d4e000000000000003600000028000000030000000200000001001800000000001800000000000000000000000000000000000000ffffff0000008080800000000000ff00ff00ff0000000000"))
 assert(bmp.width == 3 and bmp.height == 2, "decodeImage reads buffers")
 expectError(ui.decodeImage, "maxPixels", "decodeImage limits the pixel count", buffer.fromhex("424d4e000000000000003600000028000000030000000200000001001800000000001800000000000000000000000000000000000000ffffff0000008080800000000000ff00ff00ff0000000000"), { maxPixels = 4 })
+local blurredBmp = bmp:blur(1)
+assert(blurredBmp.width == 3 and blurredBmp.height == 2 and blurredBmp.frames == 1, "blur keeps the size and frames")
+blurredBmp:close()
+expectError(function() return bmp:blur(-1) end, "radius", "blur checks the radius")
 for _, img in { jpeg, still, gif, blink, bmp } do img:close() end
+
+-- CANVAS (no display needed) ------------------------------------------------
+
+local function channel(c: any, i: number, x: number, y: number): number
+    local r, g, b, a = c:getPixel(x, y)
+    if (i == 1) then return r end
+    if (i == 2) then return g end
+    if (i == 3) then return b end
+    return a
+end
+
+local canvas = ui.canvas(20, 10)
+assert(canvas.width == 20 and canvas.height == 10 and canvas.scale == 1, "a canvas knows its size")
+local w, h = canvas:size()
+assert(w == 20 and h == 10)
+local r, g, b, a = canvas:getPixel(1, 1)
+assert(a == 0, "a canvas starts transparent")
+canvas:fillRect(0, 0, 10, 10, "#ff0000")
+r, g, b, a = canvas:getPixel(5, 5)
+assert(r == 255 and g == 0 and b == 0 and a == 255, "fillRect paints a canvas")
+_, _, _, a = canvas:getPixel(15, 5)
+assert(a == 0, "outside the rectangle stays transparent")
+expectError(function() return canvas:getPixel(25, 5) end, "outside", "getPixel checks the point")
+expectError(ui.canvas, "positive", "canvas needs a size", 0, 5)
+expectError(ui.canvas, "scale must be positive", "canvas needs a positive scale", 5, 5, { scale = 0 })
+
+-- Gradients.
+canvas:fillRect(0, 0, 20, 10, "#000000", { gradient = { from = "#000000", to = "#ffffff" } })
+assert(canvas:getPixel(1, 5) < 40 and canvas:getPixel(18, 5) > 215, "a linear gradient runs left to right")
+canvas:fillRect(0, 0, 20, 10, "#000000", { gradient = { from = "#000000", to = "#ffffff", angle = 90 } })
+assert(canvas:getPixel(10, 0) < 40 and canvas:getPixel(10, 9) > 215, "angle 90 runs top to bottom")
+canvas:fillRect(0, 0, 20, 10, "#000000", { gradient = { kind = "radial", from = "#ffffff", to = "#000000" } })
+assert(canvas:getPixel(10, 5) > 230 and canvas:getPixel(0, 0) < 60, "a radial gradient runs outward")
+canvas:fillRect(0, 0, 20, 10, "#000000", {
+    gradient = { stops = { { 0, "#ff0000" }, { 0.5, "#00ff00" }, { 1, "#0000ff" } } },
+})
+r, g, b = canvas:getPixel(10, 5)
+assert(g > 200 and r < 60 and b < 60, "stops place colors along the gradient")
+expectError(function() canvas:fillRect(0, 0, 5, 5, "#000", { gradient = { from = "#000000" } }) end, "stop color", "gradients need both colors")
+expectError(function() canvas:fillRect(0, 0, 5, 5, "#000", { gradient = { kind = "conic", from = "#000", to = "#fff" } }) end, "kind", "gradient kinds are checked")
+expectError(function() canvas:fillRect(0, 0, 5, 5, "#000", { gradient = { stops = { { 0, "#000" } } } }) end, "two stops", "gradients need two stops")
+expectError(function() canvas:fillRect(0, 0, 5, 5, "#000", { gradient = { stops = { { 2, "#000" }, { 1, "#fff" } } } }) end, "offset", "stop offsets are checked")
+
+-- Clipping.
+canvas:clear("#ffffff")
+canvas:pushClip(0, 0, 10, 10)
+canvas:fillRect(0, 0, 20, 10, "#ff0000")
+canvas:popClip()
+assert(channel(canvas, 1, 5, 5) == 255 and channel(canvas, 2, 5, 5) == 0, "inside a clip paints")
+assert(channel(canvas, 2, 15, 5) == 255, "outside a clip stays untouched")
+expectError(canvas.popClip, "pushClip", "popClip needs a pushClip", canvas)
+expectError(function() canvas:pushClip(0, 0, -1, 5) end, "non-negative", "pushClip checks the size")
+
+canvas:clear("#ffffff")
+canvas:pushClip(0, 0, 10, 10, { radius = 5 })
+canvas:fillRect(0, 0, 20, 10, "#ff0000")
+canvas:popClip()
+assert(channel(canvas, 2, 0, 0) == 255, "a rounded clip cuts the corner")
+assert(channel(canvas, 2, 5, 5) == 0, "a rounded clip keeps the middle")
+
+canvas:clear("#ffffff")
+canvas:pushClip(0, 0, 10, 10)
+canvas:pushClip(5, 0, 10, 10)
+canvas:fillRect(0, 0, 20, 10, "#ff0000")
+canvas:popClip()
+canvas:popClip()
+assert(channel(canvas, 2, 2, 5) == 255 and channel(canvas, 2, 7, 5) == 0, "nested clips intersect")
+assert(channel(canvas, 2, 12, 5) == 255, "nested clips intersect on the right too")
+
+canvas:clear("#ffffff")
+canvas:pushClipPath(ui.path():circle(5, 5, 4))
+canvas:fillRect(0, 0, 20, 10, "#ff0000")
+canvas:popClip()
+assert(channel(canvas, 2, 5, 5) == 0 and channel(canvas, 2, 0, 0) == 255, "a path clips to its inside")
+
+-- Opacity groups.
+canvas:clear("#ffffff")
+canvas:pushOpacity(0.5)
+canvas:fillRect(0, 0, 20, 10, "#ff0000")
+canvas:fillRect(0, 0, 20, 10, "#000000")
+canvas:popOpacity()
+r, g, b, a = canvas:getPixel(5, 5)
+assert(r > 120 and r < 135 and g > 120 and g < 135 and a == 255, "a group fades as one: " .. tostring(r) .. " " .. tostring(g))
+expectError(canvas.popOpacity, "pushOpacity", "popOpacity needs a pushOpacity", canvas)
+expectError(function() canvas:pushOpacity(2) end, "0 to 1", "pushOpacity checks the range")
+canvas:pushOpacity(1)
+canvas:pushClip(0, 0, 1, 1)
+expectError(canvas.popOpacity, "popClip", "a group must close its clips first", canvas)
+canvas:popClip()
+canvas:popOpacity()
+
+-- Paths.
+local sheet = ui.canvas(30, 30)
+sheet:fillPath(ui.path():moveTo(0, 0):lineTo(10, 0):lineTo(0, 10):close(), "#0000ff")
+r, g, b, a = sheet:getPixel(2, 2)
+assert(b == 255 and a == 255, "fillPath fills a triangle")
+assert(channel(sheet, 4, 9, 9) == 0, "fillPath leaves the outside alone")
+sheet:strokePath(ui.path():moveTo(0, 20):lineTo(30, 20), "#000000", { width = 4, cap = "square" })
+assert(channel(sheet, 4, 10, 20) == 255 and channel(sheet, 4, 10, 15) == 0, "strokePath draws a line")
+local rings = ui.path():rect(0, 0, 30, 30):rect(5, 5, 20, 20)
+local plain = ui.canvas(30, 30)
+plain:fillPath(rings, "#000000")
+local holed = ui.canvas(30, 30)
+holed:fillPath(rings, "#000000", { evenOdd = true })
+assert(channel(plain, 4, 15, 15) == 255, "the nonzero rule fills nested shapes")
+assert(channel(holed, 4, 15, 15) == 0 and channel(holed, 4, 2, 15) == 255, "evenOdd leaves a hole")
+local x, y, pw, ph = ui.path():moveTo(2, 3):lineTo(12, 8):bounds()
+assert(x == 2 and y == 3 and pw == 10 and ph == 5, "bounds covers the points")
+local _, _, ew = ui.path():bounds()
+assert(ew == 0, "an empty path has no bounds")
+expectError(function() sheet:fillPath(ui.path(), "#000") end, "path is empty", "an empty path is rejected")
+expectError(function() sheet:fillPath({}, "#000") end, "must be a path", "fillPath needs a path")
+expectError(function() sheet:strokePath(rings, "#000", { cap = "pointy" }) end, "cap", "strokePath checks the cap")
+expectError(function() return ui.path():moveTo("a", 1) end, "must be a number", "path points are numbers")
+for _, c in { sheet, plain, holed } do c:close() end
+
+-- Shadows.
+local card = ui.canvas(60, 60)
+card:fillRect(20, 20, 20, 20, "#ff0000", { shadow = { blur = 10, color = "#000000" } })
+r, g, b, a = card:getPixel(30, 30)
+assert(r == 255 and a == 255, "the shape covers its shadow")
+a = channel(card, 4, 17, 30)
+assert(a > 10 and a < 255, "the shadow fades outside the shape: " .. a)
+assert(channel(card, 4, 0, 0) == 0, "the shadow ends")
+card:clear()
+card:fillRect(20, 20, 10, 10, "#ff0000", { shadow = { blur = 0, offsetX = 15, color = "#000000" } })
+assert(channel(card, 4, 40, 25) == 255 and channel(card, 4, 5, 25) == 0, "a shadow can be offset")
+expectError(function() card:fillRect(0, 0, 5, 5, "#000", { shadow = { blur = -1 } }) end, "non-negative", "shadow blur is checked")
+card:close()
+
+-- Blur.
+local glass = ui.canvas(40, 10)
+glass:fillRect(0, 0, 20, 10, "#ff0000")
+glass:fillRect(20, 0, 20, 10, "#0000ff")
+glass:blurRegion(0, 0, 40, 10, 4)
+r, g, b = glass:getPixel(19, 5)
+assert(r > 30 and b > 30, "blur mixes both sides of an edge: " .. r .. " " .. b)
+assert(glass:getPixel(0, 5) > 200, "blur keeps flat areas")
+glass:clear("#ffffff")
+glass:fillRect(0, 0, 10, 10, "#000000")
+glass:blurRegion(25, 0, 10, 10, 4)
+assert(glass:getPixel(30, 5) == 255 and glass:getPixel(5, 5) == 0, "blur leaves other regions alone")
+glass:blurRegion(0, 0, 40, 10, 0)
+expectError(function() glass:blurRegion(0, 0, 5, 5, 500) end, "radius", "blurRegion checks the radius")
+glass:close()
+
+-- Canvases draw like images.
+local source = ui.canvas(10, 10)
+source:fillRect(0, 0, 10, 10, "#00ff00")
+local target = ui.canvas(40, 10)
+target:drawImage(source, 5, 0)
+assert(channel(target, 2, 8, 5) == 255 and channel(target, 4, 2, 5) == 0, "a canvas draws onto a canvas")
+target:drawImage(source, 20, 0, { width = 5, height = 5 })
+assert(channel(target, 2, 22, 2) == 255 and channel(target, 4, 22, 8) == 0, "a canvas can be scaled")
+local faded = ui.canvas(10, 10)
+faded:drawImage(source, 0, 0, { opacity = 0.5 })
+a = channel(faded, 4, 5, 5)
+assert(a > 120 and a < 135, "a canvas draws with opacity: " .. a)
+faded:clear("#ffffff")
+faded:pushClip(0, 0, 5, 10)
+faded:drawImage(source, 0, 0)
+faded:popClip()
+assert(channel(faded, 3, 2, 5) == 0 and channel(faded, 3, 7, 5) == 255, "clips apply to drawn canvases")
+expectError(function() source:drawImage(source, 0, 0) end, "itself", "a canvas cannot draw itself")
+for _, c in { source, target, faded } do c:close() end
+
+-- Freed canvases.
+canvas:close()
+canvas:close()
+expectError(function() canvas:fillRect(0, 0, 1, 1, "#000000") end, "canvas was freed", "a freed canvas is unusable")
+expectError(function() return canvas:id() end, "canvas was freed", "a freed canvas has no id")
 
 -- LIVE WINDOW (opt in with an empty tests/ui.local file) --------------------
 --
@@ -232,6 +407,20 @@ for _, event in events do
 end
 events = ui.poll(0.05)
 assert(type(events) == "table", "poll with a timeout returns a table")
+
+-- Unfinished clips or groups are reported at present and then dropped.
+win:pushOpacity(0.5)
+expectError(function() win:present() end, "missing before present", "present checks for open groups")
+win:pushClip(0, 0, 10, 10)
+expectError(function() win:present() end, "missing before present", "present checks for open clips")
+win:fillRect(0, 0, 10, 10, "#ff0000")
+win:present()
+win:blurRegion(0, 0, 50, 50, 3, { radius = 8 })
+local live = ui.canvas(10, 10)
+live:fillRect(0, 0, 10, 10, "#00ff00")
+win:drawImage(live, 5, 5)
+live:close()
+win:present()
 
 win:close()
 assert(not win:isOpen(), "a closed window reports it")
