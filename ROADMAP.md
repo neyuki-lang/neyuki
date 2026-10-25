@@ -55,3 +55,10 @@ This document outlines the architectural milestones and engineering trajectory f
 - [ ] Bytecode Version 4 freeze: guarantee long-term stability and binary portability across all 1.x releases.
 - [ ] Performance benchmarking suite validation against standard scripting workloads.
 - [ ] Full test coverage of standard libraries, security sandboxing, and memory leak regression tests.
+
+---
+
+## Desktop app platform
+- [x] OS media integration for `@neyuki/ui`: now-playing metadata in the system media controls (`ui.mediaSession`) and global media keys as `mediakey` events.
+- [ ] Tray icon with a menu whose items arrive as events.
+- [ ] Single-instance apps: a second launch signals and focuses the first.

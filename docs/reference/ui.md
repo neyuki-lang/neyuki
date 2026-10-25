@@ -40,10 +40,25 @@ Pumps the event loop and returns the events since the last call. Without a timeo
 - `mousemove`: `x`, `y`
 - `mousedown`, `mouseup`: `button` (`"left"`, `"right"`, `"middle"`), `x`, `y`
 - `scroll`: `dx`, `dy`, `unit` (`"lines"` or `"pixels"`), `x`, `y`
+- `mediakey`: `key` (`"playpause"`, `"play"`, `"pause"`, `"next"`, `"previous"`, `"stop"`), from a media key, a headset button or the OS media controls; see `ui.mediaSession`
+- `mediasession`: `action` (`"seek"` with `position` in seconds or a relative `offset`, `"raise"` or `"quit"`), from the OS media controls
 
 ## ui.isAvailable(): boolean
 
 Whether a display can be reached. On a headless machine the other window functions raise an error.
+
+## ui.mediaSession(info: table?): (boolean, string?)
+
+Shows what is playing in the OS media controls (the volume flyout and lock screen on Windows, MPRIS applets on Linux, Control Center on macOS) and starts receiving their commands as `mediakey` and `mediasession` events. Once a session exists, the global media keys (keyboards, headsets) reach the app even while it is in the background; without one, they arrive only while a window has focus.
+
+`info` may hold `title`, `artist`, `album`, `artwork` (an `Image`, a file path or an `http(s)` URL), `duration` and `position` in seconds, `playing` (default `false`) and the `window` to attach to (default: the first open one). Each call replaces what is shown; fields left out are cleared. `ui.mediaSession(nil)` ends the session, and closing its window does too. Returns `true`, or `false` and the reason when the OS has no media controls to offer (no D-Bus session bus, say).
+
+```lua
+ui.mediaSession({ title = "Second Wind", artist = "The Placeholders", duration = 212, position = 0, playing = true })
+for _, event in ui.poll(0.1) do
+    if event.kind == "mediakey" and event.key == "playpause" then togglePlayback() end
+end
+```
 
 ## ui.color(color: any): number
 
