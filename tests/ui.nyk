@@ -192,6 +192,13 @@ expectError(ui.loadFont, "path must be provided", "loadFont checks the path")
 expectError(ui.loadFont, "cannot open", "loadFont reports a missing file", "tests/fixtures/missing.ttf")
 expectError(ui.loadImage, "cannot open", "loadImage reports a missing file", "tests/fixtures/missing.png")
 expectError(ui.loadImage, "cannot decode", "loadImage rejects non-PNG files", "tests/ui.nyk")
+expectError(ui.mediaSession, "info must be a table", "mediaSession checks its info", 5)
+expectError(ui.mediaSession, "title must be a string", "mediaSession checks the title", { title = 1 })
+expectError(ui.mediaSession, "duration must be non-negative", "mediaSession checks the duration", { duration = -1 })
+expectError(ui.mediaSession, "playing must be a boolean", "mediaSession checks playing", { playing = "yes" })
+expectError(ui.mediaSession, "artwork must be", "mediaSession checks the artwork", { artwork = 5 })
+expectError(ui.mediaSession, "needs an open window", "mediaSession needs a window", { title = "x" })
+assert(ui.mediaSession(nil), "ending a session that never started is fine")
 
 -- LINKS AND CLIPBOARD (no display needed) -----------------------------------
 --
@@ -293,6 +300,18 @@ for _, event in events do
 end
 events = ui.poll(0.05)
 assert(type(events) == "table", "poll with a timeout returns a table")
+
+-- The OS may have no media controls to offer (no D-Bus session on Linux),
+-- so only the shape of the answer is checked.
+local published, why = ui.mediaSession({ title = "Test", artist = "Neyuki", duration = 60, position = 1, playing = true })
+assert(type(published) == "boolean", "mediaSession reports whether it published")
+assert(published or type(why) == "string", "a refused session says why")
+expectError(ui.mediaSession, "cannot read artwork", "mediaSession reports missing artwork",
+    { title = "Test", artwork = "tests/fixtures/missing.png" })
+local cover = ui.loadImage("tests/fixtures/dot.png")
+ui.mediaSession({ title = "Test", artwork = cover })
+cover:close()
+assert(ui.mediaSession(nil), "a session can be ended")
 
 win:close()
 assert(not win:isOpen(), "a closed window reports it")

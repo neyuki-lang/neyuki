@@ -634,6 +634,9 @@ end
 --   mouseup     button, x, y
 --   scroll      dx, dy, unit ("lines" or "pixels"), x, y
 --   mouseenter / mouseleave
+--   mediakey    key ("playpause", "play", "pause", "next", "previous",
+--               "stop"): a media key or OS media control (see mediaSession)
+--   mediasession action ("seek" with position or offset, "raise", "quit")
 --   maximize / minimize / restore
 --   dropfile    path            a file was dropped on the window
 --   dpichange   scale           the window moved to a display with another
@@ -694,6 +697,69 @@ function ui.run(handler: ({Event}, number) -> any, options: RunOptions?): ()
             error(err)
         end
     end
+end
+
+-- MEDIA SESSION ------------------------------------------------------------
+
+-- The open window with the lowest id: the first one opened that is still
+-- open.
+function firstWindow(): Window?
+    local first = nil
+    for _, window in windows do
+        if (window != nil and (first == nil or window.id < first.id)) then first = window end
+    end
+    return first
+end
+
+-- Publishes now-playing metadata to the OS media controls (the Windows
+-- volume flyout, MPRIS applets on Linux, Control Center on macOS) and
+-- starts receiving their commands, global media keys included. `info` may
+-- hold `title`, `artist`, `album`, `artwork` (an Image, a path or an
+-- http(s) URL), `duration` and `position` in seconds, `playing` and the
+-- `window` to attach to (default: the first open one). Call it again to
+-- update; every call replaces what was shown. `nil` ends the session.
+-- Returns true, or false and the reason when the OS has no media controls
+-- to offer (no D-Bus session, say).
+--
+-- Commands arrive from `poll` as events: `mediakey` with `key` ("playpause",
+-- "play", "pause", "next", "previous", "stop") and `mediasession` with
+-- `action` "seek" (and `position`, or a relative `offset`), "raise" or
+-- "quit".
+function ui.mediaSession(info: MediaInfo?): (boolean, string?)
+    if (info == nil) then
+        __ui_media_session_clear()
+        return true
+    end
+    if (type(info) != "table") then error("info must be a table or nil") end
+    checkOptionalString(info.title, "title")
+    checkOptionalString(info.artist, "artist")
+    checkOptionalString(info.album, "album")
+    checkOptionalNumber(info.duration, "duration")
+    checkOptionalNumber(info.position, "position")
+    checkOptionalBoolean(info.playing, "playing")
+    if (info.duration != nil and info.duration < 0) then error("duration must be non-negative") end
+    if (info.position != nil and info.position < 0) then error("position must be non-negative") end
+
+    local artworkPath = nil
+    local artworkImage = nil
+    if (type(info.artwork) == "string") then
+        artworkPath = info.artwork
+    elseif (type(info.artwork) == "table" and type(info.artwork.id) == "function") then
+        artworkImage = info.artwork:id()
+    elseif (info.artwork != nil) then
+        error("artwork must be an image from ui.loadImage, a path or a URL")
+    end
+
+    local window = info.window ?? firstWindow()
+    if (window == nil) then error("a media session needs an open window") end
+    if (type(window) != "table" or type(window.isOpen) != "function") then
+        error("window must be a window from ui.open")
+    end
+    if (not window:isOpen()) then error("window is closed") end
+
+    local ok, err = __ui_media_session(window.id, info.title, info.artist, info.album,
+        artworkPath, artworkImage, info.duration, info.position, info.playing ?? false)
+    return ok, err
 end
 
 -- ANIMATION ----------------------------------------------------------------

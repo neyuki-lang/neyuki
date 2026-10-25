@@ -80,6 +80,8 @@ Pumps the event loop and returns the events since the last call. Without a timeo
 - `mousedown`: `button` (`"left"`, `"right"`, `"middle"`), `x`, `y`, `clicks` (1, then 2 for a double click, 3 for a triple click: presses of the same button within 500 ms and 4 pixels)
 - `mouseup`: `button`, `x`, `y`. After `startDrag` or `startResize` the window system keeps the release, so it may not arrive
 - `scroll`: `dx`, `dy`, `unit` (`"lines"` or `"pixels"`), `x`, `y`
+- `mediakey`: `key` (`"playpause"`, `"play"`, `"pause"`, `"next"`, `"previous"`, `"stop"`), from a media key, a headset button or the OS media controls; see `ui.mediaSession`
+- `mediasession`: `action` (`"seek"` with `position` in seconds or a relative `offset`, `"raise"` or `"quit"`), from the OS media controls
 - `maximize`, `minimize`, `restore`: the window changed state, by the user or by a call
 - `dropfile`: `path`, a file dropped on the window (one event per file)
 - `dpichange`: `scale`, the window moved to a display with another scale factor
@@ -88,6 +90,18 @@ Pumps the event loop and returns the events since the last call. Without a timeo
 
 Whether a display can be reached. On a headless machine the other window functions raise an error.
 
+## ui.mediaSession(info: table?): (boolean, string?)
+
+Shows what is playing in the OS media controls (the volume flyout and lock screen on Windows, MPRIS applets on Linux, Control Center on macOS) and starts receiving their commands as `mediakey` and `mediasession` events. Once a session exists, the global media keys (keyboards, headsets) reach the app even while it is in the background; without one, they arrive only while a window has focus.
+
+`info` may hold `title`, `artist`, `album`, `artwork` (an `Image`, a file path or an `http(s)` URL), `duration` and `position` in seconds, `playing` (default `false`) and the `window` to attach to (default: the first open one). Each call replaces what is shown; fields left out are cleared. `ui.mediaSession(nil)` ends the session, and closing its window does too. Returns `true`, or `false` and the reason when the OS has no media controls to offer (no D-Bus session bus, say).
+
+```lua
+ui.mediaSession({ title = "Second Wind", artist = "The Placeholders", duration = 212, position = 0, playing = true })
+for _, event in ui.poll(0.1) do
+    if event.kind == "mediakey" and event.key == "playpause" then togglePlayback() end
+end
+```
 ## ui.clipboard.get(): string?
 
 The clipboard's text, or nil when it holds something else or nothing. The same clipboard as `@neyuki/hid`.

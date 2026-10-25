@@ -31,6 +31,12 @@ ignore = [
     # lib/fonts or chosen by the script author, through `fontdue` and through
     # winit's `sctk-adwaita` window decorations; neither has moved off it yet.
     { id = "RUSTSEC-2026-0192", reason = "unmaintained, no replacement in fontdue/winit yet; parses trusted fonts only" },
+    # `derivative` and `instant` are unmaintained. Both come from zbus 3, which
+    # `souvlaki` uses for the MPRIS media session on Linux: `derivative` only
+    # generates trait impls at compile time and `instant` wraps
+    # `std::time::Instant` off wasm. Remove once souvlaki moves to a newer zbus.
+    { id = "RUSTSEC-2024-0388", reason = "unmaintained derive macro pulled in by souvlaki's zbus 3; compile-time only" },
+    { id = "RUSTSEC-2024-0384", reason = "unmaintained, pulled in by souvlaki's zbus 3; a thin wrapper over std::time::Instant on native targets" },
 ]
 
 [licenses]
