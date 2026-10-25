@@ -76,6 +76,10 @@ softbuffer = "0.4"
 tiny-skia = "0.11"
 fontdue = "0.9"
 png = "0.18"
+# `ui.openUrl` hands links to the default browser or mail client through
+# `open` (ShellExecuteW on Windows, `open` on macOS, xdg-open and friends on
+# Linux) instead of spawning shell commands by hand.
+open = "5"
 
 # `@neyuki/hid` drives the keyboard and mouse through `enigo` (SendInput on
 # Windows, CoreGraphics on macOS, XTest over the pure-Rust `x11rb` on X11)
