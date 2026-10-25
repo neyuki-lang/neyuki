@@ -6,7 +6,7 @@ local os = require("@neyuki/os")
 local ui = {}
 
 -- Windows, drawing and input on top of the `__ui_*` natives in
--- src/vm/libs/ui.rs (winit, tiny-skia, fontdue and softbuffer: pure Rust, CPU
+-- src/vm/libs/ui.rs (winit, tiny-skia, fontdue and softbuffer: CPU
 -- rendered, one code path for X11, Wayland, macOS and Windows).
 --
 -- Natives cannot call back into Neyuki, so there are no callbacks: the
@@ -192,9 +192,30 @@ function textOptions(options: TextOptions?): (number, number, number?)
     return options.size ?? 16, color, fontId(options.font, "font")
 end
 
+-- Runs `body` with the native id of an icon given as an Image or a PNG path
+-- (nil for none), freeing an image it had to load itself.
+function withIcon(icon: any, body: (number?) -> any): any
+    if (icon == nil) then return body(nil) end
+    if (type(icon) == "string") then
+        local id = __ui_load_image(icon)
+        local ok, result = try(body, id)
+        __ui_free_image(id)
+        if (not ok) then error(result) end
+        return result
+    end
+    if (type(icon) != "table" or type(icon.id) != "function") then
+        error("icon must be a PNG path or an image from ui.loadImage")
+    end
+    return body(icon:id())
+end
+
 -- Opens a window. `options` may hold `title` (default "Neyuki"), `width`
 -- and `height` in logical pixels (default 800 × 600), `resizable` (default
--- true) and `visible` (default true). The canvas starts out white.
+-- true), `visible` (default true), `decorations` (default true; false for
+-- an app-drawn title bar), `minWidth` and `minHeight`, `icon` (a PNG path
+-- or Image), `transparent` (default false) and `shadow` (default true:
+-- keep the drop shadow when frameless). The canvas starts out white, or
+-- clear when transparent.
 function ui.open(options: WindowOptions?): Window
     checkOptionalTable(options, "options")
     options = options ?? {}
@@ -203,12 +224,25 @@ function ui.open(options: WindowOptions?): Window
     checkOptionalNumber(options.height, "height")
     checkOptionalBoolean(options.resizable, "resizable")
     checkOptionalBoolean(options.visible, "visible")
+    checkOptionalBoolean(options.decorations, "decorations")
+    checkOptionalNumber(options.minWidth, "minWidth")
+    checkOptionalNumber(options.minHeight, "minHeight")
+    checkOptionalBoolean(options.transparent, "transparent")
+    checkOptionalBoolean(options.shadow, "shadow")
     local width = options.width ?? 800
     local height = options.height ?? 600
     if (width <= 0 or height <= 0) then error("width and height must be positive") end
+    local minWidth = options.minWidth ?? 0
+    local minHeight = options.minHeight ?? 0
+    if (minWidth < 0 or minHeight < 0) then error("minWidth and minHeight must be non-negative") end
 
     local title = options.title ?? "Neyuki"
-    local id = __ui_open(title, width, height, options.resizable ?? true, options.visible ?? true)
+    local id = withIcon(options.icon, function(icon: number?): number
+        local opened = __ui_open(title, width, height, options.resizable ?? true,
+            options.visible ?? true, options.decorations ?? true, minWidth, minHeight,
+            options.transparent ?? false, options.shadow ?? true, icon)
+        return opened
+    end)
     local closed = false
     local window = {}
     window.id = id
@@ -355,6 +389,113 @@ function ui.open(options: WindowOptions?): Window
         __ui_present(id)
     end
 
+    -- WINDOW CHROME ---------------------------------------------------------
+    --
+    -- What an app with `decorations = false` needs to draw its own title
+    -- bar: moving and resizing are handed to the window system, so they
+    -- snap, cross monitors and respect `minWidth` like a native frame.
+
+    -- Moves the window with the mouse as if its title bar were dragged. Call
+    -- it on `mousedown` in the custom title bar, while the button is held.
+    -- Returns whether the window system took over.
+    function window.startDrag(self: Window): boolean
+        checkOpen()
+        return __ui_drag(id)
+    end
+
+    -- Resizes the window with the mouse from an edge or corner: "n", "s",
+    -- "e", "w", "ne", "nw", "se" or "sw". Call it on `mousedown`, like
+    -- startDrag.
+    function window.startResize(self: Window, direction: string): boolean
+        checkOpen()
+        checkString(direction, "direction")
+        return __ui_drag_resize(id, direction)
+    end
+
+    function window.minimize(self: Window): ()
+        checkOpen()
+        __ui_minimize(id)
+    end
+
+    function window.maximize(self: Window): ()
+        checkOpen()
+        __ui_set_maximized(id, true)
+    end
+
+    -- Brings a minimized window back, or else returns a maximized window
+    -- to its normal size.
+    function window.restore(self: Window): ()
+        checkOpen()
+        __ui_restore(id)
+    end
+
+    function window.isMaximized(self: Window): boolean
+        checkOpen()
+        return __ui_is_maximized(id)
+    end
+
+    -- Borderless fullscreen on the window's current monitor.
+    function window.setFullscreen(self: Window, fullscreen: boolean): ()
+        checkOpen()
+        if (type(fullscreen) != "boolean") then error("fullscreen must be a boolean") end
+        __ui_set_fullscreen(id, fullscreen)
+    end
+
+    -- The pointer shown over the window: "default", "pointer", "text",
+    -- "grab", "ewResize" and the rest listed in docs/reference/ui.md, or
+    -- "hidden".
+    function window.setCursor(self: Window, cursor: string): ()
+        checkOpen()
+        checkString(cursor, "cursor")
+        __ui_set_cursor(id, cursor)
+    end
+
+    -- Turns text input (and with it the input method, for composed
+    -- languages) on or off. `area` is the { x, y, w, h } of the text being
+    -- edited, so the candidate window opens next to it.
+    function window.setTextInput(self: Window, enabled: boolean, area: TextArea?): ()
+        checkOpen()
+        if (type(enabled) != "boolean") then error("enabled must be a boolean") end
+        checkOptionalTable(area, "area")
+        if (area == nil) then
+            __ui_set_text_input(id, enabled)
+            return
+        end
+        local x = area.x ?? area[1]
+        local y = area.y ?? area[2]
+        local w = area.w ?? area[3] ?? 0
+        local h = area.h ?? area[4] ?? 0
+        checkNumber(x, "area.x")
+        checkNumber(y, "area.y")
+        checkNumber(w, "area.w")
+        checkNumber(h, "area.h")
+        __ui_set_text_input(id, enabled, x, y, w, h)
+    end
+
+    -- Brings the window to the front and gives it the keyboard, as far as
+    -- the window system allows.
+    function window.focus(self: Window): ()
+        checkOpen()
+        __ui_focus(id)
+    end
+
+    -- Flashes the taskbar entry or bounces the dock icon until the user
+    -- looks at the window.
+    function window.requestAttention(self: Window): ()
+        checkOpen()
+        __ui_request_attention(id)
+    end
+
+    -- Sets the title bar and taskbar icon from an Image or a PNG path, or
+    -- clears it with nil.
+    function window.setIcon(self: Window, icon: any): ()
+        checkOpen()
+        withIcon(icon, function(image: number?): any
+            __ui_set_icon(id, image)
+            return nil
+        end)
+    end
+
     windows[tostring(id)] = window
     openCount += 1
     return table.freeze(window)
@@ -374,6 +515,31 @@ function ui.measureText(s: string, options: TextOptions?): (number, number)
     return w, h
 end
 
+-- CLIPBOARD AND LINKS ------------------------------------------------------
+
+-- The system clipboard, shared with `@neyuki/hid` (same natives).
+local clipboard = {}
+
+-- The clipboard's text, or nil when it holds something else or nothing.
+function clipboard.get(): string?
+    return __hid_clipboard_get()
+end
+
+function clipboard.set(text: string): ()
+    checkString(text, "text")
+    __hid_clipboard_set(text)
+end
+
+ui.clipboard = table.freeze(clipboard)
+
+-- Opens a link in the default browser or mail client. Only http://,
+-- https:// and mailto: links are accepted: anything else (a file path,
+-- file:, a custom protocol) could start a program.
+function ui.openUrl(url: string): ()
+    checkString(url, "url")
+    __ui_open_url(url)
+end
+
 -- Pumps the event loop and returns the events since the last call, each a
 -- table with `kind` and `window` plus the fields of its kind (`type` is a
 -- keyword, hence the name):
@@ -384,10 +550,20 @@ end
 --   keydown / keyup             key ("a", "escape", "arrowleft", "f1"),
 --                               code ("KeyA"), repeat, text, mods { shift,
 --                               ctrl, alt, meta }
+--   textinput   text            text typed or committed by an input method
+--   ime         phase, text,    input method composition: phase is "start",
+--               cursor          "preedit", "commit" or "end"; cursor is the
+--                               byte offset into the preedit text
 --   mousemove   x, y
---   mousedown / mouseup         button ("left", "right", "middle"), x, y
+--   mousedown   button ("left", "right", "middle"), x, y, clicks (2 for a
+--               double click)
+--   mouseup     button, x, y
 --   scroll      dx, dy, unit ("lines" or "pixels"), x, y
 --   mouseenter / mouseleave
+--   maximize / minimize / restore
+--   dropfile    path            a file was dropped on the window
+--   dpichange   scale           the window moved to a display with another
+--                               scale factor
 -- Without a timeout it returns at once; with one (in seconds) it waits up
 -- to that long for the first event. A `close` event only reports the
 -- request: call `window:close()` to honour it.
