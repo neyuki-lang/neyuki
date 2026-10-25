@@ -365,11 +365,24 @@ fn filter_taps(src_len: u32, start: f32, len: f32, out_len: u32) -> Vec<Taps> {
     (0..out_len)
         .map(|i| {
             let center = start + (i as f32 + 0.5) * scale;
-            let first = ((center - support).floor().max(lo as f32) as usize).min(hi - 1);
+            let mut first = ((center - support).floor().max(lo as f32) as usize).min(hi - 1);
             let last = ((center + support).ceil() as usize).clamp(first + 1, hi);
             let mut weights: Vec<f32> = (first..last)
                 .map(|j| (1.0 - ((j as f32 + 0.5 - center) / support).abs()).max(0.0))
                 .collect();
+            // The window's edges land exactly on zero weight whenever the
+            // center sits on a pixel center (always, at 1:1); drop those so
+            // an unscaled draw reads one source pixel per output pixel.
+            while weights.len() > 1 && weights[weights.len() - 1] == 0.0 {
+                weights.pop();
+            }
+            let leading = weights
+                .iter()
+                .take(weights.len() - 1)
+                .take_while(|w| **w == 0.0)
+                .count();
+            weights.drain(..leading);
+            first += leading;
             let sum: f32 = weights.iter().sum();
             if sum > 0.0 {
                 weights.iter_mut().for_each(|w| *w /= sum);
@@ -676,10 +689,8 @@ mod tests {
     fn identity_taps_copy_pixels() {
         let taps = filter_taps(4, 0.0, 4.0, 4);
         for (i, (first, weights)) in taps.iter().enumerate() {
-            // A trailing zero-weight tap is harmless; only the first matters.
             assert_eq!(*first, i);
-            assert_eq!(weights[0], 1.0);
-            assert!(weights[1..].iter().all(|w| *w == 0.0));
+            assert_eq!(weights, &[1.0]);
         }
         // Halving averages pairs.
         let taps = filter_taps(4, 0.0, 4.0, 2);
