@@ -823,6 +823,31 @@ pub(crate) const OS_METHODS: &[(&str, &str, &str)] = &[
         "os.app(): { bundled: boolean, name: string?, version: string?, identifier: string? }",
         "Describes the app built with `neyuki build` that is running; `bundled` is false under `neyuki run`.",
     ),
+    (
+        "dataDir",
+        "os.dataDir(appName: string): string",
+        "The per-user directory for an app's own files, created if missing.",
+    ),
+    (
+        "configDir",
+        "os.configDir(appName: string): string",
+        "The per-user directory for an app's settings, created if missing.",
+    ),
+    (
+        "cacheDir",
+        "os.cacheDir(appName: string): string",
+        "The per-user directory for files an app can rebuild, created if missing.",
+    ),
+    (
+        "protect",
+        "os.protect(data: string): string",
+        "Seals data so only the current user on this machine can read it back.",
+    ),
+    (
+        "unprotect",
+        "os.unprotect(blob: string): string",
+        "The string os.protect sealed into blob.",
+    ),
 ];
 
 pub(crate) const STRING_METHODS: &[(&str, &str, &str)] = &[

@@ -1,6 +1,6 @@
 # os
 
-Time, the environment, command-line arguments and the process.
+Time, the environment, command-line arguments, the process, and per-user storage for apps.
 
 ## os.clock(): number
 
@@ -83,3 +83,53 @@ Pauses the script for `seconds` (fractions allowed).
 ## os.exit(code: number | boolean?): never
 
 Flushes output and ends the process with exit code 0 (nothing or `true`), 1 (`false`) or the given integer.
+
+## os.dataDir(appName: string): string
+
+The directory where an app keeps the files it owns, created (with any missing parents) if it does not exist yet:
+
+| Platform | Path |
+| --- | --- |
+| Windows | `%APPDATA%\<appName>` |
+| macOS | `~/Library/Application Support/<appName>` |
+| Linux and BSD | `$XDG_DATA_HOME/<appName>`, by default `~/.local/share/<appName>` |
+
+`appName` must be a single directory name: not empty, not `.` or `..`, and without path separators, control characters or any of `< > : " | ? *`, so a name that works on one platform works on all of them. `"com.example.notes"` and `"My Notes"` are fine.
+
+```lua
+local fs = require("@neyuki/fs")
+local json = require("@neyuki/json")
+
+local settings = fs.join(os.configDir("My Notes"), "settings.json")
+fs.write(settings, json.encode({ theme = "dark" }))
+```
+
+## os.configDir(appName: string): string
+
+The directory for an app's settings, created like `dataDir`: `%APPDATA%\<appName>` on Windows, `~/Library/Application Support/<appName>` on macOS and `$XDG_CONFIG_HOME/<appName>` (by default `~/.config/<appName>`) on Linux.
+
+## os.cacheDir(appName: string): string
+
+The directory for files an app can rebuild, such as downloaded thumbnails, created like `dataDir`: `%LOCALAPPDATA%\<appName>\cache` on Windows (which is not roamed to other machines), `~/Library/Caches/<appName>` on macOS and `$XDG_CACHE_HOME/<appName>` (by default `~/.cache/<appName>`) on Linux. The system or the user may clear it at any time.
+
+## os.protect(data: string): string
+
+Seals `data` so that only the same user on the same machine can read it back with `unprotect`, for keeping session cookies, tokens and similar secrets in a file. Returns base64 text.
+
+```lua
+local fs = require("@neyuki/fs")
+
+local file = fs.join(os.dataDir("My Notes"), "session")
+fs.write(file, os.protect(cookie))
+-- later, or in the next run
+local cookie = os.unprotect(fs.read(file))
+```
+
+- On **Windows** it uses DPAPI (`CryptProtectData`) for the current user. No setup is needed.
+- On **macOS** and **Linux** it encrypts with AES-256-GCM under a random key that it creates on first use and keeps in the OS keychain (Keychain on macOS; the Secret Service, such as GNOME Keyring or KWallet, on Linux), filed under the service `neyuki` and the account `os.protect`. Where no keychain is reachable, as on a headless Linux server without a Secret Service, it raises an error saying so rather than storing the data unprotected.
+
+What this protects against: other users of the machine, and anyone who copies the file to another machine or reads it from a backup. What it does not: other programs running as the same user can unprotect the data too (on Windows any of them; on macOS the keychain may ask the user first), and so can anyone who signs in as the user. Every Neyuki script a user runs shares one key, so it does not keep one app's secrets from another. Deleting the keychain entry, or having an administrator reset the user's Windows password, makes existing blobs unreadable, so protect only what can be recovered another way (a session can be signed in to again).
+
+## os.unprotect(blob: string): string
+
+The string `protect` sealed into `blob`. A blob that is damaged, was sealed by another user or machine, or was sealed on another operating system raises an error.

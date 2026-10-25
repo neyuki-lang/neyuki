@@ -54,6 +54,8 @@ This document outlines the architectural milestones and engineering trajectory f
 - [x] `neyuki build`: package an entry script and an asset folder into a standalone executable with an embedded read-only file system.
 - [x] `[app]` manifest section: name, identifier, icon, publisher, copyright; no console window by default on Windows.
 - [x] `os.app()`: read the app's name, version and identifier at runtime.
+- [x] Per-user storage in `@neyuki/os`: `dataDir`, `configDir` and `cacheDir` following each platform's conventions, and `protect`/`unprotect` for secrets (DPAPI on Windows, an OS keychain key elsewhere).
+- [x] `@neyuki/ui` window chrome and input: frameless windows with app-drawn title bars (`startDrag`, `startResize`, minimize/maximize/restore, fullscreen, minimum size, icon, drop shadow), pointer cursors, IME text input (`textinput` and `ime` events), click counts for double-click, window state, file drop and DPI change events, `ui.clipboard` and `ui.openUrl`.
 - [ ] Auto-update support.
 
 ---
