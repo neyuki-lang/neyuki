@@ -31,6 +31,11 @@ tiny_http = { package = "tiny_http_dh", version = "0.12.2" }
 # schannel 0.1.28+ links Windows APIs with `raw-dylib`, which needs `dlltool`
 # on the windows-gnu toolchain; older versions use prebuilt import libraries.
 ureq = { version = "3", default-features = false, features = ["native-tls", "gzip", "charset"] }
+# Not used directly: naming `flate2` with `zlib-rs` switches the deflate
+# backend that `ureq` (gzip responses) and `mysql` (compressed protocol) share
+# from `miniz_oxide` to `zlib-rs`, which decompresses noticeably faster and
+# needs no C compiler or CMake (unlike `zlib-ng`).
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 
 # `@neyuki/crypto` is built on the RustCrypto / dalek crates, which cover
 # every algorithm it exposes (including RSA key generation, bcrypt and
