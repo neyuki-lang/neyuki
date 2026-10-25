@@ -6,7 +6,7 @@ use std::rc::{Rc, Weak};
 
 use crate::vm::buffer::VmBuffer;
 use crate::vm::hash::{FxHashMap, FxHashSet};
-use crate::vm::value::{StrRef, Value, VmTable};
+use crate::vm::value::{StrRef, Value, VmClosure, VmTable};
 
 /// The VM's global table, passed in as a GC root.
 pub type Globals = FxHashMap<StrRef, Value>;
@@ -281,17 +281,38 @@ impl GcTracker {
                     header.color = GcColor::Black;
                 }
             }
-            Value::Closure(c) => {
-                // An open upvalue's value is a register on the stack, which
-                // is already a root; only closed ones hold a value themselves.
-                for upval in &c.upvalues {
-                    if !upval.is_open() {
-                        let v = upval.closed.borrow();
-                        self.mark_value(&v);
-                    }
+            Value::Closure(c) => self.mark_closure(c),
+            _ => {}
+        }
+    }
+
+    /// Marks what a closure's closed upvalues hold. An open upvalue's value
+    /// is a register on the stack, which is already a root. Closures are not
+    /// tracked (refcounting frees them), so nothing records that one was
+    /// visited: a closure can reach itself through its upvalues (a recursive
+    /// local function whose scope has returned), and two can reach each
+    /// other. The walk therefore remembers the closures it entered and uses
+    /// an explicit stack, so neither a cycle nor a long chain recurses.
+    fn mark_closure(&mut self, root: &Rc<VmClosure>) {
+        if root.upvalues.iter().all(|upval| upval.is_open()) {
+            return;
+        }
+        let mut entered: FxHashSet<*const VmClosure> = FxHashSet::default();
+        let mut pending = vec![Rc::clone(root)];
+        while let Some(closure) = pending.pop() {
+            if !entered.insert(Rc::as_ptr(&closure)) {
+                continue;
+            }
+            for upval in &closure.upvalues {
+                if upval.is_open() {
+                    continue;
+                }
+                let value = upval.closed.borrow().clone();
+                match value {
+                    Value::Closure(inner) => pending.push(inner),
+                    other => self.mark_value(&other),
                 }
             }
-            _ => {}
         }
     }
 
