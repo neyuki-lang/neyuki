@@ -105,6 +105,71 @@ expectError(ui.measureText, "text must be a string", "measureText checks its tex
 expectError(ui.measureText, "size must be positive", "measureText checks the size", "x", { size = 0 })
 expectError(ui.measureText, "font must be a font", "measureText checks the font", "x", { font = "Arial" })
 
+-- FALLBACK FONTS AND LAYOUT (no display needed) -----------------------------
+--
+-- The fixtures are tiny generated fonts whose glyphs are plain boxes: one
+-- covers the kana and kanji below (full-width), the other the emoji.
+
+local title = "ループザルーム (feat. 初音ミク) — rusino 🎵"
+local cjk = ui.loadFont("tests/fixtures/fallback-cjk.ttf")
+-- tests/fixtures/fallback-symbols.ttf, loaded from memory.
+local symbolsFont = "AAEAAAAHAEAAAgAwY21hcAAS558AAAB8AAAAKGdseWYDvgoAAAAApAAAACRoZWFkY85DogAAAMgAAAA2aGhlYQfSBE8AAAEAAAAAJGhtdHgJYADIAAABJAAAAAhsb2NhAAAAJAAAASwAAAAMbWF4cAACUAAAAAE4AAAABgAAAAEAAwAKAAAADAAMAAAAAAAcAAAAAAAAAAEAAfO1AAHztQAAAAEAAQBkAAAETAK8AAMAAAEBAQEAZAAAA+gAAAAAArwAAP1EAAAAAQAAAAEAAAAAAABfDzz1AAsD6AAAAAAAAAAAAAAAAAAAAAAAZAAABEwCvAAAAAgAAgABAAAAAAABAAADIP84AAAEsABkAGQETAABAAAAAAAAAAAAAAAAAAAAAgSwAGQEsABkAAAAAAAAAAAAAAAkAABQAAACAAA="
+local symbols = ui.loadFont(buffer.frombase64(symbolsFont))
+assert(cjk.path == "tests/fixtures/fallback-cjk.ttf" and symbols.path == nil, "fonts remember their path")
+
+-- Without fallbacks the kana come out as the bundled font's missing-glyph
+-- box; with them each takes its fallback's full-width (1 em) box.
+local kana = "ループ"
+local tofu, _ = ui.measureText(kana, { size = 20 })
+local boxes, _ = ui.measureText(kana, { size = 20, fallback = { cjk } })
+assert(math.abs(boxes - 60) < 0.01, "three full-width fallback glyphs at 20 px: " .. tostring(boxes))
+assert(tofu != boxes, "the fallback font should be used")
+
+-- The global list applies when a call names none.
+ui.setFallbackFonts({ cjk, symbols })
+local globalWidth, _ = ui.measureText(kana, { size = 20 })
+assert(globalWidth == boxes, "global fallbacks should match per-call ones")
+local note, _ = ui.measureText("🎵", { size = 10 })
+assert(math.abs(note - 12) < 0.01, "the emoji comes from the second fallback: " .. tostring(note))
+
+-- Ellipsis truncates to the width, and measureText reports the truncated
+-- size (the same layout text() draws).
+local full, oneLine = ui.measureText(title, { size = 14 })
+local cut, cutHeight, cutLines = ui.measureText(title, { size = 14, maxWidth = 160, overflow = "ellipsis" })
+assert(full > 160 and cut <= 160 and cut > 100, "ellipsis should fit the width: " .. tostring(cut))
+assert(cutHeight == oneLine and cutLines == 1, "ellipsis keeps one line")
+
+-- Wrapping breaks lines; clipping cuts the width.
+local _, wrappedHeight, wrappedLines = ui.measureText(title, { size = 14, maxWidth = 120 })
+assert(wrappedLines > 1 and wrappedHeight > oneLine, "wrapping adds lines")
+local clipped, _, clippedLines = ui.measureText(title, { size = 14, maxWidth = 50, overflow = "clip" })
+assert(clipped == 50 and clippedLines == 1, "clipping limits the width")
+local _, spaced = ui.measureText("a\nb", { size = 10, lineHeight = 2 })
+assert(spaced == 40, "lineHeight is a multiple of the size: " .. tostring(spaced))
+local tight, _ = ui.measureText("abc", { size = 10 })
+local loose, _ = ui.measureText("abc", { size = 10, letterSpacing = 1 })
+assert(math.abs(loose - tight - 2) < 0.01, "letterSpacing adds a gap between characters")
+
+expectError(ui.measureText, "overflow must be", "measureText checks overflow", "x", { maxWidth = 10, overflow = "fade" })
+expectError(ui.measureText, "align must be", "measureText checks align", "x", { align = "middle" })
+expectError(ui.measureText, "maxWidth must be positive", "measureText checks maxWidth", "x", { maxWidth = 0 })
+expectError(ui.measureText, "lineHeight must be positive", "measureText checks lineHeight", "x", { lineHeight = -1 })
+expectError(ui.measureText, "opacity must be from 0 to 1", "measureText checks opacity", "x", { opacity = 2 })
+expectError(ui.measureText, "fallback[1] must be a font", "measureText checks fallbacks", "x", { fallback = { "Arial" } })
+expectError(ui.measureText, "size must be at most", "text sizes are capped", "x", { size = 5000 })
+expectError(ui.setFallbackFonts, "fonts must be a table", "setFallbackFonts checks its list", "Arial")
+expectError(ui.loadFont, "cannot load font", "loadFont rejects bytes that are not a font", buffer.fromstring("nope"))
+expectError(ui.systemFont, "family must be a string", "systemFont checks the family", 5)
+
+-- Closing a font drops it from the global list.
+symbols:close()
+local closedNote, _ = ui.measureText("🎵", { size = 10 })
+assert(closedNote != note, "a closed fallback is no longer used")
+ui.setFallbackFonts({})
+local cleared, _ = ui.measureText(kana, { size = 20 })
+assert(cleared == tofu, "an empty list clears the fallbacks")
+cjk:close()
+
 -- ARGUMENT CHECKS (no display needed) ---------------------------------------
 
 expectError(ui.open, "options must be a table", "open rejects non-table options", 5)
@@ -127,6 +192,16 @@ expectError(ui.loadFont, "path must be provided", "loadFont checks the path")
 expectError(ui.loadFont, "cannot open", "loadFont reports a missing file", "tests/fixtures/missing.ttf")
 expectError(ui.loadImage, "cannot open", "loadImage reports a missing file", "tests/fixtures/missing.png")
 expectError(ui.loadImage, "cannot decode", "loadImage rejects non-PNG files", "tests/ui.nyk")
+expectError(ui.loadImage, "cannot decode", "loadImage rejects unknown formats", "tests/ui.nyk")
+expectError(ui.decodeImage, "must be a buffer or string", "decodeImage checks its input", 5)
+expectError(ui.decodeImage, "cannot decode", "decodeImage rejects garbage", "not an image")
+expectError(ui.mediaSession, "info must be a table", "mediaSession checks its info", 5)
+expectError(ui.mediaSession, "title must be a string", "mediaSession checks the title", { title = 1 })
+expectError(ui.mediaSession, "duration must be non-negative", "mediaSession checks the duration", { duration = -1 })
+expectError(ui.mediaSession, "playing must be a boolean", "mediaSession checks playing", { playing = "yes" })
+expectError(ui.mediaSession, "artwork must be", "mediaSession checks the artwork", { artwork = 5 })
+expectError(ui.mediaSession, "needs an open window", "mediaSession needs a window", { title = "x" })
+assert(ui.mediaSession(nil), "ending a session that never started is fine")
 
 -- LINKS AND CLIPBOARD (no display needed) -----------------------------------
 --
@@ -150,6 +225,48 @@ assert(image.path == "tests/fixtures/dot.png")
 image:close()
 image:close()
 expectError(function() return image:id() end, "image was freed", "a freed image is unusable")
+
+local jpeg = ui.loadImage("tests/fixtures/quadrants.jpg")
+assert(jpeg.width == 16 and jpeg.height == 16 and jpeg.frames == 1, "the JPEG is 16 x 16")
+assert(jpeg:frameDelay(1) == 0, "stills have no delay")
+local still = ui.loadImage("tests/fixtures/still.webp")
+assert(still.frames == 1, "the WebP is a still")
+
+local gif = ui.loadImage("tests/fixtures/spin.gif")
+assert(gif.width == 4 and gif.height == 4 and gif.frames == 3, "the GIF has three 4 x 4 frames")
+assert(gif.loopCount == 0, "the GIF loops forever")
+assert(gif:frameDelay(1) == 0.05 and gif:frameDelay(2) == 0.1 and gif:frameDelay(3) == 0.2)
+expectError(function() return gif:frameDelay(4) end, "frame number", "frameDelay checks the frame")
+
+local blink = ui.loadImage("tests/fixtures/blink.webp")
+assert(blink.frames == 2 and blink.loopCount == 3, "the animated WebP has two frames and three loops")
+
+local anim = ui.animation(gif)
+assert(anim.frame == 1)
+anim:update(0.06)
+assert(anim.frame == 2, "0.06 s is past the first 0.05 s frame")
+anim:update(0.1)
+assert(anim.frame == 3)
+anim:update(0.2)
+assert(anim.frame == 1, "an endless animation wraps around")
+anim:reset()
+assert(anim.frame == 1 and not anim.finished)
+
+local finite = ui.animation(blink)
+for _ = 1, 20 do finite:update(0.2) end
+assert(finite.finished and finite.frame == 2, "a finite animation stops on its last frame")
+
+local small = gif:resized(2, 2)
+assert(small.width == 2 and small.height == 2 and small.frames == 3, "resized keeps the frames")
+assert(small:frameDelay(3) == 0.2)
+expectError(function() return gif:resized(0, 2) end, "positive whole numbers", "resized checks the size")
+small:close()
+
+-- 3 x 2 BMP, from memory.
+local bmp = ui.decodeImage(buffer.fromhex("424d4e000000000000003600000028000000030000000200000001001800000000001800000000000000000000000000000000000000ffffff0000008080800000000000ff00ff00ff0000000000"))
+assert(bmp.width == 3 and bmp.height == 2, "decodeImage reads buffers")
+expectError(ui.decodeImage, "maxPixels", "decodeImage limits the pixel count", buffer.fromhex("424d4e000000000000003600000028000000030000000200000001001800000000001800000000000000000000000000000000000000ffffff0000008080800000000000ff00ff00ff0000000000"), { maxPixels = 4 })
+for _, img in { jpeg, still, gif, blink, bmp } do img:close() end
 
 -- LIVE WINDOW (opt in with an empty tests/ui.local file) --------------------
 --
@@ -184,6 +301,11 @@ assert(drawn > 0, "drawing text reports its width")
 local dot = ui.loadImage("tests/fixtures/dot.png")
 win:drawImage(dot, 5, 100)
 win:drawImage(dot, 20, 100, { width = 16, height = 12 })
+win:drawImage(dot, 40, 100, { width = 30, height = 30, fit = "cover", opacity = 0.5, radius = 4 })
+win:drawImage(dot, 80, 100, { width = 30, height = 30, fit = "contain", frame = 1 })
+expectError(function() win:drawImage(dot, 0, 0, { frame = 2 }) end, "frame number", "drawImage checks the frame")
+expectError(function() win:drawImage(dot, 0, 0, { fit = "stretch" }) end, "fit", "drawImage checks the fit")
+expectError(function() win:drawImage(dot, 0, 0, { opacity = 2 }) end, "opacity", "drawImage checks the opacity")
 dot:close()
 win:present()
 
@@ -228,6 +350,18 @@ for _, event in events do
 end
 events = ui.poll(0.05)
 assert(type(events) == "table", "poll with a timeout returns a table")
+
+-- The OS may have no media controls to offer (no D-Bus session on Linux),
+-- so only the shape of the answer is checked.
+local published, why = ui.mediaSession({ title = "Test", artist = "Neyuki", duration = 60, position = 1, playing = true })
+assert(type(published) == "boolean", "mediaSession reports whether it published")
+assert(published or type(why) == "string", "a refused session says why")
+expectError(ui.mediaSession, "cannot read artwork", "mediaSession reports missing artwork",
+    { title = "Test", artwork = "tests/fixtures/missing.png" })
+local cover = ui.loadImage("tests/fixtures/dot.png")
+ui.mediaSession({ title = "Test", artwork = cover })
+cover:close()
+assert(ui.mediaSession(nil), "a session can be ended")
 
 win:close()
 assert(not win:isOpen(), "a closed window reports it")
