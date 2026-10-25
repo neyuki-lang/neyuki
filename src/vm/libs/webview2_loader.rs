@@ -56,7 +56,11 @@ fn load() -> Result<HMODULE, String> {
     // searched, never the current directory).
     let name = wide(std::ffi::OsStr::new("WebView2Loader.dll"));
     let module = unsafe {
-        LoadLibraryExW(name.as_ptr(), std::ptr::null_mut(), LOAD_LIBRARY_SEARCH_APPLICATION_DIR)
+        LoadLibraryExW(
+            name.as_ptr(),
+            std::ptr::null_mut(),
+            LOAD_LIBRARY_SEARCH_APPLICATION_DIR,
+        )
     };
     if !module.is_null() {
         return Ok(module);

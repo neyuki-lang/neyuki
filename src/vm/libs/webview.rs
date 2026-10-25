@@ -758,7 +758,9 @@ mod real {
     /// `__webview_available()` reports whether a view can be created here:
     /// a display, and the web engine (WebView2 runtime, WebKitGTK).
     fn builtin_available(_vm: &mut VM, _args: &[Value]) -> Result<Vec<Value>, String> {
-        Ok(vec![Value::Bool(ensure_loader().is_ok() && toolkit_available())])
+        Ok(vec![Value::Bool(
+            ensure_loader().is_ok() && toolkit_available(),
+        )])
     }
 
     /// Loads the WebView2 loader on windows-gnu (see `webview2_loader`);
