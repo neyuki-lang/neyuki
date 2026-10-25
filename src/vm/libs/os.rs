@@ -420,6 +420,10 @@ pub fn create_os_lib() -> Value {
     table.set_str("exit", crate::native!("os.exit", os_exit));
     table.set_str("args", crate::native!("os.args", os_args));
     table.set_str("run", crate::native!("os.run", os_run));
+    table.set_str(
+        "spawn",
+        crate::native!("os.spawn", crate::vm::libs::net::os_spawn),
+    );
     table.frozen = true;
     Value::Table(Rc::new(RefCell::new(table)))
 }
