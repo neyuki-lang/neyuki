@@ -316,7 +316,7 @@ struct RequestSpec {
 /// A body read to the end, or one left open for `__http_read`.
 enum ResponseBody {
     Complete(Vec<u8>),
-    Stream(ureq::BodyReader<'static>),
+    Stream(Box<ureq::BodyReader<'static>>),
 }
 
 /// What came back, before it is turned into Neyuki values.
@@ -371,7 +371,7 @@ fn perform_request(spec: RequestSpec) -> Result<RawResponse, String> {
         .collect();
     let body = response.into_body();
     let body = if stream {
-        ResponseBody::Stream(body.into_reader())
+        ResponseBody::Stream(Box::new(body.into_reader()))
     } else {
         let bytes = body
             .into_with_config()
