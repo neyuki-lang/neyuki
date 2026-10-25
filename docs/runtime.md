@@ -9,6 +9,7 @@ neyuki lint [--json] [--stdin] <file>
 neyuki compile <file> [out]       compile to bytecode (default: <file>b)
 neyuki repl                       interactive session
 neyuki test                       run every .nyk file in tests/
+neyuki build [project]            build a standalone app executable
 neyuki pkg <command>              manage the project manifest and packages
 neyuki dap                        Debug Adapter Protocol server on stdio
 neyuki disasm <file>              print the bytecode the compiler emits
@@ -39,6 +40,10 @@ warning[W0001]: unused variable 'total'
 `neyuki compile app.nyk` writes `app.nykb`, which `neyuki run` loads without parsing or checking. Bytecode is verified before it runs, so a damaged or hand-made file is rejected instead of crashing the VM.
 
 The bytecode format changes between Neyuki versions. A `.nykb` written by another version is rejected with an error naming both formats; recompile it with `neyuki compile`. When `require` meets such a file and the `.nyk` source sits next to it, it compiles the source instead.
+
+### Building apps
+
+`neyuki build [project]` writes a standalone executable that holds the entry script, the modules it needs and an asset folder (default `assets`) in an embedded read-only file system, so `fs.read("assets/logo.png")` and `require` resolve inside the bundle. Options: `-o`/`--out`, `--name`, `--version`, `--icon`, `--asset` (repeatable), `--console` (keep the Windows console window) and `--runtime`. The `[app]` section of `neyuki.toml` sets `name`, `identifier`, `icon`, `assets`, `publisher` and `copyright`. A built app reads its own details with [`os.app()`](reference/os.md).
 
 ### Debugging
 

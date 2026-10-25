@@ -118,17 +118,25 @@ Opens a link in the default browser or mail client and returns without waiting. 
 
 Packs any color form into a `0xRRGGBBAA` integer, to avoid re-parsing a color every frame.
 
-## ui.loadFont(path: string): Font
+## ui.loadFont(source: string | buffer): Font
 
-Loads a TrueType or OpenType font for `text` and `measureText`. Without one, text uses the bundled Noto Sans. `font:close()` frees it.
+Loads a TrueType or OpenType font for `text` and `measureText`, from a file path or from a buffer of its bytes (an app can embed its own CJK font this way). Without one, text uses the bundled Noto Sans. The `Font` has `name` and, when loaded from a path, `path`. `font:close()` frees it and drops it from the fallback list.
+
+## ui.systemFont(family: string, options: table?): Font?
+
+Loads the installed font whose family or PostScript name is `family` (ignoring case), or returns `nil` when there is none. `options.weight` (100 to 900, default 400) and `options.italic` pick the closest face. The installed fonts are scanned on the first call.
+
+## ui.setFallbackFonts(fonts: {Font}?): ()
+
+Sets the fonts every text searches, in order, for characters its own font lacks (kana, kanji, Hangul, emoji). The bundled font is always tried last. An empty list or `nil` clears them. A `fallback` option on a single call replaces this list for that call.
 
 ## ui.loadImage(path: string): Image
 
 Decodes a PNG file into an `Image` with `width` and `height`. `image:close()` frees it.
 
-## ui.measureText(s: string, options: table?): (number, number)
+## ui.measureText(s: string, options: table?): (number, number, number)
 
-The width and height `window:text` would cover for `s`, with the same `size` and `font` options.
+The width, height and number of lines `window:text` would cover for `s` with the same options (`size`, `font`, `fallback`, `maxWidth`, `overflow`, `lineHeight`, `letterSpacing`), truncation and wrapping included.
 
 ## Window:clear(color: any?): ()
 
@@ -154,9 +162,16 @@ A filled circle, or an outline of `options.width` when `options.fill` is `false`
 
 A closed shape through the points of a flat `{ x1, y1, x2, y2, ... }` list, filled unless `options.fill` is `false`.
 
-## Window:text(x: number, y: number, s: string, options: table?): number
+## Window:text(x: number, y: number, s: string, options: table?): (number, number)
 
-Draws text with the top-left corner of its first line at `(x, y)`; `"\n"` starts a new line. `options` may hold `size` (default 16), `color` (default black) and `font`. Returns the width drawn.
+Draws text with the top-left corner of its first line at `(x, y)`; `"
+"` starts a new line. Returns the width and height drawn. `options` may hold:
+
+- `size` (default 16), `color` (default black), `opacity` (0 to 1) and `font`.
+- `fallback`: fonts to try for characters `font` lacks, instead of the ones from `ui.setFallbackFonts`.
+- `maxWidth` with `overflow`: `"wrap"` (default) breaks lines, `"ellipsis"` shortens a line and ends it with `...`, `"clip"` cuts it at the width.
+- `align`: `"left"` (default), `"center"` or `"right"`. Within `maxWidth` the text aligns inside it; without it, centered text is centered on `x` and right-aligned text ends at `x`.
+- `lineHeight` (a multiple of the size) and `letterSpacing` (pixels).
 
 ## Window:drawImage(image: Image, x: number, y: number, options: table?): ()
 

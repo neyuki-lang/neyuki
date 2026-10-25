@@ -2,12 +2,17 @@
 //!
 //! Every call takes a path, so no file handle outlives a call. `lib/fs.nyk`
 //! builds the `File` objects on top of these.
+//!
+//! In an app built with `neyuki build`, a relative path names the bundled
+//! file first (see `crate::app`). Bundled files read like any other but
+//! cannot be written, removed or renamed.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 
 use std::time::UNIX_EPOCH;
 
+use crate::app::Entry;
 use crate::vm::libs::args::{array, bool_arg, frozen, str_arg};
 use crate::vm::machine::VM;
 use crate::vm::value::{NativeDef, Value, VmTable};
@@ -71,12 +76,22 @@ fn io_error(action: &str, path: &str, err: std::io::Error) -> String {
     format!("cannot {} `{}`: {}", action, path, err)
 }
 
+/// The bytes of `path` from the app bundle, or `None` when it is not
+/// bundled.
+fn read_bundled(path: &str) -> Option<Result<Vec<u8>, String>> {
+    crate::app::read(path).map(|result| result.map_err(|err| io_error("read", path, err)))
+}
+
 /// Checks that `path` can be opened in `mode` and prepares it: "r" requires
 /// an existing file, "w" creates or truncates it, "a" creates it if missing.
 fn builtin_open(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let path = str_arg(args, 0, "path")?;
     let mode = str_arg(args, 1, "mode")?;
+    if mode != "r" {
+        crate::app::check_writable(path)?;
+    }
     let result = match mode {
+        "r" if matches!(crate::app::entry(path), Some(Entry::File { .. })) => Ok(()),
         "r" => fs::File::open(path).map(drop),
         "w" => fs::File::create(path).map(drop),
         "a" => OpenOptions::new()
@@ -92,6 +107,19 @@ fn builtin_open(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 
 fn builtin_read(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let path = str_arg(args, 0, "path")?;
+    if let Some(bytes) = read_bundled(path) {
+        let text = String::from_utf8(bytes?).map_err(|_| {
+            io_error(
+                "read",
+                path,
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "stream did not contain valid UTF-8",
+                ),
+            )
+        })?;
+        return Ok(vec![Value::string(text)]);
+    }
     let text = fs::read_to_string(path).map_err(|err| io_error("read", path, err))?;
     Ok(vec![Value::string(text)])
 }
@@ -100,6 +128,7 @@ fn builtin_write(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let path = str_arg(args, 0, "path")?;
     let text = str_arg(args, 1, "text")?;
     let append = bool_arg(args, 2, "append")?;
+    crate::app::check_writable(path)?;
     let result = if append {
         OpenOptions::new()
             .append(true)
@@ -115,7 +144,8 @@ fn builtin_write(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 
 fn builtin_exists(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let path = str_arg(args, 0, "path")?;
-    Ok(vec![Value::Bool(fs::metadata(path).is_ok())])
+    let bundled = crate::app::entry(path).is_some();
+    Ok(vec![Value::Bool(bundled || fs::metadata(path).is_ok())])
 }
 
 /// `(path, recursive)`: removes a file, an empty directory, or with
@@ -123,6 +153,7 @@ fn builtin_exists(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 fn builtin_remove(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let path = str_arg(args, 0, "path")?;
     let recursive = bool_arg(args, 1, "recursive")?;
+    crate::app::check_writable(path)?;
     let metadata = fs::symlink_metadata(path).map_err(|err| io_error("remove", path, err))?;
     let result = if metadata.is_dir() && recursive {
         fs::remove_dir_all(path)
@@ -138,6 +169,8 @@ fn builtin_remove(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 fn builtin_rename(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let from = str_arg(args, 0, "from")?;
     let to = str_arg(args, 1, "to")?;
+    crate::app::check_writable(from)?;
+    crate::app::check_writable(to)?;
     fs::rename(from, to).map_err(|err| format!("cannot rename `{}` to `{}`: {}", from, to, err))?;
     Ok(vec![Value::Nil])
 }
@@ -145,6 +178,7 @@ fn builtin_rename(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 fn builtin_mkdir(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let path = str_arg(args, 0, "path")?;
     let recursive = bool_arg(args, 1, "recursive")?;
+    crate::app::check_writable(path)?;
     let result = if recursive {
         fs::create_dir_all(path)
     } else {
@@ -156,6 +190,9 @@ fn builtin_mkdir(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 
 fn builtin_list(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let path = str_arg(args, 0, "path")?;
+    if let Some(names) = crate::app::installed().and_then(|bundle| bundle.list(path)) {
+        return Ok(vec![array(names.into_iter().map(Value::string).collect())]);
+    }
     let mut names = Vec::new();
     for entry in fs::read_dir(path).map_err(|err| io_error("list", path, err))? {
         let entry = entry.map_err(|err| io_error("list", path, err))?;
@@ -167,6 +204,9 @@ fn builtin_list(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 
 fn builtin_isdir(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let path = str_arg(args, 0, "path")?;
+    if let Some(entry) = crate::app::entry(path) {
+        return Ok(vec![Value::Bool(entry == Entry::Dir)]);
+    }
     Ok(vec![Value::Bool(
         fs::metadata(path).is_ok_and(|metadata| metadata.is_dir()),
     )])
@@ -176,6 +216,15 @@ fn builtin_isdir(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 fn builtin_copy(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let from = str_arg(args, 0, "from")?;
     let to = str_arg(args, 1, "to")?;
+    crate::app::check_writable(to)?;
+    // Copying a bundled file out is how a script hands an asset to another
+    // program.
+    if let Some(data) = read_bundled(from) {
+        let data = data?;
+        fs::write(to, &data)
+            .map_err(|err| format!("cannot copy `{}` to `{}`: {}", from, to, err))?;
+        return Ok(vec![Value::Int(data.len() as i64)]);
+    }
     let bytes =
         fs::copy(from, to).map_err(|err| format!("cannot copy `{}` to `{}`: {}", from, to, err))?;
     Ok(vec![Value::Int(bytes as i64)])
@@ -191,6 +240,19 @@ fn epoch_seconds(time: std::io::Result<std::time::SystemTime>) -> Value {
 /// is there. Symbolic links are followed.
 fn builtin_info(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let path = str_arg(args, 0, "path")?;
+    if let Some(entry) = crate::app::entry(path) {
+        let mut table = VmTable::new();
+        let size = match entry {
+            Entry::File { size } => size as i64,
+            Entry::Dir => 0,
+        };
+        table.set_str("size", Value::Int(size));
+        table.set_str("isDir", Value::Bool(entry == Entry::Dir));
+        table.set_str("isFile", Value::Bool(entry != Entry::Dir));
+        table.set_str("readonly", Value::Bool(true));
+        table.set_str("bundled", Value::Bool(true));
+        return Ok(vec![frozen(table)]);
+    }
     let Ok(metadata) = fs::metadata(path) else {
         return Ok(vec![Value::Nil]);
     };

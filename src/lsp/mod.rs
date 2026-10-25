@@ -819,6 +819,11 @@ pub(crate) const OS_METHODS: &[(&str, &str, &str)] = &[
         "Executes an external system command.",
     ),
     (
+        "app",
+        "os.app(): { bundled: boolean, name: string?, version: string?, identifier: string? }",
+        "Describes the app built with `neyuki build` that is running; `bundled` is false under `neyuki run`.",
+    ),
+    (
         "dataDir",
         "os.dataDir(appName: string): string",
         "The per-user directory for an app's own files, created if missing.",

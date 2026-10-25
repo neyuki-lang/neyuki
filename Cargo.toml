@@ -104,6 +104,14 @@ arboard = { version = "3", default-features = false }
 # `os.date` formats times and reads the local time zone through the
 # operating system (Windows API bindings, /etc/localtime, CoreFoundation).
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+fontdb = "0.23"
+
+# `neyuki build` sets the icon, version resource and subsystem of the Windows
+# executable it writes. `editpe` edits PE files on any host, so a Linux or
+# macOS machine can build a Windows app from a Windows runtime. `images` is
+# off: it pulls in the `image` crate only to resize icons, and `.png` icons
+# are wrapped into `.ico` files by `neyuki build` itself.
+editpe = { version = "0.2", default-features = false, features = ["std"] }
 
 # Opt-in global allocator for the `neyuki` binary (`--features mimalloc`).
 # The VM allocates many small, short-lived tables, strings and closures, the
@@ -118,8 +126,9 @@ mimalloc = ["dep:mimalloc"]
 schannel = ">=0.1.23, <0.1.28"
 # `os.protect` seals secrets with DPAPI (CryptProtectData) for the current
 # user. 0.59 is the generation that still links through import libraries,
-# for the same windows-gnu reason as `schannel` above.
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography"] }
+# for the same windows-gnu reason as `schannel` above. A built app also
+# shows an error that ends it in a message box, as it has no console.
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_UI_WindowsAndMessaging"] }
 
 # Elsewhere `os.protect` keeps a random AES-256-GCM key in the OS keychain:
 # Keychain Services on macOS, the Secret Service over the pure-Rust `zbus`
