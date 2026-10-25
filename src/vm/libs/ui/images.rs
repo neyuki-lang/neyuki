@@ -24,8 +24,8 @@ use image::codecs::webp::WebPDecoder;
 use image::metadata::{LoopCount, Orientation};
 use image::{AnimationDecoder, DynamicImage, ImageDecoder, ImageFormat};
 use tiny_skia::{
-    ColorU8, FillRule, FilterQuality, IntSize, Paint, Pattern, Pixmap, PixmapPaint, PixmapRef,
-    SpreadMode, Transform,
+    ColorU8, FillRule, FilterQuality, IntSize, Mask, Paint, Pattern, Pixmap, PixmapPaint,
+    PixmapRef, SpreadMode, Transform,
 };
 
 /// The largest image accepted unless `maxPixels` says otherwise: 64
@@ -460,6 +460,7 @@ pub(super) fn resample(source: &Pixmap, src: RectF, width: u32, height: u32) -> 
 /// Composites a prepared (already sized) frame with its top-left corner at
 /// whole pixel `(left, top)` of `target`. An opaque frame drawn at full
 /// opacity without rounded corners is copied row by row.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn draw(
     target: &mut Pixmap,
     source: PixmapRef,
@@ -468,6 +469,7 @@ pub(super) fn draw(
     top: i32,
     opacity: f32,
     radius: f32,
+    mask: Option<&Mask>,
 ) {
     if radius > 0.0 {
         let Some(path) = super::rounded_rect(
@@ -495,9 +497,9 @@ pub(super) fn draw(
             &paint,
             FillRule::Winding,
             Transform::identity(),
-            None,
+            mask,
         );
-    } else if opaque && opacity >= 1.0 {
+    } else if opaque && opacity >= 1.0 && mask.is_none() {
         blit(target, source, left, top);
     } else {
         let paint = PixmapPaint {
@@ -505,7 +507,7 @@ pub(super) fn draw(
             quality: FilterQuality::Nearest,
             ..PixmapPaint::default()
         };
-        target.draw_pixmap(left, top, source, &paint, Transform::identity(), None);
+        target.draw_pixmap(left, top, source, &paint, Transform::identity(), mask);
     }
 }
 
@@ -735,16 +737,16 @@ mod tests {
         target.fill(tiny_skia::Color::WHITE);
         let mut source = Pixmap::new(2, 2).unwrap();
         source.fill(tiny_skia::Color::from_rgba8(255, 0, 0, 255));
-        draw(&mut target, source.as_ref(), true, 3, -1, 1.0, 0.0);
+        draw(&mut target, source.as_ref(), true, 3, -1, 1.0, 0.0, None);
         assert_eq!(rgba(&target, 3, 0), (255, 0, 0, 255));
         assert_eq!(rgba(&target, 2, 0), (255, 255, 255, 255));
         assert_eq!(rgba(&target, 3, 1), (255, 255, 255, 255));
         // Off the canvas entirely is a no-op.
-        draw(&mut target, source.as_ref(), true, 10, 10, 1.0, 0.0);
-        draw(&mut target, source.as_ref(), true, -5, 0, 1.0, 0.0);
+        draw(&mut target, source.as_ref(), true, 10, 10, 1.0, 0.0, None);
+        draw(&mut target, source.as_ref(), true, -5, 0, 1.0, 0.0, None);
 
         // Half opacity blends with what is underneath.
-        draw(&mut target, source.as_ref(), true, 0, 2, 0.5, 0.0);
+        draw(&mut target, source.as_ref(), true, 0, 2, 0.5, 0.0, None);
         let blended = rgba(&target, 0, 2);
         assert!(blended.1 > 100 && blended.1 < 155, "{:?}", blended);
 
@@ -753,7 +755,7 @@ mod tests {
         target.fill(tiny_skia::Color::WHITE);
         let mut source = Pixmap::new(20, 20).unwrap();
         source.fill(tiny_skia::Color::BLACK);
-        draw(&mut target, source.as_ref(), true, 0, 0, 1.0, 8.0);
+        draw(&mut target, source.as_ref(), true, 0, 0, 1.0, 8.0, None);
         assert!(rgba(&target, 0, 0).0 > 200);
         assert_eq!(rgba(&target, 10, 10), (0, 0, 0, 255));
     }

@@ -62,6 +62,10 @@ This document outlines the architectural milestones and engineering trajectory f
   - [x] Animated GIF/WebP/PNG frames with browser-style delay clamping, `ui.animation` playback helper and `image:resized`.
   - [x] `drawImage` options `frame`, `opacity`, `radius` and `fit` (`fill`, `contain`, `cover`) with cached smooth resampling.
   - [x] Pixel-count and decoded-memory limits.
+- [x] `@neyuki/ui` canvas and effects, CPU only:
+  - [x] `ui.canvas` off-screen surfaces with the full drawing API, drawable like an image, and `ui.path` with `fillPath`, `strokePath` and `getPixel`.
+  - [x] Rectangle and path clipping (`pushClip`, `pushClipPath`), group opacity (`pushOpacity`), linear/radial gradients and box shadows on fills.
+  - [x] Gaussian blur: `blurRegion` backdrop blur with rounded masks and `Image:blur`.
 - [ ] Tray icon with a menu whose items arrive as events.
 - [ ] Single-instance apps: a second launch signals and focuses the first.
 - [ ] Auto-update support.
