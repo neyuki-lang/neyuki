@@ -360,7 +360,6 @@ impl Clicks {
     }
 }
 
-
 /// What clipping and group opacity keep per drawing target. Clips are a
 /// stack of masks, each already intersected with the one below it, so the
 /// top one is all a draw call needs.
