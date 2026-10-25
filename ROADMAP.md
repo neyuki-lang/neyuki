@@ -67,3 +67,4 @@ This document outlines the architectural milestones and engineering trajectory f
   - [x] `ui.canvas` off-screen surfaces with the full drawing API, drawable like an image, and `ui.path` with `fillPath`, `strokePath` and `getPixel`.
   - [x] Rectangle and path clipping (`pushClip`, `pushClipPath`), group opacity (`pushOpacity`), linear/radial gradients and box shadows on fills.
   - [x] Gaussian blur: `blurRegion` backdrop blur with rounded masks and `Image:blur`.
+  - [x] CPU render performance: `present({ dirty })` partial present, `ui.run({ fps = "auto" })` idle throttling, `ui.stats()` frame timing and an opaque glyph fast path. A GPU backend (wgpu) is left out unless these prove too slow.
