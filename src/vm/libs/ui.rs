@@ -42,6 +42,7 @@ use winit::window::{Window, WindowId};
 
 use crate::vm::libs::args::array as new_table;
 use crate::vm::libs::task;
+use crate::vm::libs::webview;
 use crate::vm::machine::VM;
 use crate::vm::value::{NativeDef, StrRef, Value, VmTable};
 
@@ -144,7 +145,7 @@ const GLYPH_CACHE_LIMIT: usize = 4096;
 /// How many times `__ui_open` pumps the loop waiting for the window to be
 /// created. macOS needs one pump to launch the application and another to
 /// deliver `resumed`; everything else creates it on the first.
-const OPEN_ATTEMPTS: usize = 8;
+pub(crate) const OPEN_ATTEMPTS: usize = 8;
 
 /// An open window: the OS handle, the surface frames are blitted to, and the
 /// back buffer at physical size that the drawing natives paint into.
@@ -187,7 +188,7 @@ thread_local! {
     static NEXT_ID: Cell<u64> = const { Cell::new(1) };
 }
 
-fn next_id() -> u64 {
+pub(crate) fn next_id() -> u64 {
     NEXT_ID.with(|id| {
         let value = id.get();
         id.set(value + 1);
@@ -197,7 +198,7 @@ fn next_id() -> u64 {
 
 // ARGUMENTS ----------------------------------------------------------------
 
-fn string_arg(args: &[Value], index: usize, name: &str) -> Result<String, String> {
+pub(crate) fn string_arg(args: &[Value], index: usize, name: &str) -> Result<String, String> {
     match args.get(index) {
         Some(Value::String(value)) => Ok(value.to_string()),
         Some(value) => Err(format!(
@@ -209,7 +210,12 @@ fn string_arg(args: &[Value], index: usize, name: &str) -> Result<String, String
     }
 }
 
-fn bool_arg(args: &[Value], index: usize, name: &str, default: bool) -> Result<bool, String> {
+pub(crate) fn bool_arg(
+    args: &[Value],
+    index: usize,
+    name: &str,
+    default: bool,
+) -> Result<bool, String> {
     match args.get(index) {
         Some(Value::Bool(value)) => Ok(*value),
         None | Some(Value::Nil) => Ok(default),
@@ -221,7 +227,7 @@ fn bool_arg(args: &[Value], index: usize, name: &str, default: bool) -> Result<b
     }
 }
 
-fn float_arg(args: &[Value], index: usize, name: &str) -> Result<f64, String> {
+pub(crate) fn float_arg(args: &[Value], index: usize, name: &str) -> Result<f64, String> {
     let value = args.get(index).unwrap_or(&Value::Nil);
     if matches!(value, Value::Nil) {
         return Err(format!("{} must be provided", name));
@@ -246,7 +252,7 @@ fn optional_float_arg(
     }
 }
 
-fn integer_arg(args: &[Value], index: usize, name: &str) -> Result<u64, String> {
+pub(crate) fn integer_arg(args: &[Value], index: usize, name: &str) -> Result<u64, String> {
     let number = float_arg(args, index, name)?;
     if number < 0.0 || number.fract() != 0.0 {
         return Err(format!("{} must be a non-negative integer", name));
@@ -313,7 +319,7 @@ fn points_arg(args: &[Value], index: usize, name: &str) -> Result<Vec<(f32, f32)
         .collect())
 }
 
-fn record(fields: Vec<(&str, Value)>) -> Value {
+pub(crate) fn record(fields: Vec<(&str, Value)>) -> Value {
     let mut table = VmTable::new();
     for (name, value) in fields {
         table.fields.insert(StrRef::from(name), value);
@@ -321,11 +327,11 @@ fn record(fields: Vec<(&str, Value)>) -> Value {
     Value::Table(Rc::new(RefCell::new(table)))
 }
 
-fn integer(value: u64) -> Value {
+pub(crate) fn integer(value: u64) -> Value {
     Value::from_u64(value)
 }
 
-fn text(value: &str) -> Value {
+pub(crate) fn text(value: &str) -> Value {
     Value::str(value)
 }
 
@@ -333,7 +339,7 @@ fn text(value: &str) -> Value {
 
 /// Creates the event loop on first use and caches the outcome, so a machine
 /// without a display reports the same error from every native.
-fn with_event_loop<T>(body: impl FnOnce(&mut EventLoop<()>) -> T) -> Result<T, String> {
+pub(crate) fn with_event_loop<T>(body: impl FnOnce(&mut EventLoop<()>) -> T) -> Result<T, String> {
     EVENT_LOOP.with(|cell| {
         let mut slot = cell.borrow_mut();
         let entry = slot.get_or_insert_with(create_event_loop);
@@ -378,7 +384,7 @@ fn create_event_loop() -> Result<EventLoop<()>, String> {
 
 /// winit prefixes OS errors with the source location they were raised at
 /// ("os error at .../mod.rs:765: ..."), which means nothing to a script.
-fn tidy_os_error(message: &str) -> String {
+pub(crate) fn tidy_os_error(message: &str) -> String {
     match message.strip_prefix("os error at ") {
         Some(rest) => match rest.split_once(": ") {
             Some((_, detail)) => detail.to_string(),
@@ -389,7 +395,7 @@ fn tidy_os_error(message: &str) -> String {
 }
 
 /// Pumps the OS loop once, waiting up to `timeout` for the first event.
-fn pump(timeout: Duration) -> Result<(), String> {
+pub(crate) fn pump(timeout: Duration) -> Result<(), String> {
     with_event_loop(|event_loop| {
         event_loop.pump_app_events(Some(timeout), &mut App);
     })
@@ -400,13 +406,18 @@ struct App;
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         create_pending(event_loop);
+        webview::create_pending(event_loop);
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         create_pending(event_loop);
+        webview::create_pending(event_loop);
     }
 
     fn window_event(&mut self, _: &ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
+        if webview::window_event(window_id, &event) {
+            return;
+        }
         let Some(id) = WINDOW_IDS.with(|ids| ids.borrow().get(&window_id).copied()) else {
             return;
         };
@@ -1013,7 +1024,9 @@ fn builtin_poll(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         );
     }
     pump(timeout)?;
-    let events = EVENTS.with(|events| std::mem::take(&mut *events.borrow_mut()));
+    webview::pump_toolkit();
+    let mut events = EVENTS.with(|events| std::mem::take(&mut *events.borrow_mut()));
+    events.extend(webview::take_events());
     task::run_for(vm, TASK_BUDGET);
     Ok(vec![new_table(events)])
 }

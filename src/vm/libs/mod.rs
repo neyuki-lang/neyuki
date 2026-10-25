@@ -25,6 +25,7 @@ pub mod table;
 pub mod task;
 pub mod ui;
 pub mod utf8;
+pub mod webview;
 
 pub use bit::create_bit_lib;
 pub use buffer::create_buffer_lib;
@@ -54,6 +55,7 @@ pub fn register_natives(vm: &mut VM) {
         io::NATIVES,
         sql::NATIVES,
         ui::NATIVES,
+        webview::NATIVES,
     ] {
         for def in natives {
             vm.register_native(def);
