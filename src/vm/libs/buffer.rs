@@ -79,7 +79,7 @@ fn float_arg(args: &[Value], index: usize, name: &str) -> Result<f64, String> {
     crate::vm::libs::args::number_arg(args, index, name)
 }
 
-fn new_buffer(vm: &mut VM, data: Vec<u8>) -> Result<Vec<Value>, String> {
+pub(crate) fn new_buffer(vm: &mut VM, data: Vec<u8>) -> Result<Vec<Value>, String> {
     if vm.gc.should_collect() || vm.gc.sweeping {
         vm.gc_auto_step()?;
     }

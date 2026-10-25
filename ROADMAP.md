@@ -68,6 +68,7 @@ This document outlines the architectural milestones and engineering trajectory f
   - [x] Gaussian blur: `blurRegion` backdrop blur with rounded masks and `Image:blur`.
   - [x] CPU render performance: `present({ dirty })` partial present, `ui.run({ fps = "auto" })` idle throttling, `ui.stats()` frame timing and an opaque glyph fast path. A GPU backend (wgpu) is left out unless these prove too slow.
 - [x] Async I/O: `http.request`, `os.run` and `fs.read` suspend only the calling task and run on background threads; `ui.run` pumps the completions every frame so windows stay responsive.
+- [x] `@neyuki/net`: named pipes, Unix sockets, TCP sockets and a WebSocket client with reader threads and buffered reads that suspend only the calling task, plus `os.spawn` for child processes with streamed stdin, stdout and stderr.
 - [ ] Tray icon with a menu whose items arrive as events.
 - [ ] Single-instance apps: a second launch signals and focuses the first.
 - [ ] Auto-update support.

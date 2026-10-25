@@ -17,6 +17,7 @@ pub mod http;
 pub mod io;
 pub mod json;
 pub mod math;
+pub mod net;
 pub mod os;
 pub mod sql;
 pub mod string;
@@ -52,6 +53,7 @@ pub fn register_natives(vm: &mut VM) {
         hid::NATIVES,
         http::NATIVES,
         io::NATIVES,
+        net::NATIVES,
         sql::NATIVES,
         ui::NATIVES,
     ] {
