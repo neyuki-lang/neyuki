@@ -18,9 +18,23 @@ use crate::bytecode::deserialize;
 
 // Execute compiled bytecode buffer
 pub fn execute_bytecode(bytes: &[u8]) -> Result<Value, String> {
+    execute_bytecode_at(bytes, None)
+}
+
+fn execute_bytecode_at(bytes: &[u8], path: Option<&str>) -> Result<Value, String> {
     let proto = deserialize(bytes)?;
     let mut vm = VM::new();
+    vm.script_dir = path.and_then(script_dir);
     vm.execute_program(proto)
+}
+
+/// The directory `require` resolves modules against for the script at
+/// `path`: its parent, as written (inside an app bundle this is a path in
+/// the bundle, not on disk).
+fn script_dir(path: &str) -> Option<std::path::PathBuf> {
+    std::path::Path::new(path)
+        .parent()
+        .map(|dir| dir.to_path_buf())
 }
 
 pub fn run_file_with_options(path: &str, options: crate::compiler::Options) -> Result<(), String> {
@@ -36,12 +50,13 @@ pub fn run_bytes(
     options: crate::compiler::Options,
 ) -> Result<(), String> {
     if bytes.starts_with(crate::bytecode::MAGIC) {
-        return execute_bytecode(&bytes).map(|_| ());
+        return execute_bytecode_at(&bytes, Some(path)).map(|_| ());
     }
     let source = String::from_utf8(bytes)
         .map_err(|_| format!("failed to read {}: file is not valid UTF-8", path))?;
     let proto = crate::compiler::compile_program(&source, path, options)?;
     let mut vm = VM::new();
+    vm.script_dir = script_dir(path);
     vm.execute_program(proto)
         .map(|_| ())
         .map_err(|err| vm.describe_error(&err))

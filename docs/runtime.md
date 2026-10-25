@@ -55,7 +55,7 @@ The bytecode format changes between Neyuki versions. A `.nykb` written by anothe
 
 - the standard libraries by name: `require("json")`, also available as globals;
 - bundled modules by `@neyuki/` name: `require("@neyuki/http")`;
-- anything else as a file from the working directory: `name.nyk`, `name/init.nyk`, then the same under `modules/`, `packages/` and `neyuki_packages/` (where `neyuki pkg` keeps packages, entered through `init.nyk` or `main.nyk`).
+- anything else as a file from the entry script's directory, then the working directory: `name.nyk`, `name/init.nyk`, then the same under `modules/`, `packages/` and `neyuki_packages/` (where `neyuki pkg` keeps packages, entered through `init.nyk` or `main.nyk`). Every name for the same file (`ui/button`, `ui.button`, `ui/button.nyk`) loads it once.
 
 Paths in `require` may not contain `..` or be absolute.
 

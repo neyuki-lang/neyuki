@@ -1,0 +1,3 @@
+-- Shared state for tests/require_cache.nyk: every `require` of this file
+-- must return this one table.
+return { hits = 0 }

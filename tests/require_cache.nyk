@@ -1,0 +1,46 @@
+-- `require` runs each module file once per VM and returns the same value
+-- however the module is named, resolving names against this script's
+-- directory (tests/) even though the suite runs from the repository root.
+
+-- 1. Repeated and differently spelled requires share one instance
+local counter = require("fixtures/modules/counter")
+assert(require("fixtures/modules/counter") == counter, "same name, same table")
+assert(require("./fixtures/modules/counter") == counter, "./ prefix")
+assert(require("fixtures/modules/counter.nyk") == counter, ".nyk suffix")
+assert(require("fixtures.modules.counter") == counter, "dotted name")
+
+-- 2. A module required from another module gets the same instance, and
+-- the requiring module itself runs once
+local user = require("fixtures/modules/nested/user")
+assert(user.counter == counter, "nested require shares the instance")
+assert(require("fixtures/modules/nested/user") == user, "nested module cached")
+assert(counter.hits == 1, "nested module ran once")
+
+-- 3. The working directory is still searched after the script's directory,
+-- and finds the same file as the same module (when run from the repo root)
+local fs = require("@neyuki/fs")
+if fs.exists("tests/require_cache.nyk") then
+    assert(require("tests/fixtures/modules/counter") == counter, "cwd fallback")
+end
+
+-- 4. A module that fails to load is not cached as loaded
+local ok, err = try(require, "fixtures/modules/failing")
+assert(not ok, "first load raises")
+assert(tostring(err):find("first load fails"), "error comes from the module")
+local failing = require("fixtures/modules/failing")
+assert(failing.loads == 2, "second require runs the module again")
+assert(require("fixtures/modules/failing") == failing, "then it is cached")
+
+-- 5. A cycle sees the unfinished module as an empty table, and later
+-- requires return the finished one
+local a = require("fixtures/modules/cycle_a")
+assert(a.name == "a" and a.b ~= nil, "cycle completes")
+assert(a.b.nameAtLoad == nil, "fields are nil while the module loads")
+assert(a.b.partner() == a, "require after loading returns the module")
+assert(require("fixtures/modules/cycle_b") == a.b, "cycle member cached")
+
+-- 6. Unknown modules and path escapes still fail
+assert(not try(require, "fixtures/modules/missing"), "missing module")
+assert(not try(require, "../tests/require_cache"), "parent traversal")
+
+print("[pass] require cache checks complete")

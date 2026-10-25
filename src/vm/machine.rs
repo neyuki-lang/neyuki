@@ -180,6 +180,9 @@ pub struct VM {
     /// Modules already loaded by `require`, so each one runs once. The
     /// standard libraries are registered here up front.
     pub modules: HashMap<String, Value>,
+    /// The directory of the entry script, which `require` resolves module
+    /// files against before the working directory. `None` outside a script.
+    pub script_dir: Option<std::path::PathBuf>,
     /// The `string` library, which string values index into for methods.
     pub string_lib: Value,
     /// Every value the frame that just unwound to a `run_to_depth` boundary
@@ -225,6 +228,7 @@ impl VM {
             open_upvalues: Vec::new(),
             top: 0,
             modules: HashMap::new(),
+            script_dir: None,
             string_lib: Value::Nil,
             returned: Vec::new(),
             error_trace: None,
