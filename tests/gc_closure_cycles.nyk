@@ -1,0 +1,53 @@
+-- Closures that reach themselves through closed upvalues must not send the
+-- collector's marking into endless recursion (it overflowed the stack).
+
+-- A recursive local function that outlives its scope captures itself.
+local function makeWalker()
+    local function walk(n)
+        if n > 0 then return walk(n - 1) end
+        return "done"
+    end
+    return walk
+end
+
+-- Two closures that capture each other.
+local function makePair()
+    local isEven, isOdd = nil, nil
+    isEven = function(n) if n == 0 then return true end return isOdd(n - 1) end
+    isOdd = function(n) if n == 0 then return false end return isEven(n - 1) end
+    return isEven
+end
+
+-- A chain of closures, each capturing the previous one. (Kept short: freeing
+-- a chain still drops it recursively, and a debug build on a test thread's
+-- small stack overflows at a few thousand links.)
+local function makeChain(length)
+    local f = function() return 0 end
+    for i = 1, length do
+        local previous = f
+        f = function() return previous() + 1 end
+    end
+    return f
+end
+
+-- A table reached only through a self-capturing closure must stay alive.
+local function makeHolder()
+    local data = { value = 42 }
+    local function get(depth)
+        if depth > 0 then return get(depth - 1) end
+        return data.value
+    end
+    return get
+end
+
+local keep = { makeWalker(), makePair(), makeChain(300), makeHolder() }
+for i = 1, 50000 do
+    local garbage = { i }
+end
+collectgarbage("collect")
+collectgarbage("collect")
+
+assert(keep[1](10) == "done")
+assert(keep[2](10) == true)
+assert(keep[4](3) == 42)
+print("gc closure cycles ok")
