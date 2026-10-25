@@ -3,7 +3,7 @@
 //! `__sql_open` connects to a PostgreSQL server through the `postgres` crate
 //! or to a MySQL/MariaDB server through `mysql` and parks the connection here
 //! under an id; `__sql_query` and `__sql_execute` run statements on it and
-//! `__sql_close` drops it. Both drivers are synchronous and pure Rust, with
+//! `__sql_close` drops it. Both drivers are synchronous, with
 //! TLS through the platform's `native-tls` like `@neyuki/http`.
 //!
 //! Statements run through each server's prepared-statement protocol with

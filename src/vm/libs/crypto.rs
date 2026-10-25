@@ -1,6 +1,6 @@
 //! Native cryptography primitives backing `@neyuki/crypto`.
 //!
-//! Everything here is a thin bridge to the pure-Rust RustCrypto and dalek
+//! Everything here is a thin bridge to the RustCrypto and dalek
 //! crates. They are used instead of Neyuki implementations so that secret
 //! keys never leak through timing side channels and so that bulk encryption
 //! runs at native speed. Values cross the boundary as strings: digests,
