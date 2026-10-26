@@ -1,0 +1,7 @@
+-- Fails the first time it loads, then succeeds.
+local counter = require("fixtures/modules/counter")
+counter.failingLoads = (counter.failingLoads ?? 0) + 1
+if counter.failingLoads == 1 then
+    error("first load fails")
+end
+return { loads = counter.failingLoads }

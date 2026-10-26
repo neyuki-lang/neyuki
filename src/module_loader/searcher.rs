@@ -52,6 +52,11 @@ impl SearcherEngine {
     pub fn search(&self, module_name: &str, base_dir: Option<&Path>) -> Option<PathBuf> {
         // In Lua/Neyuki, dots in module names can represent directory separators: `foo.bar` -> `foo/bar`
         let normalized_slash = module_name.replace('.', "/");
+        // `./app/rail` would become `//app/rail`, a root path: leave paths
+        // like that to `PathEngine`.
+        if normalized_slash.starts_with('/') {
+            return None;
+        }
         let base = base_dir.unwrap_or_else(|| Path::new("."));
 
         for pattern in &self.patterns {

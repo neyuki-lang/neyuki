@@ -1,0 +1,4 @@
+-- Requires cycle_b, which requires this module back while it is loading.
+local a = { name = "a" }
+a.b = require("fixtures/modules/cycle_b")
+return a

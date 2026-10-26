@@ -320,6 +320,7 @@ assert(fs.info("__app_test__/data/greeting.txt").size == 21)
 assert(fs.info("__app_test__/data/greeting.txt").readonly)
 assert(#fs.list("__app_test__") == 2)
 assert(require("__app_test__/util").answer == 42)
+assert(require("__app_test__/util") == require("__app_test__.util"))
 local ok = try(fs.write, "__app_test__/data/greeting.txt", "changed")
 assert(not ok, "bundled files are read-only")
 ok = try(fs.remove, "__app_test__/util.nyk")
@@ -334,8 +335,16 @@ assert(not fs.exists("__app_test__/missing.txt"))
         script.as_bytes().to_vec(),
         crate::compiler::Options::RUN,
     );
+    // An entry script in a bundle folder finds modules next to it first,
+    // and still finds them from the bundle root.
+    let nested = crate::vm::run_bytes(
+        "__app_test__/entry.nyk",
+        br#"assert(require("util") == require("__app_test__/util"))"#.to_vec(),
+        crate::compiler::Options::RUN,
+    );
     super::install(None);
     result.unwrap();
+    nested.unwrap();
 
     let after = crate::vm::run_bytes(
         "bundle_test.nyk",

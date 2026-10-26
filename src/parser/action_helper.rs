@@ -8,17 +8,18 @@ pub enum PrecedenceLevel {
     None = 0,
     Or = 1,
     And = 2,
-    Comparison = 3,
-    BitwiseOr = 4,
-    BitwiseXor = 5,
-    BitwiseAnd = 6,
-    Shift = 7,
-    Concat = 8,
-    Term = 9,
-    Factor = 10,
-    Unary = 11,
-    Power = 12,
-    Call = 13,
+    Coalesce = 3,
+    Comparison = 4,
+    BitwiseOr = 5,
+    BitwiseXor = 6,
+    BitwiseAnd = 7,
+    Shift = 8,
+    Concat = 9,
+    Term = 10,
+    Factor = 11,
+    Unary = 12,
+    Power = 13,
+    Call = 14,
 }
 
 pub struct ActionHelper;
@@ -31,16 +32,16 @@ impl ActionHelper {
         let powers = match op {
             "or" => (1, 2),
             "and" => (3, 4),
-            "==" | "!=" | "~=" | "<" | "<=" | ">" | ">=" => (5, 6),
-            "|" => (7, 8),
-            "~" => (9, 10),
-            "&" => (11, 12),
-            "<<" | ">>" | "<<<" | ">>>" => (13, 14),
-            ".." => (16, 15), // Right-associative
-            "+" | "-" => (17, 18),
-            "*" | "/" | "//" | "%" => (19, 20),
-            "^" => (22, 21), // Right-associative
-            "??" => (23, 24),
+            "??" => (5, 6),
+            "==" | "!=" | "~=" | "<" | "<=" | ">" | ">=" => (7, 8),
+            "|" => (9, 10),
+            "~" => (11, 12),
+            "&" => (13, 14),
+            "<<" | ">>" | "<<<" | ">>>" => (15, 16),
+            ".." => (18, 17), // Right-associative
+            "+" | "-" => (19, 20),
+            "*" | "/" | "//" | "%" => (21, 22),
+            "^" => (24, 23), // Right-associative
             _ => return None,
         };
         Some(powers)
@@ -50,16 +51,18 @@ impl ActionHelper {
         let prec = match op {
             "or" => 1,
             "and" => 2,
-            "==" | "!=" | "~=" | "<" | "<=" | ">" | ">=" => 3,
-            "|" => 4,
-            "~" => 5,
-            "&" => 6,
-            "<<" | ">>" | "<<<" | ">>>" => 7,
-            ".." => 8,
-            "+" | "-" => 9,
-            "*" | "/" | "//" | "%" => 10,
-            "^" => 11,
-            "??" => 12,
+            // Between `and` and the comparisons (docs/spec.md, §3), so
+            // `a ?? b * c` defaults to `b * c`, not `(a ?? b) * c`.
+            "??" => 3,
+            "==" | "!=" | "~=" | "<" | "<=" | ">" | ">=" => 4,
+            "|" => 5,
+            "~" => 6,
+            "&" => 7,
+            "<<" | ">>" | "<<<" | ">>>" => 8,
+            ".." => 9,
+            "+" | "-" => 10,
+            "*" | "/" | "//" | "%" => 11,
+            "^" => 12,
             _ => return None,
         };
         Some(prec)
@@ -174,9 +177,13 @@ mod tests {
         assert!(mul_l > add_l);
         assert!(mul_r > add_r);
 
-        assert_eq!(ActionHelper::binary_precedence("+"), Some(9));
-        assert_eq!(ActionHelper::binary_precedence("*"), Some(10));
+        assert_eq!(ActionHelper::binary_precedence("+"), Some(10));
+        assert_eq!(ActionHelper::binary_precedence("*"), Some(11));
         assert_eq!(ActionHelper::binary_precedence("or"), Some(1));
+
+        let coalesce = ActionHelper::binary_precedence("??").unwrap();
+        assert!(coalesce > ActionHelper::binary_precedence("and").unwrap());
+        assert!(coalesce < ActionHelper::binary_precedence("==").unwrap());
     }
 
     #[test]

@@ -14,6 +14,29 @@ use std::rc::Rc;
 
 use crate::bytecode::proto::Proto;
 
+/// A module file found by `ModuleLoader::locate_module`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Located {
+    /// A normalized path inside the running app's bundle.
+    Bundled(String),
+    Disk(PathBuf),
+}
+
+impl Located {
+    /// The same key however `require` spelled the module (`app/rail`,
+    /// `./app/rail`, `app.rail`, `app/rail.nyk`), so each file runs once
+    /// per VM. The prefix keeps it apart from the standard library names.
+    pub fn cache_key(&self) -> String {
+        match self {
+            Located::Bundled(path) => format!("bundle:{}", path),
+            Located::Disk(path) => {
+                let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+                format!("file:{}", canonical.display())
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ModuleLoader {
     searcher: SearcherEngine,
@@ -57,10 +80,17 @@ impl ModuleLoader {
         &mut self.cache
     }
 
-    /// Resolves an external module path request using searchers or relative paths.
+    /// Resolves an external module path request using searchers or relative
+    /// paths: against the base directory first, then the working directory.
     pub fn resolve_module(&self, requested: &str) -> Result<PathBuf, String> {
         let base = self.base_dir.as_deref();
+        match self.resolve_from(requested, base) {
+            Err(_) if base.is_some() => self.resolve_from(requested, None),
+            found => found,
+        }
+    }
 
+    fn resolve_from(&self, requested: &str, base: Option<&Path>) -> Result<PathBuf, String> {
         // 1. Try searcher patterns first (e.g. ./?.nyk, ./modules/?.nyk)
         if let Some(found) = self.searcher.search(requested, base) {
             return Ok(found);
@@ -73,47 +103,74 @@ impl ModuleLoader {
         }
     }
 
+    /// Finds a module file: in the running app's bundle when it has the
+    /// module, otherwise on disk.
+    pub fn locate_module(&self, requested: &str) -> Result<Located, String> {
+        if let Some(path) = self.find_bundled_module(requested) {
+            return Ok(Located::Bundled(path));
+        }
+        self.resolve_module(requested).map(Located::Disk)
+    }
+
+    /// Reads a module file found by `locate_module`.
+    pub fn read_located(&self, located: &Located) -> Result<(PathBuf, Vec<u8>), String> {
+        match located {
+            Located::Bundled(path) => {
+                let read = crate::app::installed()
+                    .and_then(|bundle| bundle.read(path))
+                    .ok_or_else(|| format!("cannot find module '{}'", path))?;
+                read.map(|bytes| (PathBuf::from(path), bytes))
+                    .map_err(|e| format!("cannot read module '{}': {}", path, e))
+            }
+            Located::Disk(path) => {
+                let bytes = std::fs::read(path)
+                    .map_err(|e| format!("cannot read module '{}': {}", path.display(), e))?;
+                Ok((path.clone(), bytes))
+            }
+        }
+    }
+
     /// Resolves and reads module source or bytecode: from the running app's
     /// bundle when it has the module, otherwise from disk.
     pub fn read_module(&self, requested: &str) -> Result<(PathBuf, Vec<u8>), String> {
-        if let Some(found) = self.read_bundled_module(requested) {
-            return found;
-        }
-        let resolved = self.resolve_module(requested)?;
-        let bytes = std::fs::read(&resolved)
-            .map_err(|e| format!("cannot read module '{}': {}", resolved.display(), e))?;
-        Ok((resolved, bytes))
+        self.read_located(&self.locate_module(requested)?)
     }
 
     /// Looks a module up in the app bundle (see `crate::app`) under the same
-    /// names `resolve_module` tries on disk, in the same order.
-    fn read_bundled_module(&self, requested: &str) -> Option<Result<(PathBuf, Vec<u8>), String>> {
+    /// names `resolve_module` tries on disk, in the same order: under the
+    /// base directory first, then at the bundle root.
+    fn find_bundled_module(&self, requested: &str) -> Option<String> {
         let bundle = crate::app::installed()?;
         let dotted = requested.replace('.', "/");
-        let mut candidates: Vec<String> = self
+        let mut names: Vec<String> = self
             .searcher
             .patterns()
             .iter()
             .map(|pattern| pattern.replace('?', &dotted))
             .collect();
         if requested.ends_with(".nyk") || requested.ends_with(".nykb") {
-            candidates.push(requested.to_string());
+            names.push(requested.to_string());
         } else {
             for suffix in [".nyk", ".nykb", "/init.nyk", "/mod.nyk", "/index.nyk"] {
-                candidates.push(format!("{}{}", requested, suffix));
+                names.push(format!("{}{}", requested, suffix));
             }
         }
-        let path = candidates
+        let base = self
+            .base_dir
+            .as_deref()
+            .map(|dir| dir.to_string_lossy().replace('\\', "/"))
+            .filter(|dir| !dir.is_empty() && dir != ".");
+        let mut candidates: Vec<String> = Vec::new();
+        if let Some(base) = &base {
+            candidates.extend(names.iter().map(|name| format!("{}/{}", base, name)));
+        }
+        candidates.extend(names);
+        candidates
             .iter()
             .find_map(|candidate| match bundle.entry(candidate) {
                 Some(crate::app::Entry::File { .. }) => crate::app::bundle::normalize(candidate),
                 _ => None,
-            })?;
-        let read = bundle.read(&path)?;
-        Some(
-            read.map(|bytes| (PathBuf::from(&path), bytes))
-                .map_err(|e| format!("cannot read module '{}': {}", path, e)),
-        )
+            })
     }
 
     /// Compiles module bytes into a verified `Proto`.

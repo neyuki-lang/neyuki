@@ -1,0 +1,7 @@
+-- Loaded from cycle_a while cycle_a is still running.
+local a = require("fixtures/modules/cycle_a")
+local b = { nameAtLoad = a.name }
+function b.partner()
+    return require("fixtures/modules/cycle_a")
+end
+return b

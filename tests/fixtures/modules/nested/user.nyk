@@ -1,0 +1,5 @@
+-- Requires a sibling of its parent directory by the same name the entry
+-- script uses: module names resolve against the entry script's directory.
+local counter = require("fixtures/modules/counter")
+counter.hits = counter.hits + 1
+return { counter = counter }

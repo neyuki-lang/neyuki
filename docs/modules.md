@@ -50,7 +50,7 @@ When `require(path)` is invoked, the runtime resolves the target in the followin
    Paths starting with `@pkg/<package_name>` resolve against packages installed in the local `neyuki_packages/` directory or global cache configured via `NEYUKI_PATH`.
 
 4. **Relative and Filesystem Paths**:
-   Paths ending in `.nyk` or `.nykb`, or relative module identifiers (e.g., `./utils`, `components/parser`) resolve against the directory of the currently executing script.
+   Paths ending in `.nyk` or `.nykb`, or relative module identifiers (e.g., `./utils`, `components/parser`, `components.parser`) resolve against the directory of the entry script (the file passed to `neyuki run`, or the entry of a built app), whichever directory the process runs in. Modules requiring other modules use the same base, so `require("kit/input")` names the same file from the entry script and from `app/rail.nyk`. If nothing matches there, the working directory is searched next (inside a built app: the bundle root).
 
 ### 2.2 Security and Path Traversal Restrictions
 To ensure sandboxing integrity and prevent arbitrary filesystem escape, `require` rejects:
@@ -68,12 +68,12 @@ runtime error[E0200]: security error: path traversal forbidden in require: '../s
 ## 3. Caching and Lifecycle
 
 ### 3.1 Idempotent Execution
-Modules execute once per VM instance. The returned value is cached in `vm.modules[canonical_name]`. Subsequent calls to `require` with the same module specifier receive the cached instance.
+Modules execute once per VM instance. The returned value is cached in `vm.modules[canonical_name]`: for module files the canonical name is the resolved file's canonical path, so every spelling that reaches the same file (`app/rail`, `./app/rail`, `app/rail.nyk`, `app.rail`) receives the same cached instance. A module that raises an error while loading is not cached; the next `require` runs it again.
 
 ### 3.2 Circular Dependencies
 If module `A` requires module `B`, and module `B` requires module `A`:
-1. While `A` is executing, its entry in `vm.modules` is unresolved.
-2. If `B` immediately accesses fields on `A` during top-level load, `nil` is observed.
+1. While `A` is executing, its entry in `vm.modules` is unresolved: `require("A")` from `B` returns an empty placeholder table instead of running `A` again.
+2. If `B` immediately accesses fields on `A` during top-level load, `nil` is observed. Once `A` returns, `require("A")` returns its real value.
 3. Modules intended for mutual recursion must defer cross-module function calls until execution time inside function bodies rather than during top-level module initialization.
 
 ### 3.3 Dynamic Reloading

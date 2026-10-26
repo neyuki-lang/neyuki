@@ -356,14 +356,37 @@ pub fn builtin_require(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String
     }
 
     let mut loader = crate::module_loader::ModuleLoader::new();
-    if let Ok((resolved_path, bytes)) = loader.read_module(pkg) {
-        let proto = loader.compile_bytes(&resolved_path, &bytes, pkg)?;
-        // Run on top of the current frames: `execute` would reset the
-        // stack out from under whatever called `require`.
-        let val = vm.execute_module((*proto).clone())?;
-        return Ok(vec![val]);
+    if let Some(dir) = &vm.script_dir {
+        loader = loader.with_base_dir(dir.clone());
     }
-    Err(format!("cannot find module '{}'", pkg))
+    let located = loader
+        .locate_module(pkg)
+        .map_err(|_| format!("cannot find module '{}'", pkg))?;
+    let key = located.cache_key();
+    if let Some(cached) = vm.modules.get(&key).cloned() {
+        return Ok(vec![cached]);
+    }
+    let (resolved_path, bytes) = loader.read_located(&located)?;
+    let proto = loader.compile_bytes(&resolved_path, &bytes, pkg)?;
+    // While the module runs, a `require` cycle back into it gets an empty
+    // table instead of running it again (docs/modules.md, §3.2).
+    let pending = Value::Table(std::rc::Rc::new(std::cell::RefCell::new(
+        crate::vm::value::VmTable::new(),
+    )));
+    vm.modules.insert(key.clone(), pending);
+    // Run on top of the current frames: `execute` would reset the
+    // stack out from under whatever called `require`.
+    match vm.execute_module((*proto).clone()) {
+        Ok(val) => {
+            vm.modules.insert(key, val.clone());
+            Ok(vec![val])
+        }
+        Err(err) => {
+            // A failed load is not cached: the next `require` tries again.
+            vm.modules.remove(&key);
+            Err(err)
+        }
+    }
 }
 
 #[cfg(test)]

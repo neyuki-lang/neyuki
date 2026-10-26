@@ -1,0 +1,44 @@
+-- `??` sits between `and` and the comparisons (docs/spec.md, §3): every
+-- arithmetic, concatenation and comparison operator binds tighter.
+
+local a = 4
+local n = nil
+
+-- 1. Arithmetic, concatenation and comparison belong to the right side
+assert((a ?? 2 * 3) == 4, "?? vs * (parenthesized)")
+assert((n ?? 2 * 3) == 6, "nil ?? 2 * 3")
+assert((a ?? 1 + 1) == 4, "?? vs +")
+assert((n ?? 1 + 1) == 2, "nil ?? 1 + 1")
+assert((a ?? 1 == 4) == 4, "?? vs ==")
+assert((n ?? 1 == 1) == true, "nil ?? 1 == 1")
+assert((n ?? "x" .. "y") == "xy", "?? vs ..")
+assert(("s" ?? "x" .. "y") == "s", "non-nil ?? x .. y")
+assert(((a ?? 2) * 3) == 12, "explicit parentheses still group")
+
+-- 2. `and` and `or` bind looser than `??`
+assert((n ?? false or "r") == "r", "(n ?? false) or r")
+assert((n ?? 1 and 2) == 2, "(n ?? 1) and 2")
+assert((false and n ?? 1) == false, "false and (n ?? 1)")
+assert((n or n ?? 5) == 5, "n or (n ?? 5)")
+
+-- 3. Chains group to the left and pick the first non-nil value
+assert((n ?? n ?? 3) == 3, "n ?? n ?? 3")
+assert((n ?? 2 ?? 3) == 2, "n ?? 2 ?? 3")
+assert((a ?? n ?? 3) == 4, "a ?? n ?? 3")
+
+-- 4. The right side, operators included, still runs only for nil
+local calls = 0
+local function rhs(v)
+    calls = calls + 1
+    return v
+end
+calls = 0
+assert((a ?? rhs(1) + rhs(2)) == 4, "non-nil skips rhs expression")
+assert(calls == 0, "rhs not evaluated for non-nil left")
+assert((n ?? rhs(1) + rhs(2)) == 3, "nil evaluates the whole rhs")
+assert(calls == 2, "rhs evaluated once per operand")
+calls = 0
+assert((n ?? a ?? rhs(9) * 2) == 4, "chain stops at first non-nil")
+assert(calls == 0, "chain skips later operands")
+
+print("[pass] coalesce precedence checks complete")
