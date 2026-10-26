@@ -428,6 +428,20 @@ struct Canvas {
     pixmap: Pixmap,
     scale: f64,
     state: DrawState,
+    /// Whether every pixel is opaque, worked out when the canvas is drawn
+    /// and forgotten whenever it is drawn on. An opaque canvas is copied
+    /// instead of blended, which for a window-sized one is the difference
+    /// between a memcpy and compositing a million pixels.
+    opaque: Option<bool>,
+}
+
+impl Canvas {
+    fn is_opaque(&mut self) -> bool {
+        if self.opaque.is_none() {
+            self.opaque = Some(images::is_opaque(&self.pixmap));
+        }
+        self.opaque == Some(true)
+    }
 }
 
 /// What the drawing natives paint into, whether window or canvas.
@@ -1465,6 +1479,7 @@ fn with_target<T>(
         let canvas = canvases
             .get_mut(&id)
             .ok_or_else(|| "window is closed".to_string())?;
+        canvas.opaque = None;
         body(&mut Target {
             pixmap: &mut canvas.pixmap,
             scale: canvas.scale,
@@ -3436,8 +3451,8 @@ fn builtin_draw_image(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String
     }
     // A canvas is lifted out while it is drawn, so drawing it onto another
     // canvas does not borrow the table twice.
-    if let Some(canvas) = CANVASES.with(|canvases| canvases.borrow_mut().remove(&image)) {
-        let result = draw_canvas(id, &canvas, x, y, width, height, opacity, radius, fit);
+    if let Some(mut canvas) = CANVASES.with(|canvases| canvases.borrow_mut().remove(&image)) {
+        let result = draw_canvas(id, &mut canvas, x, y, width, height, opacity, radius, fit);
         CANVASES.with(|canvases| canvases.borrow_mut().insert(image, canvas));
         result?;
         return Ok(vec![]);
@@ -3528,6 +3543,7 @@ fn builtin_canvas(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
                 pixmap,
                 scale,
                 state: DrawState::default(),
+                opaque: None,
             },
         )
     });
@@ -3783,7 +3799,7 @@ fn builtin_get_pixel(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String>
 #[allow(clippy::too_many_arguments)]
 fn draw_canvas(
     id: u64,
-    canvas: &Canvas,
+    canvas: &mut Canvas,
     x: f32,
     y: f32,
     width: f32,
@@ -3809,6 +3825,7 @@ fn draw_canvas(
         },
     );
     let (src, dest) = images::place(pixel_w as f32, pixel_h as f32, target, fit);
+    let opaque = canvas.is_opaque();
     with_target(id, |dst| {
         let scale = dst.scale as f32;
         let (left, top, w, h) = images::snap((
@@ -3832,7 +3849,7 @@ fn draw_canvas(
         images::draw(
             dst.pixmap,
             source.as_ref(),
-            false,
+            opaque,
             left,
             top,
             opacity,
