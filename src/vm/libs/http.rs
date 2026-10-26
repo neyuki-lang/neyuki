@@ -278,9 +278,14 @@ fn agent() -> &'static ureq::Agent {
     static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
     AGENT.get_or_init(|| {
         // The crate is built with only the platform TLS backend (see
-        // Cargo.toml), so it must be selected explicitly.
+        // Cargo.toml), so it must be selected explicitly. Certificates are
+        // checked against the OS trust store: ureq's default, its bundled
+        // Mozilla roots handed to native-tls as the only trusted roots, made
+        // SChannel reject chains that end in a root it would itself trust
+        // ("unable to find any user-specified roots in the final cert chain").
         let tls = ureq::tls::TlsConfig::builder()
             .provider(ureq::tls::TlsProvider::NativeTls)
+            .root_certs(ureq::tls::RootCerts::PlatformVerifier)
             .build();
         ureq::config::Config::builder()
             .tls_config(tls)
