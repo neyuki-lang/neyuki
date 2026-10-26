@@ -41,6 +41,9 @@ fn box_radii(sigma: f32) -> [usize; 3] {
 /// One box blur of radius `r` over `lines` lines of `len` pixels, reading
 /// `src` and writing `dst`. Pixel `i` of line `n` starts at byte
 /// `n * line_stride + i * step`. Edges repeat their outermost pixel.
+///
+/// The four channels run together, and only the first and last `r + 1`
+/// pixels of a line need their reads clamped to it.
 fn box_lines(
     src: &[u8],
     dst: &mut [u8],
@@ -50,34 +53,43 @@ fn box_lines(
     step: usize,
     r: usize,
 ) {
-    let r = r as i32;
-    let window = 2 * r + 1;
-    let last = len as i32 - 1;
+    if len == 0 {
+        return;
+    }
+    let window = (2 * r + 1) as u32;
+    let half = window / 2;
+    let last = len - 1;
     for line in 0..lines {
         let base = line * line_stride;
-        for channel in 0..4 {
-            let at = |i: i32| src[base + i.clamp(0, last) as usize * step + channel] as i32;
-            let mut sum = at(0) * r;
-            for i in 0..=r {
-                sum += at(i);
+        let pixel = |i: usize| base + i * step;
+        let first = pixel(0);
+        let mut sum = [0u32; 4];
+        for (c, s) in sum.iter_mut().enumerate() {
+            *s = src[first + c] as u32 * (r as u32 + 1);
+        }
+        for i in 1..=r {
+            let at = pixel(i.min(last));
+            for (c, s) in sum.iter_mut().enumerate() {
+                *s += src[at + c] as u32;
             }
-            for i in 0..len as i32 {
-                dst[base + i as usize * step + channel] = ((sum + window / 2) / window) as u8;
-                sum += at(i + r + 1) - at(i - r);
+        }
+        for i in 0..len {
+            let out = pixel(i);
+            for (c, s) in sum.iter().enumerate() {
+                dst[out + c] = ((s + half) / window) as u8;
+            }
+            let add = pixel((i + r + 1).min(last));
+            let drop = pixel(i.saturating_sub(r));
+            for (c, s) in sum.iter_mut().enumerate() {
+                *s = *s + src[add + c] as u32 - src[drop + c] as u32;
             }
         }
     }
 }
 
-/// Blurs the pixmap in place with a gaussian of standard deviation `sigma`
-/// pixels. Three box blurs per axis keep the cost independent of the radius.
-pub(super) fn blur(pixmap: &mut Pixmap, sigma: f32) {
-    if sigma.is_nan() || sigma <= 0.3 {
-        return;
-    }
-    let sigma = sigma.min(MAX_SIGMA);
-    let (width, height) = (pixmap.width() as usize, pixmap.height() as usize);
-    let data = pixmap.data_mut();
+/// Blurs `data` (`width` x `height` premultiplied pixels) in place: three box
+/// blurs per axis, so the cost does not depend on the radius.
+fn blur_full(data: &mut [u8], width: usize, height: usize, sigma: f32) {
     let mut scratch = vec![0u8; data.len()];
     for r in box_radii(sigma) {
         if r == 0 {
@@ -85,6 +97,93 @@ pub(super) fn blur(pixmap: &mut Pixmap, sigma: f32) {
         }
         box_lines(data, &mut scratch, height, width, width * 4, 4, r);
         box_lines(&scratch, data, width, height, 4, width * 4, r);
+    }
+}
+
+/// The factor a blur of `sigma` pixels may shrink its input by first: wide
+/// blurs leave no detail a quarter- or eighth-size copy would lose.
+fn reduction(sigma: f32) -> usize {
+    if sigma >= 24.0 {
+        8
+    } else if sigma >= 12.0 {
+        4
+    } else if sigma >= 4.0 {
+        2
+    } else {
+        1
+    }
+}
+
+/// Blurs the pixmap in place with a gaussian of standard deviation `sigma`
+/// pixels. Three box blurs per axis keep the cost independent of the radius;
+/// wide blurs run on a reduced copy that is scaled back up with bilinear
+/// filtering, which costs a fraction and looks the same.
+pub(super) fn blur(pixmap: &mut Pixmap, sigma: f32) {
+    if sigma.is_nan() || sigma <= 0.3 {
+        return;
+    }
+    let sigma = sigma.min(MAX_SIGMA);
+    let (width, height) = (pixmap.width() as usize, pixmap.height() as usize);
+    let factor = reduction(sigma);
+    if factor == 1 || width < factor * 2 || height < factor * 2 {
+        blur_full(pixmap.data_mut(), width, height, sigma);
+        return;
+    }
+    let (sw, sh) = (width.div_ceil(factor), height.div_ceil(factor));
+    let data = pixmap.data_mut();
+    // Shrink: each small pixel averages the factor x factor block it covers.
+    let mut small = vec![0u8; sw * sh * 4];
+    for sy in 0..sh {
+        let (y0, y1) = (sy * factor, ((sy + 1) * factor).min(height));
+        for sx in 0..sw {
+            let (x0, x1) = (sx * factor, ((sx + 1) * factor).min(width));
+            let mut acc = [0u32; 4];
+            for y in y0..y1 {
+                let row = y * width * 4;
+                for x in x0..x1 {
+                    let at = row + x * 4;
+                    for (c, a) in acc.iter_mut().enumerate() {
+                        *a += data[at + c] as u32;
+                    }
+                }
+            }
+            let count = ((y1 - y0) * (x1 - x0)) as u32;
+            let out = (sy * sw + sx) * 4;
+            for (c, a) in acc.iter().enumerate() {
+                small[out + c] = ((a + count / 2) / count) as u8;
+            }
+        }
+    }
+    blur_full(&mut small, sw, sh, sigma / factor as f32);
+    // Grow back: bilinear between the centres of the small pixels.
+    let f = factor as f32;
+    for y in 0..height {
+        let fy = ((y as f32 + 0.5) / f - 0.5).clamp(0.0, (sh - 1) as f32);
+        let y0 = fy.floor() as usize;
+        let y1 = (y0 + 1).min(sh - 1);
+        let ty = fy - y0 as f32;
+        for x in 0..width {
+            let fx = ((x as f32 + 0.5) / f - 0.5).clamp(0.0, (sw - 1) as f32);
+            let x0 = fx.floor() as usize;
+            let x1 = (x0 + 1).min(sw - 1);
+            let tx = fx - x0 as f32;
+            let (a, b) = ((y0 * sw + x0) * 4, (y0 * sw + x1) * 4);
+            let (c, d) = ((y1 * sw + x0) * 4, (y1 * sw + x1) * 4);
+            let out = (y * width + x) * 4;
+            for k in 0..4 {
+                let top = small[a + k] as f32 + (small[b + k] as f32 - small[a + k] as f32) * tx;
+                let bottom = small[c + k] as f32 + (small[d + k] as f32 - small[c + k] as f32) * tx;
+                data[out + k] = (top + (bottom - top) * ty + 0.5) as u8;
+            }
+        }
+    }
+    // Rounding can leave a color channel a hair above its alpha, which is
+    // not a valid premultiplied pixel.
+    for pixel in data.chunks_exact_mut(4) {
+        let alpha = pixel[3];
+        for channel in &mut pixel[..3] {
+            *channel = (*channel).min(alpha);
+        }
     }
 }
 
@@ -185,6 +284,33 @@ mod tests {
         // No light is lost away from the edges.
         let total: u32 = dot.pixels().iter().map(|p| p.alpha() as u32).sum();
         assert!(total > 150 && total < 330, "{}", total);
+    }
+
+    #[test]
+    fn wide_blur_on_a_reduced_copy_matches_the_direct_one() {
+        // A white square on black, blurred directly and through the reduced
+        // copy: the two agree to within a few levels everywhere.
+        let mut direct = Pixmap::new(64, 64).unwrap();
+        direct.fill(tiny_skia::Color::BLACK);
+        for y in 24..40 {
+            for x in 24..40 {
+                direct.pixels_mut()[y * 64 + x] =
+                    PremultipliedColorU8::from_rgba(255, 255, 255, 255).unwrap();
+            }
+        }
+        let mut reduced = direct.clone();
+        let (w, h) = (64, 64);
+        blur_full(direct.data_mut(), w, h, 6.0);
+        blur(&mut reduced, 6.0);
+        let worst = direct
+            .pixels()
+            .iter()
+            .zip(reduced.pixels())
+            .map(|(a, b)| (a.red() as i32 - b.red() as i32).abs())
+            .max()
+            .unwrap();
+        assert!(worst <= 12, "differs by {}", worst);
+        assert!(reduced.pixels().iter().all(|p| p.red() <= p.alpha()));
     }
 
     #[test]

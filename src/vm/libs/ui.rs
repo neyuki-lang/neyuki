@@ -428,6 +428,20 @@ struct Canvas {
     pixmap: Pixmap,
     scale: f64,
     state: DrawState,
+    /// Whether every pixel is opaque, worked out when the canvas is drawn
+    /// and forgotten whenever it is drawn on. An opaque canvas is copied
+    /// instead of blended, which for a window-sized one is the difference
+    /// between a memcpy and compositing a million pixels.
+    opaque: Option<bool>,
+}
+
+impl Canvas {
+    fn is_opaque(&mut self) -> bool {
+        if self.opaque.is_none() {
+            self.opaque = Some(images::is_opaque(&self.pixmap));
+        }
+        self.opaque == Some(true)
+    }
 }
 
 /// What the drawing natives paint into, whether window or canvas.
@@ -1465,6 +1479,7 @@ fn with_target<T>(
         let canvas = canvases
             .get_mut(&id)
             .ok_or_else(|| "window is closed".to_string())?;
+        canvas.opaque = None;
         body(&mut Target {
             pixmap: &mut canvas.pixmap,
             scale: canvas.scale,
@@ -1928,13 +1943,16 @@ fn pop_opacity(target: &mut Target) -> Result<(), String> {
         return Ok(());
     };
     let layer = std::mem::replace(target.pixmap, group.saved);
-    let paint = PixmapPaint {
-        opacity: group.opacity,
-        ..PixmapPaint::default()
-    };
-    target
-        .pixmap
-        .draw_pixmap(0, 0, layer.as_ref(), &paint, Transform::identity(), None);
+    // Mostly transparent, so the compositor's skip of empty pixels pays off.
+    images::composite(
+        target.pixmap,
+        layer.as_ref(),
+        0,
+        0,
+        group.opacity,
+        None,
+        None,
+    );
     Ok(())
 }
 
@@ -3058,11 +3076,70 @@ fn builtin_fill_rect(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String>
     let shadow = numbers_arg(args, 8, "shadow")?;
     with_target(id, |target| {
         if let Some(path) = rounded_rect(x, y, w, h, radius) {
+            if gradient.is_none()
+                && fill_aligned(target, x, y, w, h, radius, color, shadow.as_deref(), &path)?
+            {
+                return Ok(());
+            }
             fill_shape(target, &path, color, gradient.as_deref(), shadow.as_deref())?;
         }
         Ok(())
     })?;
     Ok(vec![])
+}
+
+/// A flat-colored rectangle whose edges land on whole pixels is filled by
+/// `images::fill_solid` (rounded corners from a cached mask) instead of the
+/// path rasterizer, which is several times slower for the cards, panels and
+/// highlights a UI fills every frame. Returns false (nothing drawn) when the
+/// edges fall between pixels, which need the rasterizer's anti-aliasing.
+#[allow(clippy::too_many_arguments)]
+fn fill_aligned(
+    target: &mut Target,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+    color: (u8, u8, u8, u8),
+    shadow: Option<&[f64]>,
+    path: &Path,
+) -> Result<bool, String> {
+    let scale = target.scale as f32;
+    let edges = [x * scale, y * scale, (x + w) * scale, (y + h) * scale];
+    if edges.iter().any(|e| (e - e.round()).abs() > 0.01) {
+        return Ok(false);
+    }
+    let (left, top) = (edges[0].round() as i32, edges[1].round() as i32);
+    let (right, bottom) = (edges[2].round() as i32, edges[3].round() as i32);
+    if right <= left || bottom <= top {
+        return Ok(true);
+    }
+    let (width, height) = ((right - left) as u32, (bottom - top) as u32);
+    let shape = if radius > 0.0 {
+        match images::rounded_mask(width, height, radius * scale) {
+            Some(mask) => Some(mask),
+            None => return Ok(false),
+        }
+    } else {
+        None
+    };
+    if let Some(shadow) = shadow {
+        draw_shadow(target, path, shadow)?;
+    }
+    let (r, g, b, a) = color;
+    let premultiply = |c: u8| ((c as u32 * a as u32 + 127) / 255) as u8;
+    images::fill_solid(
+        target.pixmap,
+        [premultiply(r), premultiply(g), premultiply(b), a],
+        left,
+        top,
+        width,
+        height,
+        shape.as_deref(),
+        target.state.clips.last(),
+    );
+    Ok(true)
 }
 
 /// `__ui_stroke_rect(window, x, y, width, height, color, radius?, lineWidth?)`.
@@ -3436,8 +3513,8 @@ fn builtin_draw_image(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String
     }
     // A canvas is lifted out while it is drawn, so drawing it onto another
     // canvas does not borrow the table twice.
-    if let Some(canvas) = CANVASES.with(|canvases| canvases.borrow_mut().remove(&image)) {
-        let result = draw_canvas(id, &canvas, x, y, width, height, opacity, radius, fit);
+    if let Some(mut canvas) = CANVASES.with(|canvases| canvases.borrow_mut().remove(&image)) {
+        let result = draw_canvas(id, &mut canvas, x, y, width, height, opacity, radius, fit);
         CANVASES.with(|canvases| canvases.borrow_mut().insert(image, canvas));
         result?;
         return Ok(vec![]);
@@ -3528,6 +3605,7 @@ fn builtin_canvas(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
                 pixmap,
                 scale,
                 state: DrawState::default(),
+                opaque: None,
             },
         )
     });
@@ -3783,7 +3861,7 @@ fn builtin_get_pixel(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String>
 #[allow(clippy::too_many_arguments)]
 fn draw_canvas(
     id: u64,
-    canvas: &Canvas,
+    canvas: &mut Canvas,
     x: f32,
     y: f32,
     width: f32,
@@ -3809,6 +3887,7 @@ fn draw_canvas(
         },
     );
     let (src, dest) = images::place(pixel_w as f32, pixel_h as f32, target, fit);
+    let opaque = canvas.is_opaque();
     with_target(id, |dst| {
         let scale = dst.scale as f32;
         let (left, top, w, h) = images::snap((
@@ -3832,7 +3911,7 @@ fn draw_canvas(
         images::draw(
             dst.pixmap,
             source.as_ref(),
-            false,
+            opaque,
             left,
             top,
             opacity,
