@@ -75,8 +75,8 @@ fn box_lines(
         }
         for i in 0..len {
             let out = pixel(i);
-            for c in 0..4 {
-                dst[out + c] = ((sum[c] + half) / window) as u8;
+            for (c, s) in sum.iter().enumerate() {
+                dst[out + c] = ((s + half) / window) as u8;
             }
             let add = pixel((i + r + 1).min(last));
             let drop = pixel(i.saturating_sub(r));
@@ -149,8 +149,8 @@ pub(super) fn blur(pixmap: &mut Pixmap, sigma: f32) {
             }
             let count = ((y1 - y0) * (x1 - x0)) as u32;
             let out = (sy * sw + sx) * 4;
-            for c in 0..4 {
-                small[out + c] = ((acc[c] + count / 2) / count) as u8;
+            for (c, a) in acc.iter().enumerate() {
+                small[out + c] = ((a + count / 2) / count) as u8;
             }
         }
     }

@@ -519,40 +519,46 @@ pub(super) fn composite(
         .filter(|m| m.width() as i64 == tw && m.height() as i64 == th)
         .map(|m| m.data());
     let dst = target.data_mut();
-    for y in y0..y1 {
-        let sy = y - top as i64;
-        for x in x0..x1 {
-            let sx = x - left as i64;
-            let si = (sy * sw + sx) as usize;
-            let mut cover = alpha;
-            if let Some(shape) = shape {
-                cover = scale255(cover, shape[si] as u32);
+    let (sw, tw) = (sw as usize, tw as usize);
+    let (sx0, sx1) = ((x0 - left as i64) as usize, (x1 - left as i64) as usize);
+    let (x0, x1) = (x0 as usize, x1 as usize);
+    for y in y0 as usize..y1 as usize {
+        let sy = (y as i64 - top as i64) as usize;
+        let srow = &src[(sy * sw + sx0) * 4..(sy * sw + sx1) * 4];
+        let drow = &mut dst[(y * tw + x0) * 4..(y * tw + x1) * 4];
+        let shape_row = shape.map(|m| &m[sy * sw + sx0..sy * sw + sx1]);
+        let clip_row = clip.map(|m| &m[y * tw + x0..y * tw + x1]);
+        for (i, (d, s)) in drow
+            .chunks_exact_mut(4)
+            .zip(srow.chunks_exact(4))
+            .enumerate()
+        {
+            let sa = s[3] as u32;
+            if sa == 0 {
+                continue;
             }
-            let di = (y * tw + x) as usize;
-            if let Some(clip) = clip {
-                cover = scale255(cover, clip[di] as u32);
+            let mut cover = alpha;
+            if let Some(row) = shape_row {
+                cover = scale255(cover, row[i] as u32);
+            }
+            if let Some(row) = clip_row {
+                cover = scale255(cover, row[i] as u32);
             }
             if cover == 0 {
                 continue;
             }
-            let (si, di) = (si * 4, di * 4);
-            let sa = src[si + 3] as u32;
-            if sa == 0 {
-                continue;
-            }
             if cover == 255 && sa == 255 {
-                dst[di..di + 4].copy_from_slice(&src[si..si + 4]);
+                d.copy_from_slice(s);
                 continue;
             }
-            let a = scale255(sa, cover);
-            let keep = 255 - a;
-            for c in 0..4 {
-                let s = if cover == 255 {
-                    src[si + c] as u32
+            let keep = 255 - scale255(sa, cover);
+            for (dc, &sc) in d.iter_mut().zip(s) {
+                let v = if cover == 255 {
+                    sc as u32
                 } else {
-                    scale255(src[si + c] as u32, cover)
+                    scale255(sc as u32, cover)
                 };
-                dst[di + c] = (s + scale255(dst[di + c] as u32, keep)).min(255) as u8;
+                *dc = (v + scale255(*dc as u32, keep)).min(255) as u8;
             }
         }
     }
@@ -590,33 +596,53 @@ pub(super) fn fill_solid(
         color[2] as u32,
         color[3] as u32,
     ];
-    for y in y0..y1 {
-        for x in x0..x1 {
-            let di = (y * tw + x) as usize;
-            let mut cover = 255;
-            if let Some(shape) = shape {
-                cover = shape[((y - top as i64) * w + (x - left as i64)) as usize] as u32;
+    let (w, tw) = (w as usize, tw as usize);
+    let (sx0, sx1) = ((x0 - left as i64) as usize, (x1 - left as i64) as usize);
+    let (x0, x1) = (x0 as usize, x1 as usize);
+    // Without a shape or clip every pixel gets the same blend.
+    let keep_all = 255 - full[3];
+    for y in y0 as usize..y1 as usize {
+        let sy = (y as i64 - top as i64) as usize;
+        let drow = &mut dst[(y * tw + x0) * 4..(y * tw + x1) * 4];
+        let shape_row = shape.map(|m| &m[sy * w + sx0..sy * w + sx1]);
+        let clip_row = clip.map(|m| &m[y * tw + x0..y * tw + x1]);
+        if shape_row.is_none() && clip_row.is_none() {
+            if full[3] == 255 {
+                for d in drow.chunks_exact_mut(4) {
+                    d.copy_from_slice(&color);
+                }
+            } else {
+                for d in drow.chunks_exact_mut(4) {
+                    for (dc, &fc) in d.iter_mut().zip(&full) {
+                        *dc = (fc + scale255(*dc as u32, keep_all)).min(255) as u8;
+                    }
+                }
             }
-            if let Some(clip) = clip {
-                cover = scale255(cover, clip[di] as u32);
+            continue;
+        }
+        for (i, d) in drow.chunks_exact_mut(4).enumerate() {
+            let mut cover = 255;
+            if let Some(row) = shape_row {
+                cover = row[i] as u32;
+            }
+            if let Some(row) = clip_row {
+                cover = scale255(cover, row[i] as u32);
             }
             if cover == 0 {
                 continue;
             }
-            let di = di * 4;
             if cover == 255 && full[3] == 255 {
-                dst[di..di + 4].copy_from_slice(&color);
+                d.copy_from_slice(&color);
                 continue;
             }
-            let a = scale255(full[3], cover);
-            let keep = 255 - a;
-            for c in 0..4 {
-                let s = if cover == 255 {
-                    full[c]
+            let keep = 255 - scale255(full[3], cover);
+            for (dc, &fc) in d.iter_mut().zip(&full) {
+                let v = if cover == 255 {
+                    fc
                 } else {
-                    scale255(full[c], cover)
+                    scale255(fc, cover)
                 };
-                dst[di + c] = (s + scale255(dst[di + c] as u32, keep)).min(255) as u8;
+                *dc = (v + scale255(*dc as u32, keep)).min(255) as u8;
             }
         }
     }
