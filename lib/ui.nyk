@@ -57,37 +57,58 @@ function checkChannel(value: any, name: string): number
     return math.floor(value + 0.5)
 end
 
+-- Parses a "#rgb", "#rgba", "#rrggbb" or "#rrggbbaa" string.
+function packColorString(color: string, name: string): number
+    if (string.sub(color, 1, 1) != "#") then
+        error(name .. " must be a #rgb, #rrggbb or #rrggbbaa string")
+    end
+    local hex = string.sub(color, 2)
+    local n = #hex
+    if (n == 3 or n == 4) then
+        local expanded = ""
+        for i = 1, n do
+            local digit = string.sub(hex, i, i)
+            expanded = expanded .. digit .. digit
+        end
+        hex = expanded
+        n = #hex
+    end
+    if (n != 6 and n != 8) then
+        error(name .. " must be a #rgb, #rrggbb or #rrggbbaa string")
+    end
+    local value = tonumber(hex, 16)
+    if (value == nil) then
+        error(name .. " must be a #rgb, #rrggbb or #rrggbbaa string")
+    end
+    if (n == 6) then value = value * 256 + 255 end
+    return value
+end
+
+-- Color strings already packed, so a "#rrggbb" drawn every frame is parsed
+-- once. Bounded: a script that makes a new string per frame (say, from
+-- string.format) starts it over now and then.
+local packedStrings = {}
+local packedCount = 0
+
 -- Turns a color into the 0xRRGGBBAA integer the natives take.
 function packColor(color: any, name: string): number
+    if (type(color) == "string") then
+        local packed = packedStrings[color]
+        if (packed != nil) then return packed end
+        packed = packColorString(color, name)
+        if (packedCount >= 1024) then
+            packedStrings = {}
+            packedCount = 0
+        end
+        packedStrings[color] = packed
+        packedCount += 1
+        return packed
+    end
     if (type(color) == "number") then
         if (color < 0 or color > 4294967295 or color != math.floor(color)) then
             error(name .. " must be a packed 0xRRGGBBAA integer")
         end
         return color
-    elseif (type(color) == "string") then
-        if (string.sub(color, 1, 1) != "#") then
-            error(name .. " must be a #rgb, #rrggbb or #rrggbbaa string")
-        end
-        local hex = string.sub(color, 2)
-        local n = #hex
-        if (n == 3 or n == 4) then
-            local expanded = ""
-            for i = 1, n do
-                local digit = string.sub(hex, i, i)
-                expanded = expanded .. digit .. digit
-            end
-            hex = expanded
-            n = #hex
-        end
-        if (n != 6 and n != 8) then
-            error(name .. " must be a #rgb, #rrggbb or #rrggbbaa string")
-        end
-        local value = tonumber(hex, 16)
-        if (value == nil) then
-            error(name .. " must be a #rgb, #rrggbb or #rrggbbaa string")
-        end
-        if (n == 6) then value = value * 256 + 255 end
-        return value
     elseif (type(color) == "table") then
         local r = checkChannel(color.r ?? color[1], name .. ".r")
         local g = checkChannel(color.g ?? color[2], name .. ".g")
@@ -283,10 +304,13 @@ end
 local windows = {}
 local openCount = 0
 
+-- Stands in for omitted options, so drawing without any allocates nothing.
+local NO_OPTIONS = table.freeze({})
+
 -- Reads the shared stroke/fill options of the shape methods.
 function shapeOptions(options: ShapeOptions?): (boolean, number, number)
+    if (options == nil) then return true, 1, 0 end
     checkOptionalTable(options, "options")
-    options = options ?? {}
     checkOptionalBoolean(options.fill, "fill")
     checkOptionalNumber(options.width, "width")
     checkOptionalNumber(options.radius, "radius")
@@ -295,40 +319,27 @@ function shapeOptions(options: ShapeOptions?): (boolean, number, number)
     return options.fill ?? true, options.width ?? 1, options.radius ?? 0
 end
 
-local overflows = { clip = true, ellipsis = true, wrap = true }
-local alignments = { left = true, center = true, right = true }
-
 -- Reads the options `window:text` and `ui.measureText` share, in the order
 -- the natives take them after the text: size, color, font, fallback,
--- maxWidth, overflow, align, lineHeight, letterSpacing.
-function textOptions(options: TextOptions?): (number, number, number?, {number}?, number?, string?, string?, number?, number?)
+-- maxWidth, overflow, align, lineHeight, letterSpacing. Only what the
+-- natives cannot check is checked here (opacity, fonts); they check the
+-- rest with the same messages.
+function textOptions(options: TextOptions?): (number, any, number?, {number}?, number?, string?, string?, number?, number?)
+    if (options == nil) then return 16, 0x000000FF, nil, nil, nil, nil, nil, nil, nil end
     checkOptionalTable(options, "options")
-    options = options ?? {}
-    checkOptionalNumber(options.size, "size")
-    if (options.size != nil and options.size <= 0) then error("size must be positive") end
-    local color = packColor(options.color ?? "#000000", "color")
-    checkOptionalNumber(options.opacity, "opacity")
+    local color = options.color ?? 0x000000FF
     if (options.opacity != nil) then
+        checkNumber(options.opacity, "opacity")
         if (options.opacity < 0 or options.opacity > 1) then error("opacity must be from 0 to 1") end
+        color = packColor(color, "color")
         local alpha = color % 256
         color = color - alpha + math.floor(alpha * options.opacity + 0.5)
     end
+    local font = nil
+    if (options.font != nil) then font = fontId(options.font, "font") end
     local fallback = nil
     if (options.fallback != nil) then fallback = fontIds(options.fallback, "fallback") end
-    checkOptionalNumber(options.maxWidth, "maxWidth")
-    if (options.maxWidth != nil and options.maxWidth <= 0) then error("maxWidth must be positive") end
-    checkOptionalString(options.overflow, "overflow")
-    if (options.overflow != nil and overflows[options.overflow] == nil) then
-        error("overflow must be \"clip\", \"ellipsis\" or \"wrap\"")
-    end
-    checkOptionalString(options.align, "align")
-    if (options.align != nil and alignments[options.align] == nil) then
-        error("align must be \"left\", \"center\" or \"right\"")
-    end
-    checkOptionalNumber(options.lineHeight, "lineHeight")
-    if (options.lineHeight != nil and options.lineHeight <= 0) then error("lineHeight must be positive") end
-    checkOptionalNumber(options.letterSpacing, "letterSpacing")
-    return options.size ?? 16, color, fontId(options.font, "font"), fallback, options.maxWidth,
+    return options.size ?? 16, color, font, fallback, options.maxWidth,
         options.overflow, options.align, options.lineHeight, options.letterSpacing
 end
 
@@ -538,60 +549,83 @@ function ui.path(): Path
 end
 
 -- Defines the drawing methods shared by windows and canvases on `target`,
--- which paints into native surface `id`. `ensureOpen` raises once the
--- surface is gone; `clearColor` is what `clear()` paints without a color.
-function addDrawing(target: any, id: number, ensureOpen: any, clearColor: any)
+-- which paints into native surface `id`. `life.gone` turns true once the
+-- surface is gone, and drawing then raises `life.message`; `clearColor` is
+-- what `clear()` paints without a color.
+--
+-- These run hundreds of times a frame, so they check only what the natives
+-- do not: the natives check every number, color, string and range they
+-- take, with the same messages. Colors go to the natives as given (they
+-- read every form `ui.color` does), and omitted options cost nothing.
+function addDrawing(target: any, id: number, life: {any}, clearColor: any)
+    local function ensureOpen()
+        if (life.gone) then error(life.message) end
+    end
+
     function target.clear(self: Window, color: any): ()
-        ensureOpen()
-        __ui_clear(id, packColor(color ?? clearColor, "color"))
+        if (life.gone) then error(life.message) end
+        __ui_clear(id, color ?? clearColor)
     end
 
     -- `options.radius` rounds the corners; `options.gradient` and
     -- `options.shadow` (see the reference) replace the flat color with a
     -- gradient and add a drop shadow.
     function target.fillRect(self: Window, x: number, y: number, w: number, h: number, color: any, options: ShapeOptions?): ()
-        ensureOpen()
-        checkNumber(x, "x")
-        checkNumber(y, "y")
-        checkNumber(w, "width")
-        checkNumber(h, "height")
-        local _, _, radius = shapeOptions(options)
-        local gradient, shadow = fillEffects(options, x, y, w, h)
-        __ui_fill_rect(id, x, y, w, h, packColor(color, "color"), radius, gradient, shadow)
+        if (life.gone) then error(life.message) end
+        if (options == nil) then
+            __ui_fill_rect(id, x, y, w, h, color)
+            return
+        end
+        checkOptionalTable(options, "options")
+        local gradient, shadow = nil, nil
+        if (options.gradient != nil or options.shadow != nil) then
+            checkNumber(x, "x")
+            checkNumber(y, "y")
+            checkNumber(w, "width")
+            checkNumber(h, "height")
+            gradient, shadow = fillEffects(options, x, y, w, h)
+        end
+        __ui_fill_rect(id, x, y, w, h, color, options.radius, gradient, shadow)
     end
 
     -- `options.width` is the line width, `options.radius` rounds the corners.
     function target.strokeRect(self: Window, x: number, y: number, w: number, h: number, color: any, options: ShapeOptions?): ()
-        ensureOpen()
-        checkNumber(x, "x")
-        checkNumber(y, "y")
-        checkNumber(w, "width")
-        checkNumber(h, "height")
-        local _, lineWidth, radius = shapeOptions(options)
-        __ui_stroke_rect(id, x, y, w, h, packColor(color, "color"), radius, lineWidth)
+        if (life.gone) then error(life.message) end
+        if (options == nil) then
+            __ui_stroke_rect(id, x, y, w, h, color)
+            return
+        end
+        checkOptionalTable(options, "options")
+        __ui_stroke_rect(id, x, y, w, h, color, options.radius, options.width)
     end
 
     function target.line(self: Window, x1: number, y1: number, x2: number, y2: number, color: any, options: ShapeOptions?): ()
-        ensureOpen()
-        checkNumber(x1, "x1")
-        checkNumber(y1, "y1")
-        checkNumber(x2, "x2")
-        checkNumber(y2, "y2")
-        local _, lineWidth = shapeOptions(options)
-        __ui_line(id, x1, y1, x2, y2, packColor(color, "color"), lineWidth)
+        if (life.gone) then error(life.message) end
+        if (options == nil) then
+            __ui_line(id, x1, y1, x2, y2, color)
+            return
+        end
+        checkOptionalTable(options, "options")
+        __ui_line(id, x1, y1, x2, y2, color, options.width)
     end
 
     -- Filled unless `options.fill` is false, in which case `options.width`
     -- is the outline's line width.
     function target.circle(self: Window, cx: number, cy: number, radius: number, color: any, options: ShapeOptions?): ()
-        ensureOpen()
-        checkNumber(cx, "x")
-        checkNumber(cy, "y")
-        checkNumber(radius, "radius")
-        if (radius < 0) then error("radius must be non-negative") end
-        local fill, lineWidth = shapeOptions(options)
-        local gradient, shadow = fillEffects(options, cx - radius, cy - radius, radius * 2, radius * 2)
-        __ui_circle(id, cx, cy, radius, packColor(color, "color"), fill, lineWidth, gradient, shadow)
+        if (life.gone) then error(life.message) end
+        if (options == nil) then
+            __ui_circle(id, cx, cy, radius, color, true)
+            return
+        end
+        checkOptionalTable(options, "options")
+        local gradient, shadow = nil, nil
+        if (options.gradient != nil or options.shadow != nil) then
+            checkNumber(cx, "x")
+            checkNumber(cy, "y")
+            checkNumber(radius, "radius")
+            gradient, shadow = fillEffects(options, cx - radius, cy - radius, radius * 2, radius * 2)
+        end
+        __ui_circle(id, cx, cy, radius, color, options.fill ?? true, options.width, gradient, shadow)
     end
 
     -- `points` is a flat { x1, y1, x2, y2, ... } list of at least two
@@ -601,15 +635,18 @@ function addDrawing(target: any, id: number, ensureOpen: any, clearColor: any)
         if (type(points) != "table") then error("points must be a table") end
         if (#points < 4) then error("points must hold at least two points") end
         local fill, lineWidth = shapeOptions(options)
-        local minX, minY, maxX, maxY = math.huge, math.huge, -math.huge, -math.huge
-        for i = 1, #points - 1, 2 do
-            minX = math.min(minX, points[i])
-            maxX = math.max(maxX, points[i])
-            minY = math.min(minY, points[i + 1])
-            maxY = math.max(maxY, points[i + 1])
+        local gradient, shadow = nil, nil
+        if (options != nil and (options.gradient != nil or options.shadow != nil)) then
+            local minX, minY, maxX, maxY = math.huge, math.huge, -math.huge, -math.huge
+            for i = 1, #points - 1, 2 do
+                minX = math.min(minX, points[i])
+                maxX = math.max(maxX, points[i])
+                minY = math.min(minY, points[i + 1])
+                maxY = math.max(maxY, points[i + 1])
+            end
+            gradient, shadow = fillEffects(options, minX, minY, maxX - minX, maxY - minY)
         end
-        local gradient, shadow = fillEffects(options, minX, minY, maxX - minX, maxY - minY)
-        __ui_polygon(id, points, packColor(color, "color"), fill, lineWidth, gradient, shadow)
+        __ui_polygon(id, points, color, fill, lineWidth, gradient, shadow)
     end
 
     -- Draws `s` with the top-left corner of its first line box at (x, y);
@@ -622,10 +659,7 @@ function addDrawing(target: any, id: number, ensureOpen: any, clearColor: any)
     -- `maxWidth`, centered and right-aligned text is centered on or ends at
     -- x. Returns the width and height drawn, as ui.measureText does.
     function target.text(self: Window, x: number, y: number, s: string, options: TextOptions?): (number, number)
-        ensureOpen()
-        checkNumber(x, "x")
-        checkNumber(y, "y")
-        checkString(s, "text")
+        if (life.gone) then error(life.message) end
         local size, color, font, fallback, maxWidth, overflow, align, lineHeight, letterSpacing = textOptions(options)
         local w, h = __ui_text(id, x, y, s, size, color, font, fallback, maxWidth, overflow, align, lineHeight, letterSpacing)
         return w, h
@@ -640,17 +674,13 @@ function addDrawing(target: any, id: number, ensureOpen: any, clearColor: any)
     --            shows all of it centered, "cover" fills the box and crops
     --            the overflow around the center
     function target.drawImage(self: Window, image: Image, x: number, y: number, options: ImageOptions?): ()
-        ensureOpen()
+        if (life.gone) then error(life.message) end
         checkImage(image, "image")
-        checkNumber(x, "x")
-        checkNumber(y, "y")
+        if (options == nil) then
+            __ui_draw_image(id, image:id(), x, y)
+            return
+        end
         checkOptionalTable(options, "options")
-        options = options ?? {}
-        checkOptionalNumber(options.width, "width")
-        checkOptionalNumber(options.height, "height")
-        checkOptionalNumber(options.opacity, "opacity")
-        checkOptionalNumber(options.radius, "radius")
-        checkOptionalString(options.fit, "fit")
         if (options.frame != nil) then checkFrame(image, options.frame, "frame") end
         __ui_draw_image(id, image:id(), x, y, options.width, options.height, options.frame,
             options.opacity, options.radius, options.fit)
@@ -664,11 +694,14 @@ function addDrawing(target: any, id: number, ensureOpen: any, clearColor: any)
         ensureOpen()
         checkPath(path, "path")
         shapeOptions(options)
-        options = options ?? {}
+        options = options ?? NO_OPTIONS
         checkOptionalBoolean(options.evenOdd, "evenOdd")
-        local bx, by, bw, bh = path:bounds()
-        local gradient, shadow = fillEffects(options, bx, by, bw, bh)
-        __ui_fill_path(id, path:commands(), packColor(color, "color"), gradient, shadow, options.evenOdd ?? false)
+        local gradient, shadow = nil, nil
+        if (options.gradient != nil or options.shadow != nil) then
+            local bx, by, bw, bh = path:bounds()
+            gradient, shadow = fillEffects(options, bx, by, bw, bh)
+        end
+        __ui_fill_path(id, path:commands(), color, gradient, shadow, options.evenOdd ?? false)
     end
 
     -- Strokes a path. Options: `width` (default 1), `cap` ("butt" default,
@@ -677,24 +710,24 @@ function addDrawing(target: any, id: number, ensureOpen: any, clearColor: any)
         ensureOpen()
         checkPath(path, "path")
         local _, lineWidth = shapeOptions(options)
-        options = options ?? {}
+        options = options ?? NO_OPTIONS
         checkOptionalString(options.cap, "cap")
         checkOptionalString(options.join, "join")
-        __ui_stroke_path(id, path:commands(), packColor(color, "color"), lineWidth, options.cap, options.join)
+        __ui_stroke_path(id, path:commands(), color, lineWidth, options.cap, options.join)
     end
 
     -- Limits later drawing to a rectangle (rounded by `options.radius`)
     -- until the matching `popClip`. Clips nest: each one intersects the
-    -- clips pushed before it.
+    -- clips pushed before it. A rectangle without rounded corners clips at
+    -- whole pixels.
     function target.pushClip(self: Window, x: number, y: number, w: number, h: number, options: ShapeOptions?): ()
-        ensureOpen()
-        checkNumber(x, "x")
-        checkNumber(y, "y")
-        checkNumber(w, "width")
-        checkNumber(h, "height")
-        if (w < 0 or h < 0) then error("width and height must be non-negative") end
-        local _, _, radius = shapeOptions(options)
-        __ui_push_clip(id, x, y, w, h, radius)
+        if (life.gone) then error(life.message) end
+        if (options == nil) then
+            __ui_push_clip(id, x, y, w, h)
+            return
+        end
+        checkOptionalTable(options, "options")
+        __ui_push_clip(id, x, y, w, h, options.radius)
     end
 
     -- Like `pushClip`, limited to the inside of a path.
@@ -706,7 +739,7 @@ function addDrawing(target: any, id: number, ensureOpen: any, clearColor: any)
 
     -- Ends the latest `pushClip` or `pushClipPath`.
     function target.popClip(self: Window): ()
-        ensureOpen()
+        if (life.gone) then error(life.message) end
         __ui_pop_clip(id)
     end
 
@@ -715,14 +748,12 @@ function addDrawing(target: any, id: number, ensureOpen: any, clearColor: any)
     -- do not show through each other. Groups nest. Close the clips opened
     -- inside a group before popping it.
     function target.pushOpacity(self: Window, opacity: number): ()
-        ensureOpen()
-        checkNumber(opacity, "opacity")
-        if (opacity < 0 or opacity > 1) then error("opacity must be from 0 to 1") end
+        if (life.gone) then error(life.message) end
         __ui_push_opacity(id, opacity)
     end
 
     function target.popOpacity(self: Window): ()
-        ensureOpen()
+        if (life.gone) then error(life.message) end
         __ui_pop_opacity(id)
     end
 
@@ -730,7 +761,8 @@ function addDrawing(target: any, id: number, ensureOpen: any, clearColor: any)
     -- `backdrop-filter` does, with a gaussian whose standard deviation is
     -- `radius` logical pixels (up to 200). `options.radius` rounds the
     -- rectangle's corners. Inside `pushOpacity`, only the group's own
-    -- layer is blurred.
+    -- layer is blurred. Blurring the same pixels the same way as a recent
+    -- call (a panel over a still background) reuses its result.
     function target.blurRegion(self: Window, x: number, y: number, w: number, h: number, radius: number, options: ShapeOptions?): ()
         ensureOpen()
         checkNumber(x, "x")
@@ -806,6 +838,7 @@ function ui.open(options: WindowOptions?): Window
         return opened
     end)
     local closed = false
+    local life = { gone = false, message = "window is closed" }
     local window = {}
     window.id = id
 
@@ -820,6 +853,7 @@ function ui.open(options: WindowOptions?): Window
     function window.close(self: Window): ()
         if (closed) then return end
         closed = true
+        life.gone = true
         windows[tostring(id)] = nil
         openCount -= 1
         __ui_close(id)
@@ -882,7 +916,7 @@ function ui.open(options: WindowOptions?): Window
         __ui_present(id, flat)
     end
 
-    addDrawing(window, id, ensureOpen, "#ffffff")
+    addDrawing(window, id, life, "#ffffff")
 
     -- WINDOW CHROME ---------------------------------------------------------
     --
@@ -1015,6 +1049,7 @@ function ui.canvas(w: number, h: number, options: CanvasOptions?): Canvas
 
     local id = __ui_canvas(w, h, scale)
     local freed = false
+    local life = { gone = false, message = "canvas was freed" }
     local canvas = {}
     canvas.width = w
     canvas.height = h
@@ -1037,10 +1072,11 @@ function ui.canvas(w: number, h: number, options: CanvasOptions?): Canvas
     function canvas.close(self: Canvas): ()
         if (freed) then return end
         freed = true
+        life.gone = true
         __ui_free_canvas(id)
     end
 
-    addDrawing(canvas, id, ensureOpen, 0)
+    addDrawing(canvas, id, life, 0)
     return table.freeze(canvas)
 end
 
@@ -1054,7 +1090,6 @@ end
 -- same options (fallback fonts, wrapping and ellipsis included), and the
 -- number of lines.
 function ui.measureText(s: string, options: TextOptions?): (number, number, number)
-    checkString(s, "text")
     local size, _, font, fallback, maxWidth, overflow, align, lineHeight, letterSpacing = textOptions(options)
     local w, h, lines = __ui_measure_text(s, size, font, fallback, maxWidth, overflow, align, lineHeight, letterSpacing)
     return w, h, lines
@@ -1354,14 +1389,16 @@ end
 
 -- Mixes two colors channel by channel, alpha included, and returns the
 -- packed result: `t` = 0 gives `from` and 1 gives `to`.
+function mixChannel(x: number, y: number, t: number): number
+    return math.max(0, math.min(255, math.floor(x + (y - x) * t + 0.5)))
+end
+
 function ui.mixColor(from: any, to: any, t: number): number
     checkNumber(t, "t")
     local r1, g1, b1, a1 = channels(packColor(from, "from"))
     local r2, g2, b2, a2 = channels(packColor(to, "to"))
-    local function mix(x: number, y: number): number
-        return math.max(0, math.min(255, math.floor(x + (y - x) * t + 0.5)))
-    end
-    return ((mix(r1, r2) * 256 + mix(g1, g2)) * 256 + mix(b1, b2)) * 256 + mix(a1, a2)
+    return ((mixChannel(r1, r2, t) * 256 + mixChannel(g1, g2, t)) * 256 + mixChannel(b1, b2, t)) * 256
+        + mixChannel(a1, a2, t)
 end
 
 function resolveEasing(value: any): (number) -> number
@@ -1536,6 +1573,7 @@ end
 -- ones that ended and returns how many are still running.
 function ui.update(dt: number): number
     checkNumber(dt, "dt")
+    if (#running == 0) then return 0 end
     -- Tweens started from callbacks during this step join the next one.
     local current = running
     running = {}

@@ -122,7 +122,7 @@ Opens a link in the default browser or mail client and returns without waiting. 
 
 ## ui.color(color: any): number
 
-Packs any color form into a `0xRRGGBBAA` integer, to avoid re-parsing a color every frame.
+Packs any color form into a `0xRRGGBBAA` integer. Drawing methods take every form directly (and remember the strings they have parsed), so packing is only needed to do arithmetic on a color.
 
 ## ui.loadFont(source: string | buffer): Font
 
@@ -202,7 +202,7 @@ win:fillRect(20, 20, 200, 120, "#ffffff", {
 })
 ```
 
-A gradient is `{ from, to }` or `{ stops = { { offset, color }, ... } }` (offsets from 0 to 1). `kind` is `"linear"` (default) or `"radial"`. A linear gradient runs at `angle` degrees (default 0, left to right; 90 runs top to bottom) across the shape's box. A radial one is centered on `center = { x, y }` (default the middle of the box) and reaches `radius` (default the box's corners). A shadow is `{ blur, offsetX, offsetY, spread, color }`: `blur` is the CSS-style blur radius (default 0), `spread` grows the shape first, and the color defaults to a translucent black.
+A gradient is `{ from, to }` or `{ stops = { { offset, color }, ... } }` (offsets from 0 to 1). `kind` is `"linear"` (default) or `"radial"`. A linear gradient runs at `angle` degrees (default 0, left to right; 90 runs top to bottom) across the shape's box. A radial one is centered on `center = { x, y }` (default the middle of the box) and reaches `radius` (default the box's corners). A shadow is `{ blur, offsetX, offsetY, spread, color }`: `blur` is the CSS-style blur radius (default 0), `spread` grows the shape first, and the color defaults to a translucent black. A shadow is blurred once per shape and size and then reused, whatever its color.
 
 ## Window:strokeRect(x: number, y: number, w: number, h: number, color: any, options: table?): ()
 
@@ -254,7 +254,7 @@ Strokes a path. Options: `width` (default 1), `cap` (`"butt"` default, `"round"`
 
 ## Window:pushClip(x: number, y: number, w: number, h: number, options: table?): ()
 
-Limits later drawing (shapes, text and images) to a rectangle, rounded by `options.radius`, until the matching `popClip`. Clips nest: each one intersects the clips pushed before it. Edges are anti-aliased, so rounded clips are smooth. At most 64 clips can be open at once.
+Limits later drawing (shapes, text and images) to a rectangle, rounded by `options.radius`, until the matching `popClip`. Clips nest: each one intersects the clips pushed before it. A clip without rounded corners has its edges rounded to whole pixels and costs next to nothing to push or draw in; a rounded one has anti-aliased edges. At most 64 clips can be open at once.
 
 ```lua
 win:pushClip(0, 40, 300, 200, { radius = 12 })
@@ -274,7 +274,7 @@ Ends the latest `pushClip` or `pushClipPath`. It is an error to pop more clips t
 
 ## Window:pushOpacity(opacity: number): ()
 
-Starts a group: everything drawn until the matching `popOpacity` is composited as one at `opacity` (0 to 1), so overlapping shapes inside it do not show through each other. This is what a fade or slide-in of a whole panel needs. Groups nest (up to 16) and cost one off-screen layer the size of the surface, so use them for panels rather than for single shapes. Close the clips opened inside a group before popping it. Inside a group, `blurRegion` sees only the group's own layer.
+Starts a group: everything drawn until the matching `popOpacity` is composited as one at `opacity` (0 to 1), so overlapping shapes inside it do not show through each other. This is what a fade or slide-in of a whole panel needs. Groups nest (up to 16). A group draws into an off-screen layer the size of the surface, which is kept for the next group, and only the part that was drawn on is composited, so a fade costs about as much as what it fades. Close the clips opened inside a group before popping it. Inside a group, `blurRegion` sees only the group's own layer.
 
 ## Window:popOpacity(): ()
 
@@ -282,7 +282,7 @@ Ends the latest `pushOpacity` and composites the group.
 
 ## Window:blurRegion(x: number, y: number, w: number, h: number, radius: number, options: table?): ()
 
-Blurs what has been drawn so far under a rectangle, like a CSS `backdrop-filter`: draw the wallpaper, call `blurRegion`, then draw a translucent panel on top for frosted glass. `radius` is the standard deviation of the gaussian in logical pixels (0 to 200), and `options.radius` rounds the rectangle's corners. The cost does not grow with the radius.
+Blurs what has been drawn so far under a rectangle, like a CSS `backdrop-filter`: draw the wallpaper, call `blurRegion`, then draw a translucent panel on top for frosted glass. `radius` is the standard deviation of the gaussian in logical pixels (0 to 200), and `options.radius` rounds the rectangle's corners. The cost does not grow with the radius, and blurring the same pixels the same way as a recent call (a panel over a still background, frame after frame) reuses that result.
 
 ```lua
 win:drawImage(wallpaper, 0, 0, { width = w, height = h, fit = "cover" })

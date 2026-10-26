@@ -297,6 +297,25 @@ expectError(function() return canvas:getPixel(25, 5) end, "outside", "getPixel c
 expectError(ui.canvas, "positive", "canvas needs a size", 0, 5)
 expectError(ui.canvas, "scale must be positive", "canvas needs a positive scale", 5, 5, { scale = 0 })
 
+-- Drawing methods take every color form directly, checked as ui.color does.
+canvas:fillRect(0, 0, 10, 10, { r = 0, g = 255, b = 0 })
+r, g, b, a = canvas:getPixel(5, 5)
+assert(r == 0 and g == 255 and b == 0 and a == 255, "fillRect takes a color table")
+canvas:fillRect(0, 0, 10, 10, { 0, 0, 255, 255 })
+assert(channel(canvas, 3, 5, 5) == 255, "fillRect takes a color list")
+canvas:fillRect(0, 0, 10, 10, "#f00")
+assert(channel(canvas, 1, 5, 5) == 255 and channel(canvas, 2, 5, 5) == 0, "fillRect takes a short color string")
+expectError(function() canvas:fillRect(0, 0, 5, 5, "red") end, "#rgb", "drawing checks color strings")
+expectError(function() canvas:fillRect(0, 0, 5, 5, { 300, 0, 0 }) end, "0 to 255", "drawing checks color channels")
+expectError(function() canvas:fillRect(0, 0, 5, 5, 1.5) end, "packed 0xRRGGBBAA", "drawing checks packed colors")
+expectError(function() canvas:fillRect(0, 0, 5, 5) end, "color string", "drawing needs a color")
+expectError(function() canvas:fillRect("a", 0, 5, 5, "#000") end, "x must be a number", "drawing checks coordinates")
+expectError(function() canvas:fillRect(0, 0, 5, 5, "#000", { radius = -1 }) end, "non-negative", "fillRect checks the radius")
+expectError(function() canvas:strokeRect(0, 0, 5, 5, "#000", { width = 0 }) end, "width must be positive", "strokeRect checks the width")
+expectError(function() canvas:circle(5, 5, 2, "#000", { fill = "yes" }) end, "fill must be a boolean", "circle checks fill")
+expectError(function() canvas:text(0, 0, 5) end, "text must be a string", "text checks its text")
+canvas:clear()
+
 -- Gradients.
 canvas:fillRect(0, 0, 20, 10, "#000000", { gradient = { from = "#000000", to = "#ffffff" } })
 assert(canvas:getPixel(1, 5) < 40 and canvas:getPixel(18, 5) > 215, "a linear gradient runs left to right")
