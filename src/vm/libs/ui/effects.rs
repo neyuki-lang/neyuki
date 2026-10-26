@@ -1,22 +1,21 @@
 //! Pixel effects for `lib/ui.nyk`: gaussian blur, which tiny-skia lacks,
-//! and the helpers that composite a blurred copy back through clip masks.
+//! and the backdrop blur of `blurRegion`, which blurs what is under a
+//! rectangle and mixes it back through the shape and clip coverage.
 //!
-//! Everything works on the premultiplied RGBA pixels of a `Pixmap`.
+//! Everything works on the premultiplied RGBA pixels of a `Pixmap`. Wide
+//! blurs run on a copy reduced 2-8x, which leaves nothing a gaussian of that
+//! width would keep; the copy is read straight from the source and only the
+//! pixels that are written are scaled back up.
 
-use tiny_skia::{Mask, Pixmap, PremultipliedColorU8};
+use std::cell::RefCell;
+
+use tiny_skia::{Mask, Pixmap};
+
+use super::clip::{Bounds, Clip, scale255};
+use super::images::scale_pixel;
 
 /// The largest standard deviation, in physical pixels, a blur accepts.
 pub(super) const MAX_SIGMA: f32 = 256.0;
-
-/// How much of a pixel a clip mask lets through, given the `coverage` it
-/// already has (0 to 255). Pixels outside the mask are clipped away.
-pub(super) fn coverage_in(clip: &Mask, x: i32, y: i32, coverage: u32) -> u32 {
-    let (width, height) = (clip.width() as i32, clip.height() as i32);
-    if x < 0 || y < 0 || x >= width || y >= height {
-        return 0;
-    }
-    (coverage * clip.data()[(y * width + x) as usize] as u32 + 127) / 255
-}
 
 /// Radii of three successive box blurs that together approximate a gaussian
 /// of standard deviation `sigma`.
@@ -38,65 +37,95 @@ fn box_radii(sigma: f32) -> [usize; 3] {
     [radius(0), radius(1), radius(2)]
 }
 
-/// One box blur of radius `r` over `lines` lines of `len` pixels, reading
-/// `src` and writing `dst`. Pixel `i` of line `n` starts at byte
-/// `n * line_stride + i * step`. Edges repeat their outermost pixel.
-///
-/// The four channels run together, and only the first and last `r + 1`
-/// pixels of a line need their reads clamped to it.
-fn box_lines(
-    src: &[u8],
-    dst: &mut [u8],
-    lines: usize,
-    len: usize,
-    line_stride: usize,
-    step: usize,
-    r: usize,
-) {
-    if len == 0 {
+/// `(sum + window / 2) / window` as a multiply and shift, exact for the
+/// sums a box of `window` bytes can reach (`window` below 4096).
+#[inline(always)]
+fn average(sum: u32, half: u32, magic: u64) -> u8 {
+    (((sum + half) as u64 * magic) >> 32) as u8
+}
+
+fn magic(window: u32) -> u64 {
+    (1u64 << 32).div_ceil(window as u64)
+}
+
+/// One horizontal box blur of radius `r` over `height` rows of `width`
+/// pixels, reading `src` and writing `dst`. Edges repeat their outermost
+/// pixel. The four channels run together, and only the first and last
+/// `r + 1` pixels of a row need their reads clamped to it.
+fn box_rows(src: &[u8], dst: &mut [u8], width: usize, height: usize, r: usize) {
+    if width == 0 {
         return;
     }
     let window = (2 * r + 1) as u32;
-    let half = window / 2;
-    let last = len - 1;
-    for line in 0..lines {
-        let base = line * line_stride;
-        let pixel = |i: usize| base + i * step;
-        let first = pixel(0);
+    let (half, magic) = (window / 2, magic(window));
+    let last = width - 1;
+    for (line, out) in src
+        .chunks_exact(width * 4)
+        .zip(dst.chunks_exact_mut(width * 4))
+        .take(height)
+    {
+        let px = |i: usize| &line[i * 4..i * 4 + 4];
         let mut sum = [0u32; 4];
-        for (c, s) in sum.iter_mut().enumerate() {
-            *s = src[first + c] as u32 * (r as u32 + 1);
+        for (s, v) in sum.iter_mut().zip(px(0)) {
+            *s = *v as u32 * (r as u32 + 1);
         }
         for i in 1..=r {
-            let at = pixel(i.min(last));
-            for (c, s) in sum.iter_mut().enumerate() {
-                *s += src[at + c] as u32;
+            for (s, v) in sum.iter_mut().zip(px(i.min(last))) {
+                *s += *v as u32;
             }
         }
-        for i in 0..len {
-            let out = pixel(i);
-            for (c, s) in sum.iter().enumerate() {
-                dst[out + c] = ((s + half) / window) as u8;
+        for (i, o) in out.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            for (o, s) in o.iter_mut().zip(&sum) {
+                *o = average(*s, half, magic);
             }
-            let add = pixel((i + r + 1).min(last));
-            let drop = pixel(i.saturating_sub(r));
-            for (c, s) in sum.iter_mut().enumerate() {
-                *s = *s + src[add + c] as u32 - src[drop + c] as u32;
+            let (add, drop) = (px((i + r + 1).min(last)), px(i.saturating_sub(r)));
+            for ((s, a), d) in sum.iter_mut().zip(add).zip(drop) {
+                *s = *s + *a as u32 - *d as u32;
             }
         }
     }
 }
 
+/// One vertical box blur of radius `r`, swept down the rows with a running
+/// sum per byte of a row, so every read and write runs along memory.
+fn box_columns(src: &[u8], dst: &mut [u8], width: usize, height: usize, r: usize) {
+    if width == 0 || height == 0 {
+        return;
+    }
+    let row = width * 4;
+    let window = (2 * r + 1) as u32;
+    let (half, magic) = (window / 2, magic(window));
+    let last = height - 1;
+    let line = |y: usize| &src[y * row..(y + 1) * row];
+    let mut sum: Vec<u32> = line(0).iter().map(|v| *v as u32 * (r as u32 + 1)).collect();
+    for i in 1..=r {
+        for (s, v) in sum.iter_mut().zip(line(i.min(last))) {
+            *s += *v as u32;
+        }
+    }
+    for (y, out) in dst.chunks_exact_mut(row).take(height).enumerate() {
+        for (o, s) in out.iter_mut().zip(&sum) {
+            *o = average(*s, half, magic);
+        }
+        let (add, drop) = (line((y + r + 1).min(last)), line(y.saturating_sub(r)));
+        for ((s, a), d) in sum.iter_mut().zip(add).zip(drop) {
+            *s = *s + *a as u32 - *d as u32;
+        }
+    }
+}
+
 /// Blurs `data` (`width` x `height` premultiplied pixels) in place: three box
-/// blurs per axis, so the cost does not depend on the radius.
+/// blurs per axis, so the cost does not depend on the radius. Every pass
+/// averages all four channels alike, so a channel never ends up above its
+/// alpha.
 fn blur_full(data: &mut [u8], width: usize, height: usize, sigma: f32) {
     let mut scratch = vec![0u8; data.len()];
     for r in box_radii(sigma) {
         if r == 0 {
             continue;
         }
-        box_lines(data, &mut scratch, height, width, width * 4, 4, r);
-        box_lines(&scratch, data, width, height, 4, width * 4, r);
+        box_rows(data, &mut scratch, width, height, r);
+        box_columns(&scratch, data, width, height, r);
     }
 }
 
@@ -111,6 +140,128 @@ fn reduction(sigma: f32) -> usize {
         2
     } else {
         1
+    }
+}
+
+/// A copy of the `region` of an image (`stride` bytes per row) reduced by
+/// `factor`: each small pixel averages the block it covers. Returns the
+/// pixels and their width and height.
+fn shrink(src: &[u8], stride: usize, region: Bounds, factor: usize) -> (Vec<u8>, usize, usize) {
+    let (w, h) = (region.width(), region.height());
+    let (sw, sh) = (w.div_ceil(factor), h.div_ceil(factor));
+    let mut small = vec![0u8; sw * sh * 4];
+    if factor == 1 {
+        for (y, out) in small.chunks_exact_mut(w * 4).enumerate() {
+            let from = (region.y0 as usize + y) * stride + region.x0 as usize * 4;
+            out.copy_from_slice(&src[from..from + w * 4]);
+        }
+        return (small, w, h);
+    }
+    let mut acc = vec![0u32; sw * 4];
+    for (sy, out) in small.chunks_exact_mut(sw * 4).enumerate() {
+        acc.fill(0);
+        let (y0, y1) = (sy * factor, ((sy + 1) * factor).min(h));
+        for y in y0..y1 {
+            let from = (region.y0 as usize + y) * stride + region.x0 as usize * 4;
+            let line = &src[from..from + w * 4];
+            for (block, a) in line.chunks(factor * 4).zip(acc.as_chunks_mut::<4>().0) {
+                for px in block.as_chunks::<4>().0 {
+                    a[0] += px[0] as u32;
+                    a[1] += px[1] as u32;
+                    a[2] += px[2] as u32;
+                    a[3] += px[3] as u32;
+                }
+            }
+        }
+        let rows = (y1 - y0) as u32;
+        for (sx, (o, a)) in out
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(acc.as_chunks::<4>().0)
+            .enumerate()
+        {
+            let columns = (((sx + 1) * factor).min(w) - sx * factor) as u32;
+            let count = rows * columns;
+            for (o, a) in o.iter_mut().zip(a) {
+                *o = ((a + count / 2) / count) as u8;
+            }
+        }
+    }
+    (small, sw, sh)
+}
+
+/// Where output pixel `i` reads a reduced line: the two small pixels around
+/// its centre and the weight (of 256) of the second one.
+fn taps(len: usize, small_len: usize, factor: usize) -> Vec<(u32, u32, u32)> {
+    let f = factor as f32;
+    let top = (small_len - 1) as f32;
+    (0..len)
+        .map(|i| {
+            let at = ((i as f32 + 0.5) / f - 0.5).clamp(0.0, top);
+            let first = at.floor() as usize;
+            let second = (first + 1).min(small_len - 1);
+            let weight = ((at - first as f32) * 256.0).round() as u32;
+            (first as u32, second as u32, weight)
+        })
+        .collect()
+}
+
+/// Scales a reduced image back up with bilinear filtering, one output row
+/// at a time. Linear weights shared by every channel keep the result
+/// premultiplied.
+struct Grow<'a> {
+    small: &'a [u8],
+    width: usize,
+    columns: Vec<(u32, u32, u32)>,
+    rows: Vec<(u32, u32, u32)>,
+    /// The two small rows mixed for the current output row, times 256.
+    line: Vec<u32>,
+}
+
+impl<'a> Grow<'a> {
+    /// Output columns `x0..x1` and rows `y0..y1` of an image of `w` x `h`
+    /// that `small` (`sw` x `sh`) is the reduction of by `factor`.
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        small: &'a [u8],
+        (sw, sh): (usize, usize),
+        (w, h): (usize, usize),
+        factor: usize,
+        (x0, x1): (usize, usize),
+        (y0, y1): (usize, usize),
+    ) -> Grow<'a> {
+        let columns = taps(w, sw, factor)[x0..x1].to_vec();
+        let rows = taps(h, sh, factor)[y0..y1].to_vec();
+        Grow {
+            small,
+            width: sw,
+            columns,
+            rows,
+            line: vec![0; sw * 4],
+        }
+    }
+
+    /// Output row `i` (counted from `y0`), calling `put` with each column
+    /// (counted from `x0`) and its pixel.
+    #[inline]
+    fn row(&mut self, i: usize, mut put: impl FnMut(usize, u32)) {
+        let (top, bottom, weight) = self.rows[i];
+        let row = self.width * 4;
+        let a = &self.small[top as usize * row..(top as usize + 1) * row];
+        let b = &self.small[bottom as usize * row..(bottom as usize + 1) * row];
+        for ((l, a), b) in self.line.iter_mut().zip(a).zip(b) {
+            *l = *a as u32 * (256 - weight) + *b as u32 * weight;
+        }
+        for (x, &(left, right, weight)) in self.columns.iter().enumerate() {
+            let (p, q) = (left as usize * 4, right as usize * 4);
+            let mut out = [0u8; 4];
+            for (c, o) in out.iter_mut().enumerate() {
+                let v = self.line[p + c] * (256 - weight) + self.line[q + c] * weight;
+                *o = ((v + 32768) >> 16) as u8;
+            }
+            put(x, u32::from_le_bytes(out));
+        }
     }
 }
 
@@ -129,118 +280,245 @@ pub(super) fn blur(pixmap: &mut Pixmap, sigma: f32) {
         blur_full(pixmap.data_mut(), width, height, sigma);
         return;
     }
-    let (sw, sh) = (width.div_ceil(factor), height.div_ceil(factor));
-    let data = pixmap.data_mut();
-    // Shrink: each small pixel averages the factor x factor block it covers.
-    let mut small = vec![0u8; sw * sh * 4];
-    for sy in 0..sh {
-        let (y0, y1) = (sy * factor, ((sy + 1) * factor).min(height));
-        for sx in 0..sw {
-            let (x0, x1) = (sx * factor, ((sx + 1) * factor).min(width));
-            let mut acc = [0u32; 4];
-            for y in y0..y1 {
-                let row = y * width * 4;
-                for x in x0..x1 {
-                    let at = row + x * 4;
-                    for (c, a) in acc.iter_mut().enumerate() {
-                        *a += data[at + c] as u32;
-                    }
+    let region = Bounds::surface(pixmap.width(), pixmap.height());
+    let (mut small, sw, sh) = shrink(pixmap.data(), width * 4, region, factor);
+    blur_full(&mut small, sw, sh, sigma / factor as f32);
+    let mut grow = Grow::new(
+        &small,
+        (sw, sh),
+        (width, height),
+        factor,
+        (0, width),
+        (0, height),
+    );
+    for (y, out) in pixmap.data_mut().chunks_exact_mut(width * 4).enumerate() {
+        let (out, _) = out.as_chunks_mut::<4>();
+        grow.row(y, |x, pixel| out[x] = pixel.to_le_bytes());
+    }
+}
+
+/// The backdrop blur of `blurRegion`: blurs what `target` holds in `region`
+/// (the rectangle plus a margin for its edges to see their surroundings)
+/// and mixes the result back into the `inner` rectangle, through the
+/// `cover` coverage (inner-sized; everything when absent) and the clip.
+/// Only the pixels mixed back are scaled up from the reduced copy, and a
+/// blur of the same pixels as a recent one copies its result. `cover`
+/// comes with a number that tells covers apart (the corner radius).
+///
+/// The backdrop is usually still while the panels over it are redrawn.
+pub(super) fn blur_behind(
+    target: &mut Pixmap,
+    region: Bounds,
+    inner: Bounds,
+    sigma: f32,
+    cover: Option<(&Mask, u32)>,
+    clip: Option<&Clip>,
+) {
+    let surface = Bounds::surface(target.width(), target.height());
+    let region = region.intersect(&surface);
+    let out = super::clip::visible(
+        clip,
+        inner.intersect(&region),
+        target.width(),
+        target.height(),
+    );
+    if out.is_empty() || sigma.is_nan() || sigma <= 0.3 {
+        return;
+    }
+    let sigma = sigma.min(MAX_SIGMA);
+    let stride = target.width() as usize * 4;
+    // A clip mask would have to be part of the key; only plain clips are
+    // remembered.
+    let key = clip.is_none_or(|c| c.mask.is_none()).then(|| BackdropKey {
+        pixels: hash_region(target.data(), stride, region),
+        region,
+        inner,
+        out,
+        sigma: sigma.to_bits(),
+        cover: cover.map_or(u32::MAX, |(_, id)| id),
+    });
+    if let Some(key) = &key
+        && BACKDROPS.with(|cache| cache.borrow_mut().restore(key, target.data_mut(), stride))
+    {
+        return;
+    }
+    mix_blurred(
+        target,
+        region,
+        inner,
+        out,
+        sigma,
+        cover.map(|(m, _)| m),
+        clip,
+    );
+    if let Some(key) = key {
+        BACKDROPS.with(|cache| cache.borrow_mut().keep(key, target.data(), stride));
+    }
+}
+
+/// The blur and mix behind [`blur_behind`], writing the `out` pixels.
+fn mix_blurred(
+    target: &mut Pixmap,
+    region: Bounds,
+    inner: Bounds,
+    out: Bounds,
+    sigma: f32,
+    cover: Option<&Mask>,
+    clip: Option<&Clip>,
+) {
+    let (w, h) = (region.width(), region.height());
+    let mut factor = reduction(sigma);
+    if w < factor * 2 || h < factor * 2 {
+        factor = 1;
+    }
+    let stride = target.width() as usize * 4;
+    let (mut small, sw, sh) = shrink(target.data(), stride, region, factor);
+    blur_full(&mut small, sw, sh, sigma / factor as f32);
+
+    let (rx, ry) = (region.x0 as usize, region.y0 as usize);
+    let (x0, x1) = (out.x0 as usize - rx, out.x1 as usize - rx);
+    let (y0, y1) = (out.y0 as usize - ry, out.y1 as usize - ry);
+    let mut grow =
+        (factor > 1).then(|| Grow::new(&small, (sw, sh), (w, h), factor, (x0, x1), (y0, y1)));
+    let cover_width = cover.map_or(0, |m| m.width() as usize);
+    let data = target.data_mut();
+    for (i, y) in (out.y0..out.y1).enumerate() {
+        let start = y as usize * stride + out.x0 as usize * 4;
+        let (row, _) = data[start..start + out.width() * 4].as_chunks_mut::<4>();
+        let clip_row = clip.and_then(|c| c.row(y, out.x0, out.x1));
+        let cover_row = cover.map(|m| {
+            let at = (y - inner.y0) as usize * cover_width + (out.x0 - inner.x0) as usize;
+            &m.data()[at..at + out.width()]
+        });
+        let mut put = |x: usize, s: u32| {
+            let mut k = 255;
+            if let Some(cover) = cover_row {
+                k = cover[x] as u32;
+            }
+            if let Some(clip) = clip_row {
+                k = scale255(k, clip[x] as u32);
+            }
+            match k {
+                0 => {}
+                255 => row[x] = s.to_le_bytes(),
+                _ => {
+                    let d = u32::from_le_bytes(row[x]);
+                    row[x] = (scale_pixel(d, 255 - k) + scale_pixel(s, k)).to_le_bytes();
                 }
             }
-            let count = ((y1 - y0) * (x1 - x0)) as u32;
-            let out = (sy * sw + sx) * 4;
-            for (c, a) in acc.iter().enumerate() {
-                small[out + c] = ((a + count / 2) / count) as u8;
+        };
+        match grow.as_mut() {
+            Some(grow) => grow.row(i, put),
+            None => {
+                let at = (y0 + i) * sw * 4;
+                let line = &small[at + x0 * 4..at + x1 * 4];
+                for (x, px) in line.as_chunks::<4>().0.iter().enumerate() {
+                    put(x, u32::from_le_bytes(*px));
+                }
             }
-        }
-    }
-    blur_full(&mut small, sw, sh, sigma / factor as f32);
-    // Grow back: bilinear between the centres of the small pixels.
-    let f = factor as f32;
-    for y in 0..height {
-        let fy = ((y as f32 + 0.5) / f - 0.5).clamp(0.0, (sh - 1) as f32);
-        let y0 = fy.floor() as usize;
-        let y1 = (y0 + 1).min(sh - 1);
-        let ty = fy - y0 as f32;
-        for x in 0..width {
-            let fx = ((x as f32 + 0.5) / f - 0.5).clamp(0.0, (sw - 1) as f32);
-            let x0 = fx.floor() as usize;
-            let x1 = (x0 + 1).min(sw - 1);
-            let tx = fx - x0 as f32;
-            let (a, b) = ((y0 * sw + x0) * 4, (y0 * sw + x1) * 4);
-            let (c, d) = ((y1 * sw + x0) * 4, (y1 * sw + x1) * 4);
-            let out = (y * width + x) * 4;
-            for k in 0..4 {
-                let top = small[a + k] as f32 + (small[b + k] as f32 - small[a + k] as f32) * tx;
-                let bottom = small[c + k] as f32 + (small[d + k] as f32 - small[c + k] as f32) * tx;
-                data[out + k] = (top + (bottom - top) * ty + 0.5) as u8;
-            }
-        }
-    }
-    // Rounding can leave a color channel a hair above its alpha, which is
-    // not a valid premultiplied pixel.
-    for pixel in data.chunks_exact_mut(4) {
-        let alpha = pixel[3];
-        for channel in &mut pixel[..3] {
-            *channel = (*channel).min(alpha);
         }
     }
 }
 
-/// Mixes `source` into `target` with its top-left corner at `(left, top)`:
-/// each pixel moves toward the source by `cover` (the same size as the
-/// source; everything when absent) times `clip` (the size of the target).
-pub(super) fn blend_region(
-    target: &mut Pixmap,
-    source: &Pixmap,
-    left: i32,
-    top: i32,
-    cover: Option<&Mask>,
-    clip: Option<&Mask>,
-) {
-    let (tw, th) = (target.width() as i32, target.height() as i32);
-    let (sw, sh) = (source.width() as i32, source.height() as i32);
-    let pixels = target.pixels_mut();
-    let from = source.pixels();
-    for sy in 0..sh {
-        let y = top + sy;
-        if y < 0 || y >= th {
-            continue;
-        }
-        for sx in 0..sw {
-            let x = left + sx;
-            if x < 0 || x >= tw {
-                continue;
-            }
-            let mut coverage = match cover {
-                Some(cover) => cover.data()[(sy * sw + sx) as usize] as u32,
-                None => 255,
-            };
-            if let Some(clip) = clip {
-                coverage = coverage_in(clip, x, y, coverage);
-            }
-            if coverage == 0 {
-                continue;
-            }
-            let index = (y * tw + x) as usize;
-            let (dst, src) = (pixels[index], from[(sy * sw + sx) as usize]);
-            let mix = |d: u8, s: u8| {
-                (d as i32 + (s as i32 - d as i32) * coverage as i32 / 255).clamp(0, 255) as u8
-            };
-            let alpha = mix(dst.alpha(), src.alpha());
-            let red = mix(dst.red(), src.red()).min(alpha);
-            let green = mix(dst.green(), src.green()).min(alpha);
-            let blue = mix(dst.blue(), src.blue()).min(alpha);
-            if let Some(pixel) = PremultipliedColorU8::from_rgba(red, green, blue, alpha) {
-                pixels[index] = pixel;
+/// A 64-bit hash of the pixels of `region`, four independent lanes so the
+/// multiplies overlap. Reading a region is a fraction of blurring it.
+fn hash_region(data: &[u8], stride: usize, region: Bounds) -> u64 {
+    const K: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut lanes = [K, K.rotate_left(17), K.rotate_left(31), K.rotate_left(47)];
+    let width = region.width() * 4;
+    for y in region.y0 as usize..region.y1 as usize {
+        let from = y * stride + region.x0 as usize * 4;
+        let row = &data[from..from + width];
+        let (words, rest) = row.as_chunks::<32>();
+        for chunk in words {
+            for (lane, word) in lanes.iter_mut().zip(chunk.as_chunks::<8>().0) {
+                *lane = (*lane ^ u64::from_le_bytes(*word))
+                    .wrapping_mul(K)
+                    .rotate_left(29);
             }
         }
+        for (i, byte) in rest.iter().enumerate() {
+            lanes[i & 3] = (lanes[i & 3] ^ *byte as u64).wrapping_mul(K);
+        }
+        lanes[0] ^= y as u64;
     }
+    lanes
+        .iter()
+        .fold(0u64, |h, lane| (h ^ lane).wrapping_mul(K).rotate_left(23))
+}
+
+/// What a backdrop blur's result depends on: the pixels it read and every
+/// rectangle and number that shaped it.
+#[derive(PartialEq, Eq)]
+struct BackdropKey {
+    pixels: u64,
+    region: Bounds,
+    inner: Bounds,
+    out: Bounds,
+    sigma: u32,
+    cover: u32,
+}
+
+/// Recent backdrop blurs with the pixels they produced. Glass panels over
+/// a still background blur the same pixels every frame; with this they
+/// cost a hash of what is under them and a copy.
+#[derive(Default)]
+struct Backdrops {
+    entries: Vec<(BackdropKey, Vec<u8>)>,
+}
+
+/// How many results are kept, and how many bytes they may hold.
+const BACKDROPS_KEPT: usize = 12;
+const BACKDROPS_BYTES: usize = 48 * 1024 * 1024;
+
+impl Backdrops {
+    /// Writes the result remembered for `key` into the target. Returns
+    /// whether there was one.
+    fn restore(&mut self, key: &BackdropKey, data: &mut [u8], stride: usize) -> bool {
+        let Some(at) = self.entries.iter().position(|(k, _)| k == key) else {
+            return false;
+        };
+        let entry = self.entries.remove(at);
+        let out = key.out;
+        let width = out.width() * 4;
+        for (y, row) in (out.y0 as usize..out.y1 as usize).zip(entry.1.chunks_exact(width)) {
+            let from = y * stride + out.x0 as usize * 4;
+            data[from..from + width].copy_from_slice(row);
+        }
+        self.entries.insert(0, entry);
+        true
+    }
+
+    /// Remembers the `out` pixels the target now holds for `key`.
+    fn keep(&mut self, key: BackdropKey, data: &[u8], stride: usize) {
+        let out = key.out;
+        let width = out.width() * 4;
+        if width * out.height() > BACKDROPS_BYTES / 4 {
+            return;
+        }
+        let mut pixels = Vec::with_capacity(width * out.height());
+        for y in out.y0 as usize..out.y1 as usize {
+            let from = y * stride + out.x0 as usize * 4;
+            pixels.extend_from_slice(&data[from..from + width]);
+        }
+        self.entries.insert(0, (key, pixels));
+        self.entries.truncate(BACKDROPS_KEPT);
+        let mut bytes = 0;
+        self.entries.retain(|(_, pixels)| {
+            bytes += pixels.len();
+            bytes <= BACKDROPS_BYTES
+        });
+    }
+}
+
+thread_local! {
+    static BACKDROPS: RefCell<Backdrops> = RefCell::new(Backdrops::default());
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tiny_skia::PremultipliedColorU8;
 
     fn alpha_at(pixmap: &Pixmap, x: u32, y: u32) -> u8 {
         pixmap.pixels()[(y * pixmap.width() + x) as usize].alpha()
@@ -252,6 +530,18 @@ mod tests {
         let small: usize = box_radii(2.0).iter().sum();
         let large: usize = box_radii(20.0).iter().sum();
         assert!(large > small * 5, "{} vs {}", large, small);
+    }
+
+    #[test]
+    fn averages_match_division() {
+        for window in [1u32, 3, 5, 17, 101, 513, 1025] {
+            let (half, magic) = (window / 2, magic(window));
+            for sum in (0..=255 * window).step_by(7) {
+                assert_eq!(average(sum, half, magic) as u32, (sum + half) / window);
+            }
+            let top = 255 * window;
+            assert_eq!(average(top, half, magic) as u32, (top + half) / window);
+        }
     }
 
     #[test]
@@ -314,22 +604,58 @@ mod tests {
     }
 
     #[test]
-    fn blend_region_follows_cover_and_clip() {
-        let mut target = Pixmap::new(4, 1).unwrap();
-        target.fill(tiny_skia::Color::BLACK);
-        let mut source = Pixmap::new(2, 1).unwrap();
-        source.fill(tiny_skia::Color::WHITE);
-        // Right half of the source hangs off the target.
-        blend_region(&mut target, &source, 3, 0, None, None);
-        assert_eq!(target.pixels()[3].red(), 255);
-        assert_eq!(target.pixels()[2].red(), 0);
+    fn blurring_behind_writes_only_the_covered_clipped_pixels() {
+        // Black left half, white right half; blur the middle strip.
+        let mut target = Pixmap::new(64, 16).unwrap();
+        for (i, pixel) in target.pixels_mut().iter_mut().enumerate() {
+            let v = if i % 64 < 32 { 0 } else { 255 };
+            *pixel = PremultipliedColorU8::from_rgba(v, v, v, 255).unwrap();
+        }
+        let before = target.clone();
+        let inner = Bounds::from_xywh(16, 4, 32, 8);
+        let region = Bounds::from_xywh(0, 0, 64, 16);
+        let clip = Clip::rect(64, 16, None, (0.0, 0.0, 40.0, 16.0));
+        blur_behind(&mut target, region, inner, 6.0, None, Some(&clip));
+        let red = |p: &Pixmap, x: usize, y: usize| p.pixels()[y * 64 + x].red();
+        // Inside: the edge between the halves is softened.
+        assert!(red(&target, 31, 8) > 0 && red(&target, 31, 8) < 255);
+        // Outside the rectangle or the clip nothing changes.
+        assert_eq!(red(&target, 31, 2), red(&before, 31, 2));
+        assert_eq!(red(&target, 44, 8), red(&before, 44, 8));
+        assert!(target.pixels().iter().all(|p| p.red() <= p.alpha()));
 
-        let mut clip = Mask::new(4, 1).unwrap();
-        clip.data_mut().copy_from_slice(&[0, 255, 0, 0]);
-        blend_region(&mut target, &source, 0, 0, None, Some(&clip));
-        assert_eq!(target.pixels()[0].red(), 0);
-        assert_eq!(target.pixels()[1].red(), 255);
-        assert_eq!(coverage_in(&clip, 9, 0, 255), 0);
-        assert_eq!(coverage_in(&clip, 1, 0, 255), 255);
+        // A cover mask keeps its zero pixels untouched.
+        let mut target = before.clone();
+        let mut cover = Mask::new(32, 8).unwrap();
+        cover.data_mut()[4 * 32 + 15] = 255;
+        blur_behind(&mut target, region, inner, 6.0, Some((&cover, 0)), None);
+        assert_ne!(red(&target, 31, 8), red(&before, 31, 8));
+        assert_eq!(red(&target, 30, 8), red(&before, 30, 8));
+    }
+
+    #[test]
+    fn a_repeated_backdrop_blur_is_restored_from_the_cache() {
+        let mut target = Pixmap::new(48, 24).unwrap();
+        for (i, pixel) in target.pixels_mut().iter_mut().enumerate() {
+            let v = ((i * 37) % 251) as u8;
+            *pixel = PremultipliedColorU8::from_rgba(v, v / 2, v / 3, 255).unwrap();
+        }
+        let before = target.clone();
+        let region = Bounds::from_xywh(0, 0, 48, 24);
+        let inner = Bounds::from_xywh(8, 4, 30, 14);
+        let mut first = before.clone();
+        blur_behind(&mut first, region, inner, 9.0, None, None);
+        let mut second = before.clone();
+        blur_behind(&mut second, region, inner, 9.0, None, None);
+        assert_eq!(first.data(), second.data());
+        // The cached copy matches what blurring computes.
+        let mut direct = before.clone();
+        mix_blurred(&mut direct, region, inner, inner, 9.0, None, None);
+        assert_eq!(first.data(), direct.data());
+        // Different pixels under the panel are blurred afresh.
+        let mut other = before.clone();
+        other.fill(tiny_skia::Color::BLACK);
+        blur_behind(&mut other, region, inner, 9.0, None, None);
+        assert_eq!(other.pixels()[10 * 48 + 20].red(), 0);
     }
 }

@@ -40,9 +40,8 @@ use souvlaki::{
     SeekDirection,
 };
 use tiny_skia::{
-    Color, FillRule, GradientStop, LineCap, LineJoin, LinearGradient, Mask, Paint, Path,
-    PathBuilder, Pixmap, PixmapPaint, Point, PremultipliedColorU8, RadialGradient, Rect, Shader,
-    SpreadMode, Stroke, Transform,
+    Color, FillRule, GradientStop, LineCap, LineJoin, LinearGradient, Mask, MaskType, Paint, Path,
+    PathBuilder, Pixmap, Point, RadialGradient, Rect, Shader, SpreadMode, Stroke, Transform,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize};
@@ -60,10 +59,11 @@ use crate::vm::libs::webview;
 use crate::vm::machine::VM;
 use crate::vm::value::{NativeDef, StrRef, Value, VmTable};
 
+mod clip;
 mod effects;
 mod images;
 
-use effects::coverage_in;
+use clip::{Bounds, Clip, Skia};
 use images::{Decoded, Fit, Limits};
 
 pub(crate) const NATIVES: &[NativeDef] = &[
@@ -406,12 +406,15 @@ impl Clicks {
 }
 
 /// What clipping and group opacity keep per drawing target. Clips are a
-/// stack of masks, each already intersected with the one below it, so the
-/// top one is all a draw call needs.
+/// stack, each already intersected with the one below it, so the top one
+/// is all a draw call needs.
 #[derive(Default)]
 struct DrawState {
-    clips: Vec<Mask>,
+    clips: Vec<Clip>,
     groups: Vec<Group>,
+    /// Transparent layers left by closed groups, for the next ones to draw
+    /// into instead of allocating (and zeroing) a surface every time.
+    spare: Vec<Pixmap>,
 }
 
 /// An open `pushOpacity`: the pixels drawn before it, which the layer now
@@ -421,7 +424,19 @@ struct Group {
     opacity: f32,
     /// How many clips were active when it opened; it closes back to this.
     clips: usize,
+    /// The pixels of the layer drawn on so far. Only those are composited
+    /// when the group closes, and cleared before the layer is reused.
+    dirty: Bounds,
 }
+
+impl DrawState {
+    fn clip(&self) -> Option<&Clip> {
+        self.clips.last()
+    }
+}
+
+/// How many spare layers a target keeps.
+const SPARE_LAYERS: usize = 2;
 
 /// An off-screen surface from `ui.canvas`, drawn into like a window.
 struct Canvas {
@@ -449,6 +464,63 @@ struct Target<'a> {
     pixmap: &'a mut Pixmap,
     scale: f64,
     state: &'a mut DrawState,
+}
+
+impl Target<'_> {
+    /// Notes that a draw may have changed the pixels of `area`, so the open
+    /// opacity group (if any) composites them. Every drawing native calls
+    /// it with an area that holds everything it painted.
+    fn touch(&mut self, area: Bounds) {
+        if let Some(group) = self.state.groups.last_mut() {
+            let (w, h) = (self.pixmap.width(), self.pixmap.height());
+            let area = clip::visible(self.state.clips.last(), area, w, h);
+            group.dirty = group.dirty.union(&area);
+        }
+    }
+
+    /// The pixels a path drawn through `scale` covers, grown by `pad`.
+    fn path_area(&self, path: &Path, pad: f32) -> Bounds {
+        let scale = self.scale as f32;
+        let b = path.bounds();
+        Bounds::covering(
+            b.left() * scale,
+            b.top() * scale,
+            b.right() * scale,
+            b.bottom() * scale,
+            pad,
+        )
+    }
+
+    /// Fills `path` (logical coordinates) through tiny-skia, clipped.
+    fn fill_path(&mut self, path: &Path, paint: &Paint, rule: FillRule) {
+        let area = self.path_area(path, 1.0);
+        let scale = self.scale as f32;
+        let (w, h) = (self.pixmap.width(), self.pixmap.height());
+        if let Skia::Draw(mask) = clip::skia_clip(self.state.clips.last(), area, w, h) {
+            self.pixmap
+                .fill_path(path, paint, rule, Transform::from_scale(scale, scale), mask);
+            self.touch(area);
+        }
+    }
+
+    /// Strokes `path` (logical coordinates) through tiny-skia, clipped.
+    fn stroke_path(&mut self, path: &Path, paint: &Paint, stroke: &Stroke) {
+        let scale = self.scale as f32;
+        // Miter joins reach out up to `miter_limit` half widths.
+        let reach = stroke.width.max(1.0) * scale * stroke.miter_limit.max(1.0) / 2.0;
+        let area = self.path_area(path, reach + 2.0);
+        let (w, h) = (self.pixmap.width(), self.pixmap.height());
+        if let Skia::Draw(mask) = clip::skia_clip(self.state.clips.last(), area, w, h) {
+            self.pixmap.stroke_path(
+                path,
+                paint,
+                stroke,
+                Transform::from_scale(scale, scale),
+                mask,
+            );
+            self.touch(area);
+        }
+    }
 }
 
 /// What `__ui_open` asks the event loop to create. Windows can only be made
@@ -500,6 +572,8 @@ thread_local! {
     static FONTS: RefCell<HashMap<u64, Rc<fontdue::Font>>> = RefCell::new(HashMap::new());
     static FALLBACKS: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
     static GLYPHS: RefCell<GlyphCache> = RefCell::new(GlyphCache::default());
+    static LAYOUTS: RefCell<LayoutCache> = RefCell::new(LayoutCache::default());
+    static SHADOWS: RefCell<ShadowCache> = RefCell::new(ShadowCache::default());
     static SYSTEM_FONTS: RefCell<Option<fontdb::Database>> = const { RefCell::new(None) };
     static EVENTS: RefCell<Vec<Value>> = const { RefCell::new(Vec::new()) };
     static PENDING_OPEN: RefCell<Option<OpenRequest>> = const { RefCell::new(None) };
@@ -625,13 +699,95 @@ fn font_ids_arg(args: &[Value], index: usize, name: &str) -> Result<Vec<u64>, St
     }
 }
 
-/// A color packed as `0xRRGGBBAA`, the way `lib/ui.nyk` sends it.
+/// A color argument in any form `lib/ui.nyk` accepts: a packed
+/// `0xRRGGBBAA` integer, a `"#rgb"`, `"#rgba"`, `"#rrggbb"` or
+/// `"#rrggbbaa"` string, or an `{ r, g, b, a? }` table (also as `{ 1, 2,
+/// 3, 4? }`) of 0-255 channels. Errors read as `packColor`'s do, so the
+/// drawing methods can hand colors over without unpacking them first.
 fn color_arg(args: &[Value], index: usize, name: &str) -> Result<(u8, u8, u8, u8), String> {
-    let packed = integer_arg(args, index, name)?;
-    if packed > u32::MAX as u64 {
-        return Err(format!("{} is out of range", name));
+    let value = args.get(index).unwrap_or(&Value::Nil);
+    match value {
+        Value::Int(_) | Value::Float(_) | Value::BigInt(_) => {
+            let packed = crate::vm::libs::args::number(value).unwrap_or(-1.0);
+            if !(0.0..=u32::MAX as f64).contains(&packed) || packed.fract() != 0.0 {
+                return Err(format!("{} must be a packed 0xRRGGBBAA integer", name));
+            }
+            Ok(unpack_color(packed as u32))
+        }
+        Value::String(text) => parse_color(text)
+            .map(unpack_color)
+            .ok_or_else(|| format!("{} must be a #rgb, #rrggbb or #rrggbbaa string", name)),
+        Value::Table(table) => {
+            let table = table.borrow();
+            let channel = |key: &str, slot: usize, default: Option<f64>| {
+                let named = table.get_str(key);
+                let value = match named {
+                    Value::Nil => table.array.get(slot).cloned().unwrap_or(Value::Nil),
+                    other => other,
+                };
+                let number = match (&value, default) {
+                    (Value::Nil, Some(default)) => Ok(default),
+                    _ => crate::vm::libs::args::number(&value),
+                };
+                match number {
+                    Ok(v) if (0.0..=255.0).contains(&v) => Ok((v + 0.5).floor() as u8),
+                    _ => Err(format!("{}.{} must be a number from 0 to 255", name, key)),
+                }
+            };
+            Ok((
+                channel("r", 0, None)?,
+                channel("g", 1, None)?,
+                channel("b", 2, None)?,
+                channel("a", 3, Some(255.0))?,
+            ))
+        }
+        _ => Err(format!(
+            "{} must be a color string or {{ r, g, b, a? }} table",
+            name
+        )),
     }
-    Ok(unpack_color(packed as u32))
+}
+
+/// A `"#rgb"`, `"#rgba"`, `"#rrggbb"` or `"#rrggbbaa"` string as a packed
+/// `0xRRGGBBAA` color.
+fn parse_color(text: &str) -> Option<u32> {
+    let hex = text.strip_prefix('#')?;
+    let digit = |c: u8| (c as char).to_digit(16);
+    let digits: Vec<u32> = hex.bytes().map(digit).collect::<Option<_>>()?;
+    let value = |ds: &[u32]| ds.iter().fold(0u32, |acc, d| acc * 16 + d);
+    match digits.len() {
+        3 | 4 => {
+            let doubled: Vec<u32> = digits.iter().flat_map(|&d| [d, d]).collect();
+            let packed = value(&doubled);
+            Some(if digits.len() == 3 {
+                packed << 8 | 0xFF
+            } else {
+                packed
+            })
+        }
+        6 => Some(value(&digits) << 8 | 0xFF),
+        8 => Some(value(&digits)),
+        _ => None,
+    }
+}
+
+/// The optional line width of the stroking natives (`options.width` in
+/// `lib/ui.nyk`), 1 when absent.
+fn line_width_arg(args: &[Value], index: usize) -> Result<f64, String> {
+    let width = optional_float_arg(args, index, "width", 1.0)?;
+    if width <= 0.0 {
+        return Err("width must be positive".to_string());
+    }
+    Ok(width)
+}
+
+/// The optional corner radius of the rectangle natives, 0 when absent.
+fn corner_radius_arg(args: &[Value], index: usize) -> Result<f32, String> {
+    let radius = optional_float_arg(args, index, "radius", 0.0)?;
+    if radius < 0.0 {
+        return Err("radius must be non-negative".to_string());
+    }
+    Ok(radius as f32)
 }
 
 fn unpack_color(packed: u32) -> (u8, u8, u8, u8) {
@@ -1514,13 +1670,17 @@ fn blit(win: &mut Win, dirty: Option<&[(i32, i32, i32, i32)]>) -> Result<(), Str
     match rects {
         Some(rects) => {
             let stride = width as usize;
-            let pixels = win.pixmap.pixels();
+            let pixels = win.pixmap.data();
             let mut damage = Vec::with_capacity(rects.len());
             for (x, y, rw, rh) in rects {
                 for row in y..y + rh {
                     let from = row as usize * stride + x as usize;
                     let to = from + rw as usize;
-                    pack_pixels(&pixels[from..to], &mut buffer[from..to], win.transparent);
+                    pack_pixels(
+                        &pixels[from * 4..to * 4],
+                        &mut buffer[from..to],
+                        win.transparent,
+                    );
                 }
                 if let (Some(rw), Some(rh)) = (NonZeroU32::new(rw), NonZeroU32::new(rh)) {
                     damage.push(softbuffer::Rect {
@@ -1536,7 +1696,7 @@ fn blit(win: &mut Win, dirty: Option<&[(i32, i32, i32, i32)]>) -> Result<(), Str
                 .map_err(|err| format!("cannot present window: {}", err))
         }
         None => {
-            pack_pixels(win.pixmap.pixels(), &mut buffer, win.transparent);
+            pack_pixels(win.pixmap.data(), &mut buffer, win.transparent);
             buffer
                 .present()
                 .map_err(|err| format!("cannot present window: {}", err))
@@ -1565,15 +1725,14 @@ fn clamp_rects(
     if out.is_empty() { None } else { Some(out) }
 }
 
-fn pack_pixels(pixels: &[PremultipliedColorU8], out: &mut [u32], alpha: bool) {
+/// Turns RGBA bytes into the `ARGB` (or `0RGB`) words softbuffer takes:
+/// one swap of red and blue per word, which the compiler vectorizes.
+fn pack_pixels(pixels: &[u8], out: &mut [u32], alpha: bool) {
+    let (pixels, _) = pixels.as_chunks::<4>();
+    let keep = if alpha { 0xFF00_FF00 } else { 0x0000_FF00 };
     for (pixel, word) in pixels.iter().zip(out.iter_mut()) {
-        let top = if alpha {
-            (pixel.alpha() as u32) << 24
-        } else {
-            0
-        };
-        *word =
-            top | (pixel.red() as u32) << 16 | (pixel.green() as u32) << 8 | pixel.blue() as u32;
+        let v = u32::from_le_bytes(*pixel);
+        *word = (v & keep) | ((v & 0xFF) << 16) | ((v >> 16) & 0xFF);
     }
 }
 
@@ -1808,20 +1967,41 @@ fn fill_shape(
     if let Some(gradient) = gradient {
         paint.shader = gradient_shader(gradient)?;
     }
-    let scale = target.scale as f32;
-    target.pixmap.fill_path(
-        path,
-        &paint,
-        FillRule::Winding,
-        Transform::from_scale(scale, scale),
-        target.state.clips.last(),
-    );
+    target.fill_path(path, &paint, FillRule::Winding);
     Ok(())
 }
+
+/// What a cached shadow is keyed by: the shape relative to its own bounds,
+/// where those bounds fall inside a pixel (in eighths), and the blur,
+/// spread and scale. The color is applied when it is drawn, so a shadow
+/// fading in or out still hits the cache.
+#[derive(PartialEq, Eq, Hash)]
+struct ShadowKey {
+    verbs: Vec<u8>,
+    points: Vec<u32>,
+    offset: (u32, u32),
+    sigma: u32,
+    spread: u32,
+    scale: u32,
+}
+
+/// Blurred shadow coverage masks, kept because the same cards, popovers and
+/// knobs cast the same shadows every frame. Bounded by bytes; when full it
+/// starts over.
+#[derive(Default)]
+struct ShadowCache {
+    masks: HashMap<ShadowKey, Rc<Mask>>,
+    bytes: usize,
+}
+
+const SHADOW_CACHE_BYTES: usize = 32 * 1024 * 1024;
 
 /// Paints the blurred shadow of `path`. `spec` is `blur, offsetX, offsetY,
 /// spread, color`: `blur` is the CSS-style blur radius (the gaussian's
 /// standard deviation is half of it), `spread` grows the shape first.
+///
+/// The blurred coverage is cached per shape and drawn in the shadow's
+/// color, so a shadow costs a blur only the first time it is cast.
 fn draw_shadow(target: &mut Target, path: &Path, spec: &[f64]) -> Result<(), String> {
     if spec.len() < 5 {
         return Err("shadow needs blur, offsetX, offsetY, spread and color".to_string());
@@ -1829,49 +2009,106 @@ fn draw_shadow(target: &mut Target, path: &Path, spec: &[f64]) -> Result<(), Str
     let blur = spec[0].max(0.0) as f32;
     let (dx, dy) = (spec[1] as f32, spec[2] as f32);
     let spread = spec[3].max(0.0) as f32;
-    let color = unpack_color(spec[4] as u32);
+    let (r, g, b, a) = unpack_color(spec[4] as u32);
+    if a == 0 {
+        return Ok(());
+    }
     let scale = target.scale as f32;
     let sigma = blur * scale / 2.0;
     let pad = (sigma * 3.0).ceil() + 1.0 + spread * scale;
-    let (pw, ph) = (target.pixmap.width() as i32, target.pixmap.height() as i32);
     let bounds = path.bounds();
-    let left = (((bounds.left() + dx) * scale - pad).floor() as i32).max(0);
-    let top = (((bounds.top() + dy) * scale - pad).floor() as i32).max(0);
-    let right = (((bounds.right() + dx) * scale + pad).ceil() as i32).min(pw);
-    let bottom = (((bounds.bottom() + dy) * scale + pad).ceil() as i32).min(ph);
-    if right <= left || bottom <= top {
+    // The mask's top-left pixel, and where the shape's bounds start in it.
+    let (ox, oy) = (
+        (bounds.left() + dx) * scale - pad,
+        (bounds.top() + dy) * scale - pad,
+    );
+    if !ox.is_finite() || !oy.is_finite() {
         return Ok(());
     }
-    let mut layer = Pixmap::new((right - left) as u32, (bottom - top) as u32)
-        .ok_or_else(|| "cannot allocate shadow".to_string())?;
-    let transform = Transform::from_row(
-        scale,
-        0.0,
-        0.0,
-        scale,
-        dx * scale - left as f32,
-        dy * scale - top as f32,
-    );
-    let shadow_paint = paint(color);
-    layer.fill_path(path, &shadow_paint, FillRule::Winding, transform, None);
-    if spread > 0.0 {
-        layer.stroke_path(
-            path,
-            &shadow_paint,
-            &stroke(spread as f64 * 2.0),
-            transform,
-            None,
-        );
+    let (left, top) = (ox.floor(), oy.floor());
+    let eighths = |v: f32| ((v * 8.0).round() as u32).min(7);
+    let offset = (eighths(ox - left), eighths(oy - top));
+    let width = (bounds.width() * scale + pad * 2.0 + 1.0).ceil().max(1.0);
+    let height = (bounds.height() * scale + pad * 2.0 + 1.0).ceil().max(1.0);
+    if width > u32::MAX as f32 || height > u32::MAX as f32 {
+        return Err("shadow is too large".to_string());
     }
-    effects::blur(&mut layer, sigma);
-    target.pixmap.draw_pixmap(
+    let (width, height) = (width as u32, height as u32);
+    let (left, top) = (
+        left.clamp(-(1 << 30) as f32, (1 << 30) as f32) as i32,
+        top.clamp(-(1 << 30) as f32, (1 << 30) as f32) as i32,
+    );
+    let area = Bounds::from_xywh(left, top, width, height);
+    let (pw, ph) = (target.pixmap.width(), target.pixmap.height());
+    if clip::visible(target.state.clip(), area, pw, ph).is_empty() {
+        return Ok(());
+    }
+    if images::check_size(width, height, Limits::default()).is_err() {
+        return Err("shadow is too large".to_string());
+    }
+    let key = ShadowKey {
+        verbs: path.verbs().iter().map(|verb| *verb as u8).collect(),
+        points: path
+            .points()
+            .iter()
+            .flat_map(|p| {
+                [
+                    (p.x - bounds.left()).to_bits(),
+                    (p.y - bounds.top()).to_bits(),
+                ]
+            })
+            .collect(),
+        offset,
+        sigma: sigma.to_bits(),
+        spread: spread.to_bits(),
+        scale: scale.to_bits(),
+    };
+    let cached = SHADOWS.with(|cache| cache.borrow().masks.get(&key).cloned());
+    let mask = match cached {
+        Some(mask) => mask,
+        None => {
+            let mut layer =
+                Pixmap::new(width, height).ok_or_else(|| "cannot allocate shadow".to_string())?;
+            let transform = Transform::from_row(
+                scale,
+                0.0,
+                0.0,
+                scale,
+                pad + offset.0 as f32 / 8.0 - bounds.left() * scale,
+                pad + offset.1 as f32 / 8.0 - bounds.top() * scale,
+            );
+            let solid = paint((0, 0, 0, 255));
+            layer.fill_path(path, &solid, FillRule::Winding, transform, None);
+            if spread > 0.0 {
+                layer.stroke_path(path, &solid, &stroke(spread as f64 * 2.0), transform, None);
+            }
+            timed_blur(&mut layer, sigma);
+            let mask = Rc::new(Mask::from_pixmap(layer.as_ref(), MaskType::Alpha));
+            SHADOWS.with(|cache| {
+                let mut cache = cache.borrow_mut();
+                let cost = width as usize * height as usize + 64;
+                if cache.bytes + cost > SHADOW_CACHE_BYTES {
+                    cache.masks.clear();
+                    cache.bytes = 0;
+                }
+                cache.bytes += cost;
+                cache.masks.insert(key, mask.clone());
+            });
+            mask
+        }
+    };
+    let premultiply = |c: u8| ((c as u32 * a as u32 + 127) / 255) as u8;
+    images::fill_solid(
+        target.pixmap,
+        [premultiply(r), premultiply(g), premultiply(b), a],
         left,
         top,
-        layer.as_ref(),
-        &PixmapPaint::default(),
-        Transform::identity(),
-        target.state.clips.last(),
+        width,
+        height,
+        Some(&mask),
+        target.state.clip(),
     );
+    target.touch(area);
     Ok(())
 }
 
@@ -1886,21 +2123,30 @@ fn push_clip(target: &mut Target, path: Option<&Path>) -> Result<(), String> {
         return Err(format!("clips nest at most {} deep", MAX_CLIPS));
     }
     let scale = target.scale as f32;
-    let transform = Transform::from_scale(scale, scale);
-    let mut mask = match target.state.clips.last() {
-        Some(top) => top.clone(),
-        None => {
-            let (w, h) = (target.pixmap.width(), target.pixmap.height());
-            let mut mask = Mask::new(w, h).ok_or_else(|| "cannot allocate clip".to_string())?;
-            mask.data_mut().fill(255);
-            mask
-        }
-    };
-    match path {
-        Some(path) => mask.intersect_path(path, FillRule::Winding, true, transform),
-        None => mask.data_mut().fill(0),
+    let (w, h) = (target.pixmap.width(), target.pixmap.height());
+    let clip = Clip::path(
+        w,
+        h,
+        target.state.clip(),
+        path,
+        Transform::from_scale(scale, scale),
+    )
+    .ok_or_else(|| "cannot allocate clip".to_string())?;
+    target.state.clips.push(clip);
+    Ok(())
+}
+
+/// Pushes a rectangular clip (logical coordinates). It needs no mask: its
+/// edges are rounded to whole pixels.
+fn push_clip_rect(target: &mut Target, x: f32, y: f32, w: f32, h: f32) -> Result<(), String> {
+    if target.state.clips.len() >= MAX_CLIPS {
+        return Err(format!("clips nest at most {} deep", MAX_CLIPS));
     }
-    target.state.clips.push(mask);
+    let scale = target.scale as f32;
+    let (pw, ph) = (target.pixmap.width(), target.pixmap.height());
+    let edges = (x * scale, y * scale, (x + w) * scale, (y + h) * scale);
+    let clip = Clip::rect(pw, ph, target.state.clip(), edges);
+    target.state.clips.push(clip);
     Ok(())
 }
 
@@ -1914,19 +2160,24 @@ fn pop_clip(target: &mut Target) -> Result<(), String> {
 }
 
 /// Starts a group: what is drawn next goes to a transparent layer that
-/// `pop_opacity` composites over the pixels drawn so far.
+/// `pop_opacity` composites over the pixels drawn so far. Layers are reused
+/// from groups closed earlier, so a fade allocates nothing per frame.
 fn push_opacity(target: &mut Target, opacity: f32) -> Result<(), String> {
     if target.state.groups.len() >= MAX_GROUPS {
         return Err(format!("opacity groups nest at most {} deep", MAX_GROUPS));
     }
     let (w, h) = (target.pixmap.width(), target.pixmap.height());
-    let layer = Pixmap::new(w, h).ok_or_else(|| "cannot allocate layer".to_string())?;
+    let layer = match target.state.spare.pop() {
+        Some(layer) if layer.width() == w && layer.height() == h => layer,
+        _ => Pixmap::new(w, h).ok_or_else(|| "cannot allocate layer".to_string())?,
+    };
     let saved = std::mem::replace(target.pixmap, layer);
     let clips = target.state.clips.len();
     target.state.groups.push(Group {
         saved,
         opacity,
         clips,
+        dirty: Bounds::EMPTY,
     });
     Ok(())
 }
@@ -1942,17 +2193,26 @@ fn pop_opacity(target: &mut Target) -> Result<(), String> {
     let Some(group) = target.state.groups.pop() else {
         return Ok(());
     };
-    let layer = std::mem::replace(target.pixmap, group.saved);
-    // Mostly transparent, so the compositor's skip of empty pixels pays off.
-    images::composite(
+    let mut layer = std::mem::replace(target.pixmap, group.saved);
+    // Only what was drawn into the layer is composited, and then cleared so
+    // the layer can serve the next group.
+    images::composite_area(
         target.pixmap,
         layer.as_ref(),
         0,
         0,
+        group.dirty,
         group.opacity,
         None,
         None,
     );
+    images::clear_area(&mut layer, group.dirty);
+    if group.opacity > 0.0 {
+        target.touch(group.dirty);
+    }
+    if target.state.spare.len() < SPARE_LAYERS {
+        target.state.spare.push(layer);
+    }
     Ok(())
 }
 
@@ -2642,7 +2902,7 @@ fn layout_text(chain: &[&fontdue::Font], text: &str, options: &TextOptions) -> T
 
 /// Composites an 8-bit coverage mask at `(x0, y0)` in `color` over the
 /// pixmap, clipping to its bounds, to the columns `columns.0..columns.1` and
-/// to the `clip` mask of an active `pushClip`.
+/// to the active clip. Returns the pixels it may have changed.
 fn blend_mask(
     pixmap: &mut Pixmap,
     (x0, y0): (i32, i32),
@@ -2650,65 +2910,28 @@ fn blend_mask(
     mask: &[u8],
     color: (u8, u8, u8, u8),
     columns: (i32, i32),
-    clip: Option<&Mask>,
-) {
-    let (pw, ph) = (pixmap.width() as i32, pixmap.height() as i32);
-    let (left, right) = (columns.0.max(0), columns.1.min(pw));
-    let pixels = pixmap.pixels_mut();
-    let (r, g, b, a) = (
-        color.0 as u32,
-        color.1 as u32,
-        color.2 as u32,
-        color.3 as u32,
-    );
-    for row in 0..height {
-        let y = y0 + row as i32;
-        if y < 0 || y >= ph {
-            continue;
-        }
-        for column in 0..width {
-            let x = x0 + column as i32;
-            if x < left || x >= right {
-                continue;
-            }
-            let coverage = mask[row * width + column] as u32;
-            let coverage = match clip {
-                Some(clip) => coverage_in(clip, x, y, coverage),
-                None => coverage,
-            };
-            if coverage == 0 {
-                continue;
-            }
-            let alpha = coverage * a / 255;
-            if alpha == 0 {
-                continue;
-            }
-            let index = (y * pw + x) as usize;
-            if alpha == 255 {
-                // Fully covered and opaque: the glyph replaces what is below.
-                if let Some(solid) = PremultipliedColorU8::from_rgba(r as u8, g as u8, b as u8, 255)
-                {
-                    pixels[index] = solid;
-                }
-                continue;
-            }
-            let dst = pixels[index];
-            let inverse = 255 - alpha;
-            let na = alpha + dst.alpha() as u32 * inverse / 255;
-            let nr = (r * alpha / 255 + dst.red() as u32 * inverse / 255).min(na);
-            let ng = (g * alpha / 255 + dst.green() as u32 * inverse / 255).min(na);
-            let nb = (b * alpha / 255 + dst.blue() as u32 * inverse / 255).min(na);
-            if let Some(blended) =
-                PremultipliedColorU8::from_rgba(nr as u8, ng as u8, nb as u8, na as u8)
-            {
-                pixels[index] = blended;
-            }
-        }
+    clip: Option<&Clip>,
+) -> Bounds {
+    let glyph = Bounds::from_xywh(x0, y0, width as u32, height as u32);
+    let allowed = Bounds {
+        x0: columns.0,
+        y0: i32::MIN,
+        x1: columns.1,
+        y1: i32::MAX,
+    };
+    let (pw, ph) = (pixmap.width(), pixmap.height());
+    let b = clip::visible(clip, glyph.intersect(&allowed), pw, ph);
+    if b.is_empty() || color.3 == 0 {
+        return Bounds::EMPTY;
     }
+    let origin = ((b.x0 - x0) as usize, (b.y0 - y0) as usize);
+    images::blend_coverage(pixmap, color, mask, width, origin, b, clip);
+    b
 }
 
 /// Draws a laid-out text with its origin at logical `(x, y)`, rasterizing
-/// each glyph at the window's `scale` (through the glyph cache).
+/// each glyph at the window's `scale` (through the glyph cache). Returns
+/// the pixels it may have changed.
 #[allow(clippy::too_many_arguments)]
 fn draw_layout(
     pixmap: &mut Pixmap,
@@ -2718,8 +2941,8 @@ fn draw_layout(
     (x, y): (f32, f32),
     scale: f32,
     color: (u8, u8, u8, u8),
-    clip: Option<&Mask>,
-) {
+    clip: Option<&Clip>,
+) -> Bounds {
     let px = layout.size * scale;
     let columns = match layout.clip {
         Some((left, right)) => (
@@ -2728,6 +2951,7 @@ fn draw_layout(
         ),
         None => (i32::MIN, i32::MAX),
     };
+    let mut touched = Bounds::EMPTY;
     for glyph in &layout.glyphs {
         let (id, font) = &chain[glyph.font];
         let key = GlyphKey {
@@ -2745,7 +2969,7 @@ fn draw_layout(
         let left = ((x + glyph.x) * scale).round() as i32 + metrics.xmin;
         let top = ((y + glyph.baseline) * scale).round() as i32
             + (-metrics.bounds.height - metrics.bounds.ymin).floor() as i32;
-        blend_mask(
+        let drawn = blend_mask(
             pixmap,
             (left, top),
             (metrics.width, metrics.height),
@@ -2754,7 +2978,92 @@ fn draw_layout(
             columns,
             clip,
         );
+        touched = touched.union(&drawn);
     }
+    touched
+}
+
+/// What a laid-out text depends on: the text, the fonts of its chain and
+/// every option, sizes by their bits.
+#[derive(PartialEq, Eq, Hash)]
+struct LayoutKey {
+    text: String,
+    fonts: Vec<u64>,
+    options: [u32; 7],
+}
+
+impl LayoutKey {
+    fn new(text: String, chain: &[(u64, Rc<fontdue::Font>)], options: &TextOptions) -> LayoutKey {
+        let bits = |value: Option<f32>| value.map_or(u32::MAX, f32::to_bits);
+        LayoutKey {
+            text,
+            fonts: chain.iter().map(|(id, _)| *id).collect(),
+            options: [
+                options.size.to_bits(),
+                bits(options.max_width),
+                options.overflow as u32,
+                options.align as u32,
+                bits(options.line_height),
+                options.letter_spacing.to_bits(),
+                0,
+            ],
+        }
+    }
+}
+
+/// Laid-out texts, kept because a UI draws (and measures) the same labels
+/// every frame. Two generations: lookups move entries into the current
+/// one, and when it fills up the previous one is dropped, which keeps what
+/// was used recently without tracking every entry's age.
+#[derive(Default)]
+struct LayoutCache {
+    current: HashMap<LayoutKey, Rc<TextLayout>>,
+    previous: HashMap<LayoutKey, Rc<TextLayout>>,
+}
+
+/// How many layouts a generation holds.
+const LAYOUT_CACHE: usize = 4096;
+/// Texts longer than this are laid out every time rather than kept.
+const LAYOUT_CACHE_TEXT: usize = 4096;
+
+impl LayoutCache {
+    fn get(&mut self, key: LayoutKey, layout: impl FnOnce(&str) -> TextLayout) -> Rc<TextLayout> {
+        if let Some(found) = self.current.get(&key) {
+            return found.clone();
+        }
+        let found = match self.previous.remove(&key) {
+            Some(found) => found,
+            None => Rc::new(layout(&key.text)),
+        };
+        if self.current.len() >= LAYOUT_CACHE {
+            self.previous = std::mem::take(&mut self.current);
+        }
+        self.current.insert(key, found.clone());
+        found
+    }
+
+    fn clear(&mut self) {
+        self.current.clear();
+        self.previous.clear();
+    }
+}
+
+/// Lays `text` out through the layout cache.
+fn cached_layout(
+    text: String,
+    chain: &[(u64, Rc<fontdue::Font>)],
+    options: &TextOptions,
+) -> Rc<TextLayout> {
+    let fonts: Vec<&fontdue::Font> = chain.iter().map(|(_, font)| font.as_ref()).collect();
+    if text.len() > LAYOUT_CACHE_TEXT {
+        return Rc::new(layout_text(&fonts, &text, options));
+    }
+    let key = LayoutKey::new(text, chain, options);
+    LAYOUTS.with(|cache| {
+        cache
+            .borrow_mut()
+            .get(key, |text| layout_text(&fonts, text, options))
+    })
 }
 
 // IMAGES -------------------------------------------------------------------
@@ -3061,6 +3370,7 @@ fn builtin_clear(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let (r, g, b, a) = color_arg(args, 1, "color")?;
     with_target(id, |win| {
         win.pixmap.fill(Color::from_rgba8(r, g, b, a));
+        win.touch(Bounds::surface(win.pixmap.width(), win.pixmap.height()));
         Ok(())
     })?;
     Ok(vec![])
@@ -3071,13 +3381,13 @@ fn builtin_clear(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 fn builtin_fill_rect(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let (id, x, y, w, h) = rect_args(args)?;
     let color = color_arg(args, 5, "color")?;
-    let radius = optional_float_arg(args, 6, "radius", 0.0)? as f32;
+    let radius = corner_radius_arg(args, 6)?;
     let gradient = numbers_arg(args, 7, "gradient")?;
     let shadow = numbers_arg(args, 8, "shadow")?;
     with_target(id, |target| {
         if let Some(path) = rounded_rect(x, y, w, h, radius) {
             if gradient.is_none()
-                && fill_aligned(target, x, y, w, h, radius, color, shadow.as_deref(), &path)?
+                && fill_flat(target, x, y, w, h, radius, color, shadow.as_deref(), &path)?
             {
                 return Ok(());
             }
@@ -3088,13 +3398,14 @@ fn builtin_fill_rect(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String>
     Ok(vec![])
 }
 
-/// A flat-colored rectangle whose edges land on whole pixels is filled by
-/// `images::fill_solid` (rounded corners from a cached mask) instead of the
-/// path rasterizer, which is several times slower for the cards, panels and
-/// highlights a UI fills every frame. Returns false (nothing drawn) when the
-/// edges fall between pixels, which need the rasterizer's anti-aliasing.
+/// A flat-colored rectangle is filled by `images` instead of the path
+/// rasterizer, which is several times slower for the cards, panels and
+/// highlights a UI fills every frame: a plain one with the coverage of its
+/// edges worked out exactly, a rounded one through a cached coverage mask
+/// placed to a quarter of a pixel. Returns false (nothing drawn) for a
+/// shape too large to cache, which the rasterizer fills instead.
 #[allow(clippy::too_many_arguments)]
-fn fill_aligned(
+fn fill_flat(
     target: &mut Target,
     x: f32,
     y: f32,
@@ -3106,39 +3417,63 @@ fn fill_aligned(
     path: &Path,
 ) -> Result<bool, String> {
     let scale = target.scale as f32;
-    let edges = [x * scale, y * scale, (x + w) * scale, (y + h) * scale];
-    if edges.iter().any(|e| (e - e.round()).abs() > 0.01) {
+    let (left, top) = (x * scale, y * scale);
+    let (right, bottom) = ((x + w) * scale, (y + h) * scale);
+    if !(left.is_finite() && top.is_finite() && right.is_finite() && bottom.is_finite()) {
         return Ok(false);
     }
-    let (left, top) = (edges[0].round() as i32, edges[1].round() as i32);
-    let (right, bottom) = (edges[2].round() as i32, edges[3].round() as i32);
-    if right <= left || bottom <= top {
+    let (pw, ph) = (target.pixmap.width(), target.pixmap.height());
+    let area = Bounds::covering(left, top, right, bottom, 0.0);
+    let visible = clip::visible(target.state.clip(), area, pw, ph);
+    let (r, g, b, a) = color;
+    let premultiply = |c: u8| ((c as u32 * a as u32 + 127) / 255) as u8;
+    let fill = [premultiply(r), premultiply(g), premultiply(b), a];
+    let radius = radius.min(w / 2.0).min(h / 2.0) * scale;
+    if radius <= 0.0 {
+        if let Some(shadow) = shadow {
+            draw_shadow(target, path, shadow)?;
+        }
+        if !visible.is_empty() {
+            images::fill_rect_aa(
+                target.pixmap,
+                fill,
+                (left, top, right, bottom),
+                target.state.clip(),
+            );
+            target.touch(area);
+        }
         return Ok(true);
     }
-    let (width, height) = ((right - left) as u32, (bottom - top) as u32);
-    let shape = if radius > 0.0 {
-        match images::rounded_mask(width, height, radius * scale) {
-            Some(mask) => Some(mask),
-            None => return Ok(false),
-        }
-    } else {
-        None
-    };
+    let (x0, y0) = (left.floor(), top.floor());
+    let (mw, mh) = ((right.ceil() - x0) as u64, (bottom.ceil() - y0) as u64);
+    // Masks are cached by size: one larger than a screen goes through the
+    // rasterizer, which only touches what is visible.
+    if mw * mh > 16_000_000 {
+        return Ok(false);
+    }
     if let Some(shadow) = shadow {
         draw_shadow(target, path, shadow)?;
     }
-    let (r, g, b, a) = color;
-    let premultiply = |c: u8| ((c as u32 * a as u32 + 127) / 255) as u8;
+    if visible.is_empty() {
+        return Ok(true);
+    }
+    let Some(shape) =
+        images::rounded_mask_at(left - x0, top - y0, right - left, bottom - top, radius)
+    else {
+        return Ok(true);
+    };
+    let (x0, y0) = (x0 as i32, y0 as i32);
     images::fill_solid(
         target.pixmap,
-        [premultiply(r), premultiply(g), premultiply(b), a],
-        left,
-        top,
-        width,
-        height,
-        shape.as_deref(),
-        target.state.clips.last(),
+        fill,
+        x0,
+        y0,
+        shape.width(),
+        shape.height(),
+        Some(&shape),
+        target.state.clip(),
     );
+    target.touch(Bounds::from_xywh(x0, y0, shape.width(), shape.height()));
     Ok(true)
 }
 
@@ -3146,18 +3481,11 @@ fn fill_aligned(
 fn builtin_stroke_rect(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let (id, x, y, w, h) = rect_args(args)?;
     let color = color_arg(args, 5, "color")?;
-    let radius = optional_float_arg(args, 6, "radius", 0.0)? as f32;
-    let width = optional_float_arg(args, 7, "lineWidth", 1.0)?;
+    let radius = corner_radius_arg(args, 6)?;
+    let width = line_width_arg(args, 7)?;
     with_target(id, |win| {
         if let Some(path) = rounded_rect(x, y, w, h, radius) {
-            let transform = Transform::from_scale(win.scale as f32, win.scale as f32);
-            win.pixmap.stroke_path(
-                &path,
-                &paint(color),
-                &stroke(width),
-                transform,
-                win.state.clips.last(),
-            );
+            win.stroke_path(&path, &paint(color), &stroke(width));
         }
         Ok(())
     })?;
@@ -3172,20 +3500,13 @@ fn builtin_line(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let x2 = float_arg(args, 3, "x2")? as f32;
     let y2 = float_arg(args, 4, "y2")? as f32;
     let color = color_arg(args, 5, "color")?;
-    let width = optional_float_arg(args, 6, "lineWidth", 1.0)?;
+    let width = line_width_arg(args, 6)?;
     with_target(id, |win| {
         let mut pb = PathBuilder::new();
         pb.move_to(x1, y1);
         pb.line_to(x2, y2);
         if let Some(path) = pb.finish() {
-            let transform = Transform::from_scale(win.scale as f32, win.scale as f32);
-            win.pixmap.stroke_path(
-                &path,
-                &paint(color),
-                &stroke(width),
-                transform,
-                win.state.clips.last(),
-            );
+            win.stroke_path(&path, &paint(color), &stroke(width));
         }
         Ok(())
     })?;
@@ -3201,7 +3522,7 @@ fn builtin_circle(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let radius = float_arg(args, 3, "radius")? as f32;
     let color = color_arg(args, 4, "color")?;
     let fill = bool_arg(args, 5, "fill", true)?;
-    let width = optional_float_arg(args, 6, "lineWidth", 1.0)?;
+    let width = line_width_arg(args, 6)?;
     let gradient = numbers_arg(args, 7, "gradient")?;
     let shadow = numbers_arg(args, 8, "shadow")?;
     if radius < 0.0 {
@@ -3209,17 +3530,10 @@ fn builtin_circle(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     }
     with_target(id, |win| {
         if let Some(path) = PathBuilder::from_circle(cx, cy, radius) {
-            let transform = Transform::from_scale(win.scale as f32, win.scale as f32);
             if fill {
                 fill_shape(win, &path, color, gradient.as_deref(), shadow.as_deref())?;
             } else {
-                win.pixmap.stroke_path(
-                    &path,
-                    &paint(color),
-                    &stroke(width),
-                    transform,
-                    win.state.clips.last(),
-                );
+                win.stroke_path(&path, &paint(color), &stroke(width));
             }
         }
         Ok(())
@@ -3235,7 +3549,7 @@ fn builtin_polygon(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let points = points_arg(args, 1, "points")?;
     let color = color_arg(args, 2, "color")?;
     let fill = bool_arg(args, 3, "fill", true)?;
-    let width = optional_float_arg(args, 4, "lineWidth", 1.0)?;
+    let width = line_width_arg(args, 4)?;
     let gradient = numbers_arg(args, 5, "gradient")?;
     let shadow = numbers_arg(args, 6, "shadow")?;
     if points.len() < 2 {
@@ -3243,17 +3557,10 @@ fn builtin_polygon(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     }
     with_target(id, |win| {
         if let Some(path) = polygon_path(&points) {
-            let transform = Transform::from_scale(win.scale as f32, win.scale as f32);
             if fill {
                 fill_shape(win, &path, color, gradient.as_deref(), shadow.as_deref())?;
             } else {
-                win.pixmap.stroke_path(
-                    &path,
-                    &paint(color),
-                    &stroke(width),
-                    transform,
-                    win.state.clips.last(),
-                );
+                win.stroke_path(&path, &paint(color), &stroke(width));
             }
         }
         Ok(())
@@ -3342,10 +3649,9 @@ fn builtin_text(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let text = string_arg(args, 3, "text")?;
     let color = color_arg(args, 5, "color")?;
     let (options, chain) = text_args(args, 4, 6)?;
-    let fonts: Vec<&fontdue::Font> = chain.iter().map(|(_, font)| font.as_ref()).collect();
-    let layout = layout_text(&fonts, &text, &options);
+    let layout = cached_layout(text, &chain, &options);
     with_target(id, |target| {
-        GLYPHS.with(|cache| {
+        let touched = GLYPHS.with(|cache| {
             draw_layout(
                 target.pixmap,
                 &mut cache.borrow_mut(),
@@ -3354,9 +3660,10 @@ fn builtin_text(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
                 (x, y),
                 target.scale as f32,
                 color,
-                target.state.clips.last(),
+                target.state.clip(),
             )
         });
+        target.touch(touched);
         Ok(())
     })?;
     Ok(vec![
@@ -3371,8 +3678,7 @@ fn builtin_text(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
 fn builtin_measure_text(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let text = string_arg(args, 0, "text")?;
     let (options, chain) = text_args(args, 1, 2)?;
-    let fonts: Vec<&fontdue::Font> = chain.iter().map(|(_, font)| font.as_ref()).collect();
-    let layout = layout_text(&fonts, &text, &options);
+    let layout = cached_layout(text, &chain, &options);
     Ok(vec![
         Value::Float(layout.width as f64),
         Value::Float(layout.height as f64),
@@ -3571,8 +3877,9 @@ fn builtin_draw_image(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String
                 top,
                 opacity,
                 radius * scale,
-                win.state.clips.last(),
+                win.state.clip(),
             );
+            win.touch(Bounds::from_xywh(left, top, w, h));
             Ok(())
         })
     })?;
@@ -3628,6 +3935,9 @@ fn builtin_push_clip(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String>
         return Err("radius must be non-negative".to_string());
     }
     with_target(id, |target| {
+        if radius == 0.0 {
+            return push_clip_rect(target, x, y, w, h);
+        }
         let path = rounded_rect(x, y, w, h, radius);
         push_clip(target, path.as_ref())
     })?;
@@ -3683,14 +3993,7 @@ fn builtin_fill_path(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String>
             if gradient.is_some() || shadow.is_some() {
                 return Err("evenOdd cannot be combined with a gradient or shadow".to_string());
             }
-            let scale = target.scale as f32;
-            target.pixmap.fill_path(
-                &path,
-                &paint(color),
-                FillRule::EvenOdd,
-                Transform::from_scale(scale, scale),
-                target.state.clips.last(),
-            );
+            target.fill_path(&path, &paint(color), FillRule::EvenOdd);
             return Ok(());
         }
         fill_shape(target, &path, color, gradient.as_deref(), shadow.as_deref())
@@ -3703,7 +4006,7 @@ fn builtin_stroke_path(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, Strin
     let id = integer_arg(args, 0, "target")?;
     let path = path_arg(args, 1)?;
     let color = color_arg(args, 2, "color")?;
-    let width = optional_float_arg(args, 3, "lineWidth", 1.0)?;
+    let width = line_width_arg(args, 3)?;
     let cap = match args.get(4) {
         None | Some(Value::Nil) => "butt".to_string(),
         _ => string_arg(args, 4, "cap")?,
@@ -3714,14 +4017,7 @@ fn builtin_stroke_path(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, Strin
     };
     let stroke = styled_stroke(width, &cap, &join)?;
     with_target(id, |target| {
-        let scale = target.scale as f32;
-        target.pixmap.stroke_path(
-            &path,
-            &paint(color),
-            &stroke,
-            Transform::from_scale(scale, scale),
-            target.state.clips.last(),
-        );
+        target.stroke_path(&path, &paint(color), &stroke);
         Ok(())
     })?;
     Ok(vec![])
@@ -3760,41 +4056,35 @@ fn builtin_blur_region(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, Strin
         if x1 <= x0 || y1 <= y0 || width == 0 || height == 0 {
             return Ok(());
         }
-        let (rw, rh) = ((x1 - x0) as usize, (y1 - y0) as usize);
-        let mut region =
-            Pixmap::new(rw as u32, rh as u32).ok_or_else(|| "cannot allocate blur".to_string())?;
-        let stride = pw as usize * 4;
-        let source = target.pixmap.data();
-        for row in 0..rh {
-            let from = (y0 as usize + row) * stride + x0 as usize * 4;
-            region.data_mut()[row * rw * 4..(row + 1) * rw * 4]
-                .copy_from_slice(&source[from..from + rw * 4]);
-        }
-        timed_blur(&mut region, sigma as f32 * scale);
-        let mut cover =
-            Mask::new(rw as u32, rh as u32).ok_or_else(|| "cannot allocate blur".to_string())?;
-        if let Some(path) = rounded_rect(
-            left as f32,
-            top as f32,
-            width as f32,
-            height as f32,
-            corner * scale,
-        ) {
-            cover.fill_path(
-                &path,
-                FillRule::Winding,
-                true,
-                Transform::from_translate(-x0 as f32, -y0 as f32),
-            );
-        }
-        effects::blend_region(
+        let region = Bounds {
+            x0: x0 as i32,
+            y0: y0 as i32,
+            x1: x1 as i32,
+            y1: y1 as i32,
+        };
+        let inner = Bounds::from_xywh(left, top, width, height);
+        let cover = if corner > 0.0 {
+            Some(
+                images::rounded_mask(width, height, corner * scale)
+                    .ok_or_else(|| "cannot allocate blur".to_string())?,
+            )
+        } else {
+            None
+        };
+        let start = Instant::now();
+        effects::blur_behind(
             target.pixmap,
-            &region,
-            x0 as i32,
-            y0 as i32,
-            Some(&cover),
-            target.state.clips.last(),
+            region,
+            inner,
+            sigma as f32 * scale,
+            cover
+                .as_deref()
+                .map(|mask| (mask, (corner * scale).to_bits())),
+            target.state.clip(),
         );
+        let spent = start.elapsed().as_secs_f64();
+        STATS.with(|stats| stats.borrow_mut().blur += spent);
+        target.touch(inner);
         Ok(())
     })?;
     Ok(vec![])
@@ -3916,8 +4206,9 @@ fn draw_canvas(
             top,
             opacity,
             radius * scale,
-            dst.state.clips.last(),
+            dst.state.clip(),
         );
+        dst.touch(Bounds::from_xywh(left, top, w, h));
         Ok(())
     })
 }
@@ -3974,6 +4265,7 @@ fn builtin_free_font(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String>
     FONTS.with(|fonts| fonts.borrow_mut().remove(&id));
     FALLBACKS.with(|fallbacks| fallbacks.borrow_mut().retain(|&other| other != id));
     GLYPHS.with(|cache| cache.borrow_mut().forget_font(id));
+    LAYOUTS.with(|cache| cache.borrow_mut().clear());
     Ok(vec![])
 }
 
@@ -4319,14 +4611,54 @@ mod tests {
     #[test]
     fn color_arg_rejects_out_of_range_values() {
         let err = color_arg(&[Value::Float(1e12)], 0, "color").unwrap_err();
-        assert!(err.contains("out of range"), "{}", err);
+        assert!(err.contains("packed 0xRRGGBBAA"), "{}", err);
         let err = color_arg(&[Value::Float(-1.0)], 0, "color").unwrap_err();
-        assert!(err.contains("non-negative"), "{}", err);
+        assert!(err.contains("packed 0xRRGGBBAA"), "{}", err);
+        let err = color_arg(&[Value::Float(1.5)], 0, "color").unwrap_err();
+        assert!(err.contains("packed 0xRRGGBBAA"), "{}", err);
+        let err = color_arg(&[Value::Bool(true)], 0, "color").unwrap_err();
+        assert!(err.contains("color string"), "{}", err);
+        let err = color_arg(&[Value::Nil], 0, "color").unwrap_err();
+        assert!(err.contains("color string"), "{}", err);
+    }
+
+    #[test]
+    fn colors_are_read_from_strings_and_tables_as_packcolor_does() {
+        let string = |text: &str| color_arg(&[Value::String(text.into())], 0, "color");
+        assert_eq!(string("#ff8000").unwrap(), (255, 128, 0, 255));
+        assert_eq!(string("#FF800080").unwrap(), (255, 128, 0, 128));
+        assert_eq!(string("#f80").unwrap(), (255, 136, 0, 255));
+        assert_eq!(string("#f808").unwrap(), (255, 136, 0, 136));
+        for bad in ["ff0000", "#12345", "#gg0000", "#", "#ff00001"] {
+            let err = string(bad).unwrap_err();
+            assert!(err.contains("#rgb"), "{}: {}", bad, err);
+        }
+        let table = |array: Vec<Value>| {
+            let t = Rc::new(RefCell::new(VmTable::new()));
+            t.borrow_mut().array = array;
+            color_arg(&[Value::Table(t)], 0, "color")
+        };
+        let n = |v: f64| Value::Float(v);
+        assert_eq!(table(vec![n(1.0), n(2.4), n(2.6)]).unwrap(), (1, 2, 3, 255));
+        assert_eq!(
+            table(vec![n(1.0), n(2.0), n(3.0), n(4.0)]).unwrap(),
+            (1, 2, 3, 4)
+        );
+        let err = table(vec![n(256.0), n(0.0), n(0.0)]).unwrap_err();
+        assert!(
+            err.contains("color.r must be a number from 0 to 255"),
+            "{}",
+            err
+        );
+        let err = table(vec![n(1.0), Value::String("1".into()), n(0.0)]).unwrap_err();
+        assert!(err.contains("color.g must be"), "{}", err);
+        let err = table(vec![n(1.0), n(2.0)]).unwrap_err();
+        assert!(err.contains("color.b must be"), "{}", err);
     }
 
     #[test]
     fn packing_drops_alpha_and_orders_channels() {
-        let pixels = [PremultipliedColorU8::from_rgba(10, 20, 30, 255).unwrap()];
+        let pixels = [10, 20, 30, 255];
         let mut out = [0u32; 1];
         pack_pixels(&pixels, &mut out, false);
         assert_eq!(out[0], 0x000a141e);
@@ -4334,7 +4666,7 @@ mod tests {
 
     #[test]
     fn transparent_windows_keep_alpha() {
-        let pixels = [PremultipliedColorU8::from_rgba(10, 20, 30, 128).unwrap()];
+        let pixels = [10, 20, 30, 128];
         let mut out = [0u32; 1];
         pack_pixels(&pixels, &mut out, true);
         assert_eq!(out[0], 0x800a141e);
@@ -5287,5 +5619,106 @@ mod tests {
         assert!(halo < 250, "shadow reaches outside the shape: {}", halo);
         let (far, ..) = red_at(&pixmap, 0, 0);
         assert_eq!(far, 255);
+    }
+
+    #[test]
+    fn opacity_layers_are_reused_clean() {
+        let mut pixmap = Pixmap::new(40, 20).unwrap();
+        pixmap.fill(Color::WHITE);
+        let mut state = DrawState::default();
+        let mut target = Target {
+            pixmap: &mut pixmap,
+            scale: 1.0,
+            state: &mut state,
+        };
+        let black = (0, 0, 0, 255);
+        // Every kind of draw inside a group shows up once it closes.
+        push_opacity(&mut target, 1.0).unwrap();
+        let square = rounded_rect(0.0, 0.0, 5.0, 5.0, 0.0).unwrap();
+        fill_flat(&mut target, 0.0, 0.0, 5.0, 5.0, 0.0, black, None, &square).unwrap();
+        let card = rounded_rect(6.5, 0.5, 5.0, 5.0, 2.0).unwrap();
+        fill_flat(&mut target, 6.5, 0.5, 5.0, 5.0, 2.0, black, None, &card).unwrap();
+        let circle = PathBuilder::from_circle(16.0, 3.0, 2.5).unwrap();
+        fill_shape(&mut target, &circle, black, None, None).unwrap();
+        let outline = rounded_rect(20.5, 0.5, 4.0, 4.0, 0.0).unwrap();
+        target.stroke_path(&outline, &paint(black), &stroke(1.0));
+        pop_opacity(&mut target).unwrap();
+        for (x, y) in [(2, 2), (9, 3), (16, 3), (20, 2)] {
+            assert_eq!(red_at(&pixmap, x, y).0, 0, "at {} {}", x, y);
+        }
+
+        // The next group gets the same layer back, with nothing left on it.
+        let mut target = Target {
+            pixmap: &mut pixmap,
+            scale: 1.0,
+            state: &mut state,
+        };
+        push_opacity(&mut target, 1.0).unwrap();
+        assert!(target.state.spare.is_empty());
+        assert!(target.pixmap.pixels().iter().all(|p| p.alpha() == 0));
+        pop_opacity(&mut target).unwrap();
+        assert_eq!(state.spare.len(), 1);
+    }
+
+    #[test]
+    fn rectangle_clips_need_no_mask_and_clip_rasterized_shapes() {
+        let mut pixmap = Pixmap::new(20, 20).unwrap();
+        pixmap.fill(Color::WHITE);
+        let mut state = DrawState::default();
+        let mut target = Target {
+            pixmap: &mut pixmap,
+            scale: 1.0,
+            state: &mut state,
+        };
+        push_clip_rect(&mut target, 5.0, 5.0, 10.0, 10.0).unwrap();
+        assert!(target.state.clip().unwrap().mask.is_none());
+        // A circle crossing the clip edge is cut along it.
+        let circle = PathBuilder::from_circle(5.0, 10.0, 4.0).unwrap();
+        fill_shape(&mut target, &circle, (0, 0, 0, 255), None, None).unwrap();
+        pop_clip(&mut target).unwrap();
+        assert_eq!(red_at(&pixmap, 4, 10).0, 255);
+        assert_eq!(red_at(&pixmap, 6, 10).0, 0);
+    }
+
+    #[test]
+    fn shadows_are_cached_by_shape_but_drawn_in_their_color() {
+        let draw = |color: f64| {
+            let mut pixmap = Pixmap::new(40, 40).unwrap();
+            pixmap.fill(Color::WHITE);
+            let mut state = DrawState::default();
+            let mut target = Target {
+                pixmap: &mut pixmap,
+                scale: 1.0,
+                state: &mut state,
+            };
+            let rect = rounded_rect(10.0, 10.0, 20.0, 20.0, 4.0).unwrap();
+            draw_shadow(&mut target, &rect, &[8.0, 0.0, 2.0, 0.0, color]).unwrap();
+            pixmap
+        };
+        let black = draw(255.0);
+        let again = draw(255.0);
+        assert_eq!(black.data(), again.data());
+        assert!(red_at(&black, 20, 31).0 < 200);
+        let red = draw(4278190335.0);
+        let (r, g, ..) = red_at(&red, 20, 31);
+        assert!(r == 255 && g < 200, "{} {}", r, g);
+    }
+
+    #[test]
+    fn layouts_are_cached_and_agree_with_fresh_ones() {
+        let chain = font_chain(DEFAULT_FONT_ID, Some(&[])).unwrap();
+        let options = TextOptions::sized(14.0);
+        let fonts: Vec<&fontdue::Font> = chain.iter().map(|(_, f)| f.as_ref()).collect();
+        let fresh = layout_text(&fonts, "Cached text", &options);
+        let first = cached_layout("Cached text".to_string(), &chain, &options);
+        let second = cached_layout("Cached text".to_string(), &chain, &options);
+        assert!(Rc::ptr_eq(&first, &second));
+        assert_eq!(first.glyphs, fresh.glyphs);
+        let wider = TextOptions {
+            letter_spacing: 2.0,
+            ..options
+        };
+        let spaced = cached_layout("Cached text".to_string(), &chain, &wider);
+        assert!(spaced.width > first.width);
     }
 }

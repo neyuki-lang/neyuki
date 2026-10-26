@@ -25,6 +25,8 @@ use image::metadata::{LoopCount, Orientation};
 use image::{AnimationDecoder, DynamicImage, ImageDecoder, ImageFormat};
 use tiny_skia::{ColorU8, FillRule, IntSize, Mask, Pixmap, PixmapRef, Transform};
 
+use super::clip::{Bounds, Clip, scale255};
+
 /// The largest image accepted unless `maxPixels` says otherwise: 64
 /// megapixels, comfortably above an 8K frame.
 pub(super) const DEFAULT_MAX_PIXELS: u64 = 64_000_000;
@@ -453,6 +455,11 @@ pub(super) fn resample(source: &Pixmap, src: RectF, width: u32, height: u32) -> 
 }
 
 // DRAWING ------------------------------------------------------------------
+//
+// The loops below treat a premultiplied RGBA pixel as one `u32` and blend
+// two channels per multiply (red with blue, green with alpha), with the
+// same rounding as `scale255` on each byte. Rows are sliced once, and only
+// the rows and columns inside the clip's bounds are visited.
 
 /// Composites a prepared (already sized) frame with its top-left corner at
 /// whole pixel `(left, top)` of `target`. An opaque frame drawn at full
@@ -467,32 +474,156 @@ pub(super) fn draw(
     top: i32,
     opacity: f32,
     radius: f32,
-    mask: Option<&Mask>,
+    clip: Option<&Clip>,
 ) {
     if radius > 0.0 {
         let Some(shape) = rounded_mask(source.width(), source.height(), radius) else {
             return;
         };
-        composite(target, source, left, top, opacity, Some(&shape), mask);
-    } else if opaque && opacity >= 1.0 && mask.is_none() {
-        blit(target, source, left, top);
+        composite(target, source, left, top, opacity, Some(&shape), clip);
+    } else if opaque && opacity >= 1.0 && clip.is_none_or(|clip| clip.mask.is_none()) {
+        blit(target, source, left, top, clip);
     } else {
-        composite(target, source, left, top, opacity, None, mask);
+        composite(target, source, left, top, opacity, None, clip);
     }
 }
 
-/// `x * a / 255`, rounded, for bytes.
-#[inline]
-fn scale255(x: u32, a: u32) -> u32 {
-    let t = x * a + 128;
-    (t + (t >> 8)) >> 8
+/// Every byte of the pixel `p` times `a / 255`, rounded like `scale255`.
+#[inline(always)]
+pub(super) fn scale_pixel(p: u32, a: u32) -> u32 {
+    let rb = (p & 0x00FF_00FF) * a + 0x0080_0080;
+    let rb = ((rb + ((rb >> 8) & 0x00FF_00FF)) >> 8) & 0x00FF_00FF;
+    let ga = ((p >> 8) & 0x00FF_00FF) * a + 0x0080_0080;
+    let ga = (ga + ((ga >> 8) & 0x00FF_00FF)) & 0xFF00_FF00;
+    rb | ga
+}
+
+// ROW KERNELS --------------------------------------------------------------
+//
+// Source-over on rows of premultiplied RGBA bytes, with results that match
+// `scale255` on every byte exactly. Each pixel is blended as one `u32`, two
+// channels per multiply, skipping what it can (empty coverage, transparent
+// or opaque sources). Measured on baseline x86-64 this beats spelling the
+// bytes out in 16-bit lanes for the auto-vectorizer, which gives up on a
+// blend factor known only at run time. The kernels stay out of line so each
+// is compiled for its own loop.
+
+/// Source-over of the premultiplied pixel `s` onto `d`.
+#[inline(always)]
+fn over(d: u32, s: u32) -> u32 {
+    match s >> 24 {
+        0 => d,
+        255 => s,
+        sa => s + scale_pixel(d, 255 - sa),
+    }
+}
+
+/// What a row kernel composites: a row of pixels as long as the target row,
+/// or one color for every pixel.
+#[derive(Clone, Copy)]
+enum Source<'a> {
+    Pixels(&'a [u8]),
+    Color([u8; 4]),
+}
+
+/// Source-over of `source` onto the row `d`, times `alpha` and the
+/// per-pixel `shape` and `clip` coverage.
+#[inline(never)]
+fn over_row_with<const SHAPE: bool, const CLIP: bool>(
+    d: &mut [u8],
+    source: Source,
+    alpha: u32,
+    shape: &[u8],
+    clip: &[u8],
+) {
+    let cover = |p: usize| -> u32 {
+        let mut c = alpha;
+        if SHAPE {
+            c = scale255(c, shape[p] as u32);
+        }
+        if CLIP {
+            c = scale255(c, clip[p] as u32);
+        }
+        c
+    };
+    let (pixels, _) = d.as_chunks_mut::<4>();
+    match source {
+        Source::Pixels(s) => {
+            let (from, _) = s.as_chunks::<4>();
+            for (i, (d, s)) in pixels.iter_mut().zip(from).enumerate() {
+                let s = u32::from_le_bytes(*s);
+                if s >> 24 == 0 {
+                    continue;
+                }
+                let c = cover(i);
+                if c == 0 {
+                    continue;
+                }
+                let s = if c == 255 { s } else { scale_pixel(s, c) };
+                *d = over(u32::from_le_bytes(*d), s).to_le_bytes();
+            }
+        }
+        Source::Color(color) => {
+            let color = u32::from_le_bytes(color);
+            for (i, d) in pixels.iter_mut().enumerate() {
+                let c = cover(i);
+                if c == 0 {
+                    continue;
+                }
+                let s = if c == 255 {
+                    color
+                } else {
+                    scale_pixel(color, c)
+                };
+                *d = over(u32::from_le_bytes(*d), s).to_le_bytes();
+            }
+        }
+    }
+}
+
+/// Source-over of `source` onto the row `d` (both premultiplied bytes)
+/// times `alpha` and the optional per-pixel coverage rows.
+fn over_row(d: &mut [u8], source: Source, alpha: u16, shape: Option<&[u8]>, clip: Option<&[u8]>) {
+    let alpha = alpha as u32;
+    match (shape, clip) {
+        (None, None) => over_row_with::<false, false>(d, source, alpha, &[], &[]),
+        (Some(s), None) => over_row_with::<true, false>(d, source, alpha, s, &[]),
+        (None, Some(c)) => over_row_with::<false, true>(d, source, alpha, &[], c),
+        (Some(s), Some(c)) => over_row_with::<true, true>(d, source, alpha, s, c),
+    }
+}
+
+/// `d = color + d * keep / 255` on every pixel: one color blended over a
+/// whole row, `keep` being 255 minus the color's alpha.
+#[inline(never)]
+fn blend_uniform(d: &mut [u8], color: [u8; 4], keep: u32) {
+    let color = u32::from_le_bytes(color);
+    let (pixels, _) = d.as_chunks_mut::<4>();
+    for p in pixels {
+        *p = (color + scale_pixel(u32::from_le_bytes(*p), keep)).to_le_bytes();
+    }
+}
+
+/// One color blended over a whole row: copied when opaque.
+fn fill_row(d: &mut [u8], color: [u8; 4]) {
+    if color[3] == 255 {
+        let (pixels, _) = d.as_chunks_mut::<4>();
+        pixels.fill(color);
+    } else {
+        blend_uniform(d, color, 255 - color[3] as u32);
+    }
+}
+
+/// The part of `area` (target pixels) that `clip` and the target leave.
+fn visible_rows(target: &Pixmap, area: Bounds, clip: Option<&Clip>) -> Bounds {
+    super::clip::visible(clip, area, target.width(), target.height())
 }
 
 /// Source-over of premultiplied `source` onto `target` at `(left, top)`,
-/// times `opacity`, the `shape` coverage (source-sized) and the `clip`
-/// coverage (target-sized). Integer arithmetic on whole pixels: several
-/// times faster than a general raster pipeline for the plain blits a UI does
-/// most (artwork, cached canvases, icons).
+/// times `opacity`, the `shape` coverage (source-sized) and the clip.
+/// Integer arithmetic on whole pixels: several times faster than a general
+/// raster pipeline for the plain blits a UI does most (artwork, cached
+/// canvases, icons, opacity groups).
 pub(super) fn composite(
     target: &mut Pixmap,
     source: PixmapRef,
@@ -500,73 +631,54 @@ pub(super) fn composite(
     top: i32,
     opacity: f32,
     shape: Option<&Mask>,
-    clip: Option<&Mask>,
+    clip: Option<&Clip>,
 ) {
-    let (tw, th) = (target.width() as i64, target.height() as i64);
-    let (sw, sh) = (source.width() as i64, source.height() as i64);
-    let (x0, y0) = ((left as i64).max(0), (top as i64).max(0));
-    let (x1, y1) = ((left as i64 + sw).min(tw), (top as i64 + sh).min(th));
-    if x0 >= x1 || y0 >= y1 {
+    let area = Bounds::from_xywh(left, top, source.width(), source.height());
+    composite_area(target, source, left, top, area, opacity, shape, clip);
+}
+
+/// [`composite`] limited to the target pixels in `area`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn composite_area(
+    target: &mut Pixmap,
+    source: PixmapRef,
+    left: i32,
+    top: i32,
+    area: Bounds,
+    opacity: f32,
+    shape: Option<&Mask>,
+    clip: Option<&Clip>,
+) {
+    let area = area.intersect(&Bounds::from_xywh(
+        left,
+        top,
+        source.width(),
+        source.height(),
+    ));
+    let b = visible_rows(target, area, clip);
+    let alpha = (opacity.clamp(0.0, 1.0) * 255.0 + 0.5) as u16;
+    if b.is_empty() || alpha == 0 {
         return;
     }
-    let alpha = (opacity.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
-    if alpha == 0 {
-        return;
-    }
+    let (sw, tw) = (source.width() as usize, target.width() as usize);
     let src = source.data();
     let shape = shape.map(|m| m.data());
-    let clip = clip
-        .filter(|m| m.width() as i64 == tw && m.height() as i64 == th)
-        .map(|m| m.data());
     let dst = target.data_mut();
-    let (sw, tw) = (sw as usize, tw as usize);
-    let (sx0, sx1) = ((x0 - left as i64) as usize, (x1 - left as i64) as usize);
-    let (x0, x1) = (x0 as usize, x1 as usize);
-    for y in y0 as usize..y1 as usize {
-        let sy = (y as i64 - top as i64) as usize;
+    let (sx0, sx1) = ((b.x0 - left) as usize, (b.x1 - left) as usize);
+    let (x0, x1) = (b.x0 as usize, b.x1 as usize);
+    for y in b.y0..b.y1 {
+        let sy = (y - top) as usize;
         let srow = &src[(sy * sw + sx0) * 4..(sy * sw + sx1) * 4];
-        let drow = &mut dst[(y * tw + x0) * 4..(y * tw + x1) * 4];
+        let drow = &mut dst[(y as usize * tw + x0) * 4..(y as usize * tw + x1) * 4];
         let shape_row = shape.map(|m| &m[sy * sw + sx0..sy * sw + sx1]);
-        let clip_row = clip.map(|m| &m[y * tw + x0..y * tw + x1]);
-        for (i, (d, s)) in drow
-            .chunks_exact_mut(4)
-            .zip(srow.chunks_exact(4))
-            .enumerate()
-        {
-            let sa = s[3] as u32;
-            if sa == 0 {
-                continue;
-            }
-            let mut cover = alpha;
-            if let Some(row) = shape_row {
-                cover = scale255(cover, row[i] as u32);
-            }
-            if let Some(row) = clip_row {
-                cover = scale255(cover, row[i] as u32);
-            }
-            if cover == 0 {
-                continue;
-            }
-            if cover == 255 && sa == 255 {
-                d.copy_from_slice(s);
-                continue;
-            }
-            let keep = 255 - scale255(sa, cover);
-            for (dc, &sc) in d.iter_mut().zip(s) {
-                let v = if cover == 255 {
-                    sc as u32
-                } else {
-                    scale255(sc as u32, cover)
-                };
-                *dc = (v + scale255(*dc as u32, keep)).min(255) as u8;
-            }
-        }
+        let clip_row = clip.and_then(|c| c.row(y, b.x0, b.x1));
+        over_row(drow, Source::Pixels(srow), alpha, shape_row, clip_row);
     }
 }
 
 /// Source-over of one premultiplied color over the whole-pixel rectangle at
 /// `(left, top)` of `width` x `height`, times the `shape` coverage (rectangle-
-/// sized) and the `clip` coverage (target-sized).
+/// sized) and the clip.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn fill_solid(
     target: &mut Pixmap,
@@ -576,125 +688,248 @@ pub(super) fn fill_solid(
     width: u32,
     height: u32,
     shape: Option<&Mask>,
-    clip: Option<&Mask>,
+    clip: Option<&Clip>,
 ) {
-    let (tw, th) = (target.width() as i64, target.height() as i64);
-    let (w, h) = (width as i64, height as i64);
-    let (x0, y0) = ((left as i64).max(0), (top as i64).max(0));
-    let (x1, y1) = ((left as i64 + w).min(tw), (top as i64 + h).min(th));
-    if x0 >= x1 || y0 >= y1 || color[3] == 0 {
+    let b = visible_rows(target, Bounds::from_xywh(left, top, width, height), clip);
+    if b.is_empty() || color[3] == 0 {
         return;
     }
     let shape = shape.map(|m| m.data());
-    let clip = clip
-        .filter(|m| m.width() as i64 == tw && m.height() as i64 == th)
-        .map(|m| m.data());
+    let tw = target.width() as usize;
     let dst = target.data_mut();
-    let full = [
-        color[0] as u32,
-        color[1] as u32,
-        color[2] as u32,
-        color[3] as u32,
-    ];
-    let (w, tw) = (w as usize, tw as usize);
-    let (sx0, sx1) = ((x0 - left as i64) as usize, (x1 - left as i64) as usize);
-    let (x0, x1) = (x0 as usize, x1 as usize);
-    // Without a shape or clip every pixel gets the same blend.
-    let keep_all = 255 - full[3];
-    for y in y0 as usize..y1 as usize {
-        let sy = (y as i64 - top as i64) as usize;
-        let drow = &mut dst[(y * tw + x0) * 4..(y * tw + x1) * 4];
+    let w = width as usize;
+    let (sx0, sx1) = ((b.x0 - left) as usize, (b.x1 - left) as usize);
+    let (x0, x1) = (b.x0 as usize, b.x1 as usize);
+    let source = Source::Color(color);
+    for y in b.y0..b.y1 {
+        let sy = (y - top) as usize;
+        let drow = &mut dst[(y as usize * tw + x0) * 4..(y as usize * tw + x1) * 4];
         let shape_row = shape.map(|m| &m[sy * w + sx0..sy * w + sx1]);
-        let clip_row = clip.map(|m| &m[y * tw + x0..y * tw + x1]);
-        if shape_row.is_none() && clip_row.is_none() {
-            if full[3] == 255 {
-                for d in drow.chunks_exact_mut(4) {
-                    d.copy_from_slice(&color);
-                }
-            } else {
-                for d in drow.chunks_exact_mut(4) {
-                    for (dc, &fc) in d.iter_mut().zip(&full) {
-                        *dc = (fc + scale255(*dc as u32, keep_all)).min(255) as u8;
-                    }
-                }
-            }
+        let clip_row = clip.and_then(|c| c.row(y, b.x0, b.x1));
+        match (shape_row, clip_row) {
+            (None, None) => fill_row(drow, color),
+            (Some(shape), None) => fill_shaped_row(drow, color, shape),
+            _ => over_row(drow, source, 255, shape_row, clip_row),
+        }
+    }
+}
+
+/// A row of one color through a coverage row, where most of the coverage
+/// is usually all or nothing (the inside and outside of a rounded shape):
+/// runs of full coverage take the uniform path.
+fn fill_shaped_row(d: &mut [u8], color: [u8; 4], shape: &[u8]) {
+    let source = Source::Color(color);
+    // `start` is where the pixels not yet drawn begin.
+    let (mut start, mut i) = (0, 0);
+    while i < shape.len() {
+        if shape[i] != 255 {
+            i += 1;
             continue;
         }
-        for (i, d) in drow.chunks_exact_mut(4).enumerate() {
-            let mut cover = 255;
-            if let Some(row) = shape_row {
-                cover = row[i] as u32;
+        let run = shape[i..].iter().take_while(|&&c| c == 255).count();
+        if run >= 8 {
+            if start < i {
+                over_row(
+                    &mut d[start * 4..i * 4],
+                    source,
+                    255,
+                    Some(&shape[start..i]),
+                    None,
+                );
             }
-            if let Some(row) = clip_row {
-                cover = scale255(cover, row[i] as u32);
-            }
-            if cover == 0 {
-                continue;
-            }
-            if cover == 255 && full[3] == 255 {
-                d.copy_from_slice(&color);
-                continue;
-            }
-            let keep = 255 - scale255(full[3], cover);
-            for (dc, &fc) in d.iter_mut().zip(&full) {
-                let v = if cover == 255 {
-                    fc
-                } else {
-                    scale255(fc, cover)
-                };
-                *dc = (v + scale255(*dc as u32, keep)).min(255) as u8;
-            }
+            fill_row(&mut d[i * 4..(i + run) * 4], color);
+            start = i + run;
         }
+        i += run;
+    }
+    if start < shape.len() {
+        over_row(
+            &mut d[start * 4..],
+            source,
+            255,
+            Some(&shape[start..]),
+            None,
+        );
+    }
+}
+
+/// Source-over of one premultiplied color over the rectangle `left..right`
+/// by `top..bottom` (fractional physical pixels), with the anti-aliased
+/// coverage of its edges worked out exactly instead of rasterized.
+pub(super) fn fill_rect_aa(
+    target: &mut Pixmap,
+    color: [u8; 4],
+    (left, top, right, bottom): (f32, f32, f32, f32),
+    clip: Option<&Clip>,
+) {
+    let area = Bounds::covering(left, top, right, bottom, 0.0);
+    let b = visible_rows(target, area, clip);
+    if b.is_empty() || color[3] == 0 {
+        return;
+    }
+    // The share of pixel `i` (spanning i..i+1) inside `lo..hi`, 0 to 255.
+    let coverage = |i: i32, lo: f32, hi: f32| -> u8 {
+        let inside = (hi.min(i as f32 + 1.0) - lo.max(i as f32)).clamp(0.0, 1.0);
+        (inside * 255.0 + 0.5) as u8
+    };
+    let columns: Vec<u8> = (b.x0..b.x1).map(|x| coverage(x, left, right)).collect();
+    let tw = target.width() as usize;
+    let dst = target.data_mut();
+    let source = Source::Color(color);
+    let (x0, x1) = (b.x0 as usize, b.x1 as usize);
+    // The run of columns covered completely, which blend alike.
+    let from = columns
+        .iter()
+        .position(|&c| c == 255)
+        .unwrap_or(columns.len());
+    let to = columns
+        .iter()
+        .rposition(|&c| c == 255)
+        .map_or(from, |i| i + 1);
+    for y in b.y0..b.y1 {
+        let row_cover = coverage(y, top, bottom) as u16;
+        if row_cover == 0 {
+            continue;
+        }
+        let drow = &mut dst[(y as usize * tw + x0) * 4..(y as usize * tw + x1) * 4];
+        let clip_row = clip.and_then(|c| c.row(y, b.x0, b.x1));
+        if clip_row.is_some() || row_cover < 255 || from >= to {
+            over_row(drow, source, row_cover, Some(&columns), clip_row);
+            continue;
+        }
+        let (head, rest) = drow.split_at_mut(from * 4);
+        let (middle, tail) = rest.split_at_mut((to - from) * 4);
+        over_row(head, source, 255, Some(&columns[..from]), None);
+        fill_row(middle, color);
+        over_row(tail, source, 255, Some(&columns[to..]), None);
+    }
+}
+
+/// Blends `color` (straight, not premultiplied) through the 8-bit coverage
+/// `mask` (`width` pixels per row) onto `target` within `area`, whose
+/// top-left pixel the mask's `(mx, my)` lands on. What text glyphs use.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn blend_coverage(
+    target: &mut Pixmap,
+    color: (u8, u8, u8, u8),
+    mask: &[u8],
+    width: usize,
+    (mx, my): (usize, usize),
+    area: Bounds,
+    clip: Option<&Clip>,
+) {
+    let tw = target.width() as usize;
+    let dst = target.data_mut();
+    let source = Source::Color([color.0, color.1, color.2, 255]);
+    let n = area.width();
+    for (i, y) in (area.y0..area.y1).enumerate() {
+        let row = (my + i) * width + mx;
+        let coverage = &mask[row..row + n];
+        if coverage.iter().all(|&c| c == 0) {
+            continue;
+        }
+        let start = (y as usize * tw + area.x0 as usize) * 4;
+        let drow = &mut dst[start..start + n * 4];
+        let clip_row = clip.and_then(|c| c.row(y, area.x0, area.x1));
+        over_row(drow, source, color.3 as u16, Some(coverage), clip_row);
+    }
+}
+
+/// Fills `area` of `pixmap` with transparent pixels.
+pub(super) fn clear_area(pixmap: &mut Pixmap, area: Bounds) {
+    let b = area.intersect(&Bounds::surface(pixmap.width(), pixmap.height()));
+    if b.is_empty() {
+        return;
+    }
+    let stride = pixmap.width() as usize * 4;
+    let data = pixmap.data_mut();
+    if b.x0 == 0 && b.x1 as usize * 4 == stride {
+        data[b.y0 as usize * stride..b.y1 as usize * stride].fill(0);
+        return;
+    }
+    for y in b.y0 as usize..b.y1 as usize {
+        data[y * stride + b.x0 as usize * 4..y * stride + b.x1 as usize * 4].fill(0);
     }
 }
 
 thread_local! {
-    /// Coverage masks of rounded rectangles by width, height and radius (in
-    /// quarter pixels). A UI draws the same few card and panel shapes every
-    /// frame; rasterizing their corners once is enough.
-    static ROUNDED: std::cell::RefCell<std::collections::HashMap<(u32, u32, u32), std::rc::Rc<Mask>>> =
-        std::cell::RefCell::new(std::collections::HashMap::new());
+    /// Coverage masks of rounded rectangles by size, radius and position
+    /// within their first pixel (all in quarter pixels). A UI draws the same
+    /// few card and panel shapes every frame, sliding and lifting them by
+    /// fractions of a pixel while they animate; rasterizing each placement
+    /// once is enough.
+    static ROUNDED: std::cell::RefCell<RoundedCache> = std::cell::RefCell::new(RoundedCache::default());
 }
 
-/// How many rounded masks are kept before the cache starts over.
-const ROUNDED_CACHE: usize = 256;
+#[derive(Default)]
+struct RoundedCache {
+    masks: std::collections::HashMap<[u32; 5], std::rc::Rc<Mask>>,
+    bytes: usize,
+}
+
+/// How many bytes of rounded masks are kept before the cache starts over.
+/// Window-sized panels make large masks, and a window being resized makes
+/// a new size every frame.
+const ROUNDED_CACHE_BYTES: usize = 48 * 1024 * 1024;
 
 /// The anti-aliased coverage of a `width` x `height` rectangle whose corners
 /// are rounded by `radius` pixels, cached.
 pub(super) fn rounded_mask(width: u32, height: u32, radius: f32) -> Option<std::rc::Rc<Mask>> {
-    let key = (width, height, (radius * 4.0).round().max(0.0) as u32);
-    if let Some(mask) = ROUNDED.with(|cache| cache.borrow().get(&key).cloned()) {
+    rounded_mask_at(0.0, 0.0, width as f32, height as f32, radius)
+}
+
+/// The coverage of a rounded rectangle of `width` x `height` (fractional)
+/// whose top-left corner sits at `(fx, fy)` inside the mask's first pixel,
+/// in a mask just large enough to hold it. Cached by all five numbers to a
+/// quarter of a pixel, which moves an edge by an eighth at most.
+pub(super) fn rounded_mask_at(
+    fx: f32,
+    fy: f32,
+    width: f32,
+    height: f32,
+    radius: f32,
+) -> Option<std::rc::Rc<Mask>> {
+    let q = |v: f32| (v * 4.0).round().max(0.0) as u32;
+    let key = [q(fx), q(fy), q(width), q(height), q(radius)];
+    if let Some(mask) = ROUNDED.with(|cache| cache.borrow().masks.get(&key).cloned()) {
         return Some(mask);
     }
-    let path = super::rounded_rect(0.0, 0.0, width as f32, height as f32, radius)?;
-    let mut mask = Mask::new(width, height)?;
+    let [fx, fy, width, height, radius] = key.map(|v| v as f32 / 4.0);
+    let path = super::rounded_rect(fx, fy, width, height, radius)?;
+    let mut mask = Mask::new((fx + width).ceil() as u32, (fy + height).ceil() as u32)?;
     mask.fill_path(&path, FillRule::Winding, true, Transform::identity());
     let mask = std::rc::Rc::new(mask);
     ROUNDED.with(|cache| {
         let mut cache = cache.borrow_mut();
-        if cache.len() >= ROUNDED_CACHE {
-            cache.clear();
+        let cost = mask.data().len() + 64;
+        if cache.bytes + cost > ROUNDED_CACHE_BYTES {
+            cache.masks.clear();
+            cache.bytes = 0;
         }
-        cache.insert(key, mask.clone());
+        cache.bytes += cost;
+        cache.masks.insert(key, mask.clone());
     });
     Some(mask)
 }
 
-/// Copies `source` over `target` at `(left, top)`, clipped to the target.
-fn blit(target: &mut Pixmap, source: PixmapRef, left: i32, top: i32) {
-    let (tw, th) = (target.width() as i64, target.height() as i64);
-    let (sw, sh) = (source.width() as i64, source.height() as i64);
-    let (x0, y0) = ((left as i64).max(0), (top as i64).max(0));
-    let (x1, y1) = ((left as i64 + sw).min(tw), (top as i64 + sh).min(th));
-    if x0 >= x1 || y0 >= y1 {
+/// Copies `source` over `target` at `(left, top)`, clipped to the target
+/// and to the bounds of a clip without a mask.
+fn blit(target: &mut Pixmap, source: PixmapRef, left: i32, top: i32, clip: Option<&Clip>) {
+    let b = visible_rows(
+        target,
+        Bounds::from_xywh(left, top, source.width(), source.height()),
+        clip,
+    );
+    if b.is_empty() {
         return;
     }
-    let count = ((x1 - x0) * 4) as usize;
+    let (sw, tw) = (source.width() as usize, target.width() as usize);
+    let count = b.width() * 4;
     let src = source.data();
     let dst = target.data_mut();
-    for y in y0..y1 {
-        let from = (((y - top as i64) * sw + (x0 - left as i64)) * 4) as usize;
-        let to = ((y * tw + x0) * 4) as usize;
+    for y in b.y0..b.y1 {
+        let from = ((y - top) as usize * sw + (b.x0 - left) as usize) * 4;
+        let to = (y as usize * tw + b.x0 as usize) * 4;
         dst[to..to + count].copy_from_slice(&src[from..from + count]);
     }
 }
@@ -702,6 +937,7 @@ fn blit(target: &mut Pixmap, source: PixmapRef, left: i32, top: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vm::libs::ui::clip::scale255;
 
     const JPEG: &[u8] = include_bytes!("../../../../tests/fixtures/quadrants.jpg");
     const GIF: &[u8] = include_bytes!("../../../../tests/fixtures/spin.gif");
@@ -963,5 +1199,127 @@ mod tests {
         draw(&mut target, source.as_ref(), true, 0, 0, 1.0, 8.0, None);
         assert!(rgba(&target, 0, 0).0 > 200);
         assert_eq!(rgba(&target, 10, 10), (0, 0, 0, 255));
+    }
+
+    /// A small deterministic generator for test pixels.
+    fn noise(seed: &mut u32) -> u8 {
+        *seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+        (*seed >> 16) as u8
+    }
+
+    /// A random premultiplied pixel.
+    fn premultiplied(seed: &mut u32) -> [u8; 4] {
+        let a = match noise(seed) % 4 {
+            0 => 0,
+            1 => 255,
+            _ => noise(seed),
+        };
+        let channel = |seed: &mut u32| (noise(seed) as u32 * a as u32 / 255) as u8;
+        [channel(seed), channel(seed), channel(seed), a]
+    }
+
+    #[test]
+    fn row_kernels_match_scalar_source_over() {
+        let mut seed = 7;
+        for len in [1, 3, 4, 5, 8, 13, 31] {
+            let dst: Vec<u8> = (0..len).flat_map(|_| premultiplied(&mut seed)).collect();
+            let src: Vec<u8> = (0..len).flat_map(|_| premultiplied(&mut seed)).collect();
+            let shape: Vec<u8> = (0..len).map(|_| noise(&mut seed)).collect();
+            let clip: Vec<u8> = (0..len).map(|_| noise(&mut seed)).collect();
+            for alpha in [0u16, 77, 255] {
+                let mut fast = dst.clone();
+                over_row(
+                    &mut fast,
+                    Source::Pixels(&src),
+                    alpha,
+                    Some(&shape),
+                    Some(&clip),
+                );
+                for p in 0..len {
+                    let cover = scale255(scale255(alpha as u32, shape[p] as u32), clip[p] as u32);
+                    let s = &src[p * 4..p * 4 + 4];
+                    let keep = 255 - scale255(s[3] as u32, cover);
+                    for c in 0..4 {
+                        let want =
+                            scale255(s[c] as u32, cover) + scale255(dst[p * 4 + c] as u32, keep);
+                        assert_eq!(
+                            fast[p * 4 + c] as u32,
+                            want,
+                            "len {} pixel {} byte {}",
+                            len,
+                            p,
+                            c
+                        );
+                    }
+                }
+            }
+            // A uniform blend agrees with the general kernel.
+            let color = [40, 50, 60, 128];
+            let mut uniform = dst.clone();
+            fill_row(&mut uniform, color);
+            let mut general = dst.clone();
+            over_row(&mut general, Source::Color(color), 255, None, None);
+            assert_eq!(uniform, general);
+            // So does a shaped fill, whatever runs of full coverage it has.
+            let mut runs = shape.clone();
+            for (i, c) in runs.iter_mut().enumerate() {
+                if i % 11 < 9 {
+                    *c = 255;
+                }
+            }
+            let mut shaped = dst.clone();
+            fill_shaped_row(&mut shaped, color, &runs);
+            let mut general = dst.clone();
+            over_row(&mut general, Source::Color(color), 255, Some(&runs), None);
+            assert_eq!(shaped, general);
+        }
+    }
+
+    #[test]
+    fn fractional_rectangles_cover_their_edges_partly() {
+        let mut target = Pixmap::new(6, 3).unwrap();
+        fill_rect_aa(
+            &mut target,
+            [255, 255, 255, 255],
+            (1.5, 0.0, 4.25, 2.0),
+            None,
+        );
+        let alphas: Vec<u8> = (0..6).map(|x| rgba(&target, x, 0).3).collect();
+        assert_eq!(alphas, vec![0, 128, 255, 255, 64, 0]);
+        assert_eq!(rgba(&target, 2, 2).3, 0);
+        // A clip limits the fill to its bounds.
+        let mut target = Pixmap::new(6, 3).unwrap();
+        let clip = Clip::rect(6, 3, None, (3.0, 0.0, 6.0, 3.0));
+        fill_rect_aa(
+            &mut target,
+            [255, 255, 255, 255],
+            (0.0, 0.0, 6.0, 3.0),
+            Some(&clip),
+        );
+        assert_eq!(rgba(&target, 2, 1).3, 0);
+        assert_eq!(rgba(&target, 3, 1).3, 255);
+    }
+
+    #[test]
+    fn rounded_masks_follow_their_subpixel_position() {
+        let at_origin = rounded_mask_at(0.0, 0.0, 10.0, 10.0, 3.0).unwrap();
+        let shifted = rounded_mask_at(0.5, 0.5, 10.0, 10.0, 3.0).unwrap();
+        assert_eq!((at_origin.width(), at_origin.height()), (10, 10));
+        assert_eq!((shifted.width(), shifted.height()), (11, 11));
+        // Half a pixel in, the first column is about half covered.
+        let edge = shifted.data()[5 * 11];
+        assert!(edge > 100 && edge < 155, "{}", edge);
+    }
+
+    #[test]
+    fn clearing_an_area_leaves_the_rest() {
+        let mut pixmap = Pixmap::new(4, 4).unwrap();
+        pixmap.fill(tiny_skia::Color::WHITE);
+        clear_area(&mut pixmap, Bounds::from_xywh(1, 1, 2, 2));
+        assert_eq!(rgba(&pixmap, 1, 1).3, 0);
+        assert_eq!(rgba(&pixmap, 0, 0).3, 255);
+        assert_eq!(rgba(&pixmap, 3, 3).3, 255);
+        clear_area(&mut pixmap, Bounds::surface(4, 4));
+        assert!(pixmap.pixels().iter().all(|p| p.alpha() == 0));
     }
 }
