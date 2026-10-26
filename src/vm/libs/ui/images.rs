@@ -23,10 +23,7 @@ use image::codecs::png::PngDecoder;
 use image::codecs::webp::WebPDecoder;
 use image::metadata::{LoopCount, Orientation};
 use image::{AnimationDecoder, DynamicImage, ImageDecoder, ImageFormat};
-use tiny_skia::{
-    ColorU8, FillRule, FilterQuality, IntSize, Mask, Paint, Pattern, Pixmap, PixmapPaint,
-    PixmapRef, SpreadMode, Transform,
-};
+use tiny_skia::{ColorU8, FillRule, IntSize, Mask, Pixmap, PixmapRef, Transform};
 
 /// The largest image accepted unless `maxPixels` says otherwise: 64
 /// megapixels, comfortably above an 8K frame.
@@ -459,7 +456,8 @@ pub(super) fn resample(source: &Pixmap, src: RectF, width: u32, height: u32) -> 
 
 /// Composites a prepared (already sized) frame with its top-left corner at
 /// whole pixel `(left, top)` of `target`. An opaque frame drawn at full
-/// opacity without rounded corners is copied row by row.
+/// opacity without rounded corners is copied row by row; everything else
+/// goes through `composite`, with rounded corners as a cached coverage mask.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw(
     target: &mut Pixmap,
@@ -472,43 +470,188 @@ pub(super) fn draw(
     mask: Option<&Mask>,
 ) {
     if radius > 0.0 {
-        let Some(path) = super::rounded_rect(
-            left as f32,
-            top as f32,
-            source.width() as f32,
-            source.height() as f32,
-            radius,
-        ) else {
+        let Some(shape) = rounded_mask(source.width(), source.height(), radius) else {
             return;
         };
-        let paint = Paint {
-            shader: Pattern::new(
-                source,
-                SpreadMode::Pad,
-                FilterQuality::Nearest,
-                opacity,
-                Transform::from_translate(left as f32, top as f32),
-            ),
-            anti_alias: true,
-            ..Paint::default()
-        };
-        target.fill_path(
-            &path,
-            &paint,
-            FillRule::Winding,
-            Transform::identity(),
-            mask,
-        );
+        composite(target, source, left, top, opacity, Some(&shape), mask);
     } else if opaque && opacity >= 1.0 && mask.is_none() {
         blit(target, source, left, top);
     } else {
-        let paint = PixmapPaint {
-            opacity,
-            quality: FilterQuality::Nearest,
-            ..PixmapPaint::default()
-        };
-        target.draw_pixmap(left, top, source, &paint, Transform::identity(), mask);
+        composite(target, source, left, top, opacity, None, mask);
     }
+}
+
+/// `x * a / 255`, rounded, for bytes.
+#[inline]
+fn scale255(x: u32, a: u32) -> u32 {
+    let t = x * a + 128;
+    (t + (t >> 8)) >> 8
+}
+
+/// Source-over of premultiplied `source` onto `target` at `(left, top)`,
+/// times `opacity`, the `shape` coverage (source-sized) and the `clip`
+/// coverage (target-sized). Integer arithmetic on whole pixels: several
+/// times faster than a general raster pipeline for the plain blits a UI does
+/// most (artwork, cached canvases, icons).
+pub(super) fn composite(
+    target: &mut Pixmap,
+    source: PixmapRef,
+    left: i32,
+    top: i32,
+    opacity: f32,
+    shape: Option<&Mask>,
+    clip: Option<&Mask>,
+) {
+    let (tw, th) = (target.width() as i64, target.height() as i64);
+    let (sw, sh) = (source.width() as i64, source.height() as i64);
+    let (x0, y0) = ((left as i64).max(0), (top as i64).max(0));
+    let (x1, y1) = ((left as i64 + sw).min(tw), (top as i64 + sh).min(th));
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+    let alpha = (opacity.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
+    if alpha == 0 {
+        return;
+    }
+    let src = source.data();
+    let shape = shape.map(|m| m.data());
+    let clip = clip
+        .filter(|m| m.width() as i64 == tw && m.height() as i64 == th)
+        .map(|m| m.data());
+    let dst = target.data_mut();
+    for y in y0..y1 {
+        let sy = y - top as i64;
+        for x in x0..x1 {
+            let sx = x - left as i64;
+            let si = (sy * sw + sx) as usize;
+            let mut cover = alpha;
+            if let Some(shape) = shape {
+                cover = scale255(cover, shape[si] as u32);
+            }
+            let di = (y * tw + x) as usize;
+            if let Some(clip) = clip {
+                cover = scale255(cover, clip[di] as u32);
+            }
+            if cover == 0 {
+                continue;
+            }
+            let (si, di) = (si * 4, di * 4);
+            let sa = src[si + 3] as u32;
+            if sa == 0 {
+                continue;
+            }
+            if cover == 255 && sa == 255 {
+                dst[di..di + 4].copy_from_slice(&src[si..si + 4]);
+                continue;
+            }
+            let a = scale255(sa, cover);
+            let keep = 255 - a;
+            for c in 0..4 {
+                let s = if cover == 255 {
+                    src[si + c] as u32
+                } else {
+                    scale255(src[si + c] as u32, cover)
+                };
+                dst[di + c] = (s + scale255(dst[di + c] as u32, keep)).min(255) as u8;
+            }
+        }
+    }
+}
+
+/// Source-over of one premultiplied color over the whole-pixel rectangle at
+/// `(left, top)` of `width` x `height`, times the `shape` coverage (rectangle-
+/// sized) and the `clip` coverage (target-sized).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn fill_solid(
+    target: &mut Pixmap,
+    color: [u8; 4],
+    left: i32,
+    top: i32,
+    width: u32,
+    height: u32,
+    shape: Option<&Mask>,
+    clip: Option<&Mask>,
+) {
+    let (tw, th) = (target.width() as i64, target.height() as i64);
+    let (w, h) = (width as i64, height as i64);
+    let (x0, y0) = ((left as i64).max(0), (top as i64).max(0));
+    let (x1, y1) = ((left as i64 + w).min(tw), (top as i64 + h).min(th));
+    if x0 >= x1 || y0 >= y1 || color[3] == 0 {
+        return;
+    }
+    let shape = shape.map(|m| m.data());
+    let clip = clip
+        .filter(|m| m.width() as i64 == tw && m.height() as i64 == th)
+        .map(|m| m.data());
+    let dst = target.data_mut();
+    let full = [
+        color[0] as u32,
+        color[1] as u32,
+        color[2] as u32,
+        color[3] as u32,
+    ];
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let di = (y * tw + x) as usize;
+            let mut cover = 255;
+            if let Some(shape) = shape {
+                cover = shape[((y - top as i64) * w + (x - left as i64)) as usize] as u32;
+            }
+            if let Some(clip) = clip {
+                cover = scale255(cover, clip[di] as u32);
+            }
+            if cover == 0 {
+                continue;
+            }
+            let di = di * 4;
+            if cover == 255 && full[3] == 255 {
+                dst[di..di + 4].copy_from_slice(&color);
+                continue;
+            }
+            let a = scale255(full[3], cover);
+            let keep = 255 - a;
+            for c in 0..4 {
+                let s = if cover == 255 {
+                    full[c]
+                } else {
+                    scale255(full[c], cover)
+                };
+                dst[di + c] = (s + scale255(dst[di + c] as u32, keep)).min(255) as u8;
+            }
+        }
+    }
+}
+
+thread_local! {
+    /// Coverage masks of rounded rectangles by width, height and radius (in
+    /// quarter pixels). A UI draws the same few card and panel shapes every
+    /// frame; rasterizing their corners once is enough.
+    static ROUNDED: std::cell::RefCell<std::collections::HashMap<(u32, u32, u32), std::rc::Rc<Mask>>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// How many rounded masks are kept before the cache starts over.
+const ROUNDED_CACHE: usize = 256;
+
+/// The anti-aliased coverage of a `width` x `height` rectangle whose corners
+/// are rounded by `radius` pixels, cached.
+pub(super) fn rounded_mask(width: u32, height: u32, radius: f32) -> Option<std::rc::Rc<Mask>> {
+    let key = (width, height, (radius * 4.0).round().max(0.0) as u32);
+    if let Some(mask) = ROUNDED.with(|cache| cache.borrow().get(&key).cloned()) {
+        return Some(mask);
+    }
+    let path = super::rounded_rect(0.0, 0.0, width as f32, height as f32, radius)?;
+    let mut mask = Mask::new(width, height)?;
+    mask.fill_path(&path, FillRule::Winding, true, Transform::identity());
+    let mask = std::rc::Rc::new(mask);
+    ROUNDED.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= ROUNDED_CACHE {
+            cache.clear();
+        }
+        cache.insert(key, mask.clone());
+    });
+    Some(mask)
 }
 
 /// Copies `source` over `target` at `(left, top)`, clipped to the target.
@@ -679,6 +822,42 @@ mod tests {
         );
         assert!(Fit::parse("stretch").is_err());
         assert_eq!(Fit::parse("cover"), Ok(Fit::Cover));
+    }
+
+    #[test]
+    fn composite_blends_like_source_over() {
+        let mut target = Pixmap::new(2, 1).unwrap();
+        target.fill(tiny_skia::Color::from_rgba8(0, 0, 255, 255));
+        let mut source = Pixmap::new(2, 1).unwrap();
+        // Opaque red, then half-transparent red (premultiplied).
+        source.pixels_mut()[0] =
+            tiny_skia::PremultipliedColorU8::from_rgba(255, 0, 0, 255).unwrap();
+        source.pixels_mut()[1] =
+            tiny_skia::PremultipliedColorU8::from_rgba(128, 0, 0, 128).unwrap();
+        composite(&mut target, source.as_ref(), 0, 0, 1.0, None, None);
+        let p = target.pixels();
+        assert_eq!((p[0].red(), p[0].blue(), p[0].alpha()), (255, 0, 255));
+        assert_eq!((p[1].red(), p[1].blue(), p[1].alpha()), (128, 127, 255));
+    }
+
+    #[test]
+    fn rounded_masks_clear_their_corners() {
+        let mask = rounded_mask(20, 20, 6.0).unwrap();
+        assert_eq!(mask.data()[0], 0);
+        assert_eq!(mask.data()[10 * 20 + 10], 255);
+        let mut target = Pixmap::new(20, 20).unwrap();
+        fill_solid(
+            &mut target,
+            [255, 255, 255, 255],
+            0,
+            0,
+            20,
+            20,
+            Some(&mask),
+            None,
+        );
+        assert_eq!(target.pixels()[0].alpha(), 0);
+        assert_eq!(target.pixels()[10 * 20 + 10].alpha(), 255);
     }
 
     #[test]

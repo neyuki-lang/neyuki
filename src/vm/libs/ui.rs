@@ -1943,13 +1943,16 @@ fn pop_opacity(target: &mut Target) -> Result<(), String> {
         return Ok(());
     };
     let layer = std::mem::replace(target.pixmap, group.saved);
-    let paint = PixmapPaint {
-        opacity: group.opacity,
-        ..PixmapPaint::default()
-    };
-    target
-        .pixmap
-        .draw_pixmap(0, 0, layer.as_ref(), &paint, Transform::identity(), None);
+    // Mostly transparent, so the compositor's skip of empty pixels pays off.
+    images::composite(
+        target.pixmap,
+        layer.as_ref(),
+        0,
+        0,
+        group.opacity,
+        None,
+        None,
+    );
     Ok(())
 }
 
@@ -3073,11 +3076,70 @@ fn builtin_fill_rect(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String>
     let shadow = numbers_arg(args, 8, "shadow")?;
     with_target(id, |target| {
         if let Some(path) = rounded_rect(x, y, w, h, radius) {
+            if gradient.is_none()
+                && fill_aligned(target, x, y, w, h, radius, color, shadow.as_deref(), &path)?
+            {
+                return Ok(());
+            }
             fill_shape(target, &path, color, gradient.as_deref(), shadow.as_deref())?;
         }
         Ok(())
     })?;
     Ok(vec![])
+}
+
+/// A flat-colored rectangle whose edges land on whole pixels is filled by
+/// `images::fill_solid` (rounded corners from a cached mask) instead of the
+/// path rasterizer, which is several times slower for the cards, panels and
+/// highlights a UI fills every frame. Returns false (nothing drawn) when the
+/// edges fall between pixels, which need the rasterizer's anti-aliasing.
+#[allow(clippy::too_many_arguments)]
+fn fill_aligned(
+    target: &mut Target,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+    color: (u8, u8, u8, u8),
+    shadow: Option<&[f64]>,
+    path: &Path,
+) -> Result<bool, String> {
+    let scale = target.scale as f32;
+    let edges = [x * scale, y * scale, (x + w) * scale, (y + h) * scale];
+    if edges.iter().any(|e| (e - e.round()).abs() > 0.01) {
+        return Ok(false);
+    }
+    let (left, top) = (edges[0].round() as i32, edges[1].round() as i32);
+    let (right, bottom) = (edges[2].round() as i32, edges[3].round() as i32);
+    if right <= left || bottom <= top {
+        return Ok(true);
+    }
+    let (width, height) = ((right - left) as u32, (bottom - top) as u32);
+    let shape = if radius > 0.0 {
+        match images::rounded_mask(width, height, radius * scale) {
+            Some(mask) => Some(mask),
+            None => return Ok(false),
+        }
+    } else {
+        None
+    };
+    if let Some(shadow) = shadow {
+        draw_shadow(target, path, shadow)?;
+    }
+    let (r, g, b, a) = color;
+    let premultiply = |c: u8| ((c as u32 * a as u32 + 127) / 255) as u8;
+    images::fill_solid(
+        target.pixmap,
+        [premultiply(r), premultiply(g), premultiply(b), a],
+        left,
+        top,
+        width,
+        height,
+        shape.as_deref(),
+        target.state.clips.last(),
+    );
+    Ok(true)
 }
 
 /// `__ui_stroke_rect(window, x, y, width, height, color, radius?, lineWidth?)`.
