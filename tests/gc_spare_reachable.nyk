@@ -1,0 +1,29 @@
+-- A table that a collection spares because something outside the tracked
+-- heap still holds it (here: the main program's locals, while the collection
+-- runs incrementally on a task's stack) keeps everything it leads to. Before
+-- the fix only the spared table itself survived: its child, held by nothing
+-- else, was cleared under it.
+
+local holder = { child = setmetatable({}, {}) }
+holder.child.value = 42
+local closureKept = { data = { n = 7 } }
+local function reader() return closureKept.data.n end
+holder.read = reader
+
+-- The task allocates enough to run collections on its own stack. (It does
+-- not yield: the collections must happen while main is only waiting.)
+local done = false
+task.spawn(function()
+    local keepSome = {}
+    for i = 1, 60000 do
+        local t = { i, { i } }
+        if i % 1000 == 0 then keepSome[#keepSome + 1] = t end
+    end
+    done = true
+end)
+
+while not done do task.wait(0.001) end
+assert(holder.child.value == 42, "child of a spared table was cleared")
+assert(holder.read() == 7, "table reached through a closure of a spared table was cleared")
+assert(getmetatable(holder.child) ~= nil, "metatable of a spared child was cleared")
+print("gc spare reachable ok")

@@ -17,6 +17,37 @@ fn is_collectible(val: &Value) -> bool {
     matches!(val, Value::Table(_) | Value::Buffer(_))
 }
 
+/// Pushes the tables `val` holds on to: the table itself, or for a closure the
+/// tables its closed upvalues lead to (through nested closures as well).
+fn push_tables(
+    val: &Value,
+    out: &mut Vec<Rc<RefCell<VmTable>>>,
+    seen_closures: &mut FxHashSet<*const VmClosure>,
+) {
+    match val {
+        Value::Table(t) => out.push(Rc::clone(t)),
+        Value::Closure(c) => {
+            let mut pending = vec![Rc::clone(c)];
+            while let Some(closure) = pending.pop() {
+                if !seen_closures.insert(Rc::as_ptr(&closure)) {
+                    continue;
+                }
+                for upval in &closure.upvalues {
+                    if upval.is_open() {
+                        continue;
+                    }
+                    match &*upval.closed.borrow() {
+                        Value::Closure(inner) => pending.push(Rc::clone(inner)),
+                        Value::Table(t) => out.push(Rc::clone(t)),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// True when the table's metatable declares weak values (`__mode`
 /// containing 'v'). Neyuki keys are strings/integers and can never be GC
 /// objects, so only value weakness is meaningful; "k" alone is a no-op.
@@ -485,15 +516,59 @@ impl GcTracker {
         // are the white_tables entry (1), our own pin if any, and
         // white-internal refs. Anything beyond that is external: spare it.
         // (Preserved tables keep their contents; recolored in finish.)
-        let mut plain: Vec<Rc<RefCell<VmTable>>> = Vec::new();
-        let mut queue: Vec<(Rc<RefCell<VmTable>>, Value)> = Vec::new();
+        let mut spared: FxHashSet<*const RefCell<VmTable>> = FxHashSet::default();
+        let mut frontier: Vec<Rc<RefCell<VmTable>>> = Vec::new();
         for (&ptr, rc) in &white_tables {
             // subtract the white_tables holder
             let strong = Rc::strong_count(rc) - 1;
             let pinned = usize::from(self.pinned.contains_key(&ptr));
             let internal = internal_ref_counts.get(&ptr).copied().unwrap_or(0);
             if strong > pinned + internal {
-                // Still referenced externally: spare it (recolored in finish).
+                spared.insert(ptr);
+                frontier.push(Rc::clone(rc));
+            }
+        }
+        // A spared table is live, so everything it leads to is live too, even
+        // when its only holder is that table (an "internal" reference). This
+        // matters when the roots were not all marked, e.g. a collection that
+        // runs on a task's stack while the main program's locals hold a
+        // module table: the module table is spared through its refcount, and
+        // its fields must not be cleared under it.
+        let mut seen_closures: FxHashSet<*const VmClosure> = FxHashSet::default();
+        while let Some(rc) = frontier.pop() {
+            let mut found: Vec<Rc<RefCell<VmTable>>> = Vec::new();
+            {
+                let tbl = rc.borrow();
+                let weak_values = tbl.metatable.is_some() && table_weak_values(&rc);
+                if !weak_values {
+                    for val in tbl.array.iter().chain(tbl.fields.values()) {
+                        push_tables(val, &mut found, &mut seen_closures);
+                    }
+                }
+                for (key, val) in tbl.general.iter().flat_map(|g| g.values()) {
+                    push_tables(key, &mut found, &mut seen_closures);
+                    if !weak_values {
+                        push_tables(val, &mut found, &mut seen_closures);
+                    }
+                }
+                if let Some(mt) = &tbl.metatable {
+                    found.push(Rc::clone(mt));
+                }
+            }
+            for table in found {
+                let ptr = Rc::as_ptr(&table);
+                if white_tables.contains_key(&ptr) && spared.insert(ptr) {
+                    frontier.push(table);
+                }
+            }
+        }
+
+        let mut plain: Vec<Rc<RefCell<VmTable>>> = Vec::new();
+        let mut queue: Vec<(Rc<RefCell<VmTable>>, Value)> = Vec::new();
+        for (&ptr, rc) in &white_tables {
+            if spared.contains(&ptr) {
+                // Still referenced externally (or from something that is):
+                // spare it (recolored in finish).
                 continue;
             }
             match gc_handler(rc) {
