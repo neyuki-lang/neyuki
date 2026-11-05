@@ -938,16 +938,16 @@ pub fn hover(content: &str, line: usize, character: usize, src: &dyn MemberSourc
 
     let chain = chain_ending(&line_text[..end])?;
     let binds = bindings(content, src);
-    let value = if let Some(entry) = entry_for_chain(&chain, &binds, src) {
-        entry_markdown(&entry)
-    } else if let Some(lib) = src.library_for_namespace(&canonical(&chain, &binds)) {
-        format!(
-            "**{}**\n\n{}",
-            lib.title,
-            lib.doc.replace("```lua", "```neyuki")
-        )
-    } else {
-        return None;
+    let value = match entry_for_chain(&chain, &binds, src) {
+        Some(entry) => entry_markdown(&entry),
+        None => {
+            let lib = src.library_for_namespace(&canonical(&chain, &binds))?;
+            format!(
+                "**{}**\n\n{}",
+                lib.title,
+                lib.doc.replace("```lua", "```neyuki")
+            )
+        }
     };
 
     let start_col = line_text[..start].encode_utf16().count();
