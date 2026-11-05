@@ -94,7 +94,7 @@ fn has_import_all(source: &str) -> bool {
     source
         .lines()
         .map(str::trim)
-        .take_while(|line| line.is_empty() || line.starts_with("--") || line.starts_with("#!"))
+        .take_while(|line| line.is_empty() || line.starts_with("--"))
         .any(|line| line == "--!importall")
 }
 
@@ -277,7 +277,7 @@ mod tests {
         assert!(run("return fs").is_err());
         assert!(run("print(1)\n--!importall\nreturn fs").is_err());
         assert!(run("--!importall now\nreturn fs").is_err());
-        assert!(run("#!/usr/bin/env neyuki\n-- about\n\n--!importall\nreturn fs").is_ok());
+        assert!(run("-- about\n\n--!importall\nreturn fs").is_ok());
     }
 
     #[test]
