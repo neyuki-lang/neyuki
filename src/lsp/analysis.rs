@@ -1520,7 +1520,7 @@ mod tests {
         assert_eq!(binds.get("n"), Some(&Binding::Type("number".to_string())));
         // Before the function starts its parameters are not known.
         let early = bindings_at(text, 10, src);
-        assert!(early.get("options").is_none());
+        assert!(!early.contains_key("options"));
         // `ipairs(events)` iterates the same list.
         let text = "function run(events: {Ev})\n    for i, e in ipairs(events) do\n";
         let binds = bindings(text, src);

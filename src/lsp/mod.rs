@@ -2881,10 +2881,6 @@ mod tests {
         let resp = open(&mut server, "local s = \"\u{1f980}\"; local unused = 1\n");
         let before = "local s = \"\u{1f980}\"; local ";
         let column = char_col_to_utf16_col(before, before.chars().count());
-        assert!(
-            resp.contains(&format!("\"character\":{column}"))
-                || resp.contains(&format!("\"character\":{}", column - "local ".len())),
-            "{resp}"
-        );
+        assert!(resp.contains(&format!("\"character\":{column}")), "{resp}");
     }
 }
