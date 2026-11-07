@@ -1,0 +1,60 @@
+local table = require("@neyuki/table")
+
+local gpu = {}
+
+-- GPU rendering on top of the `__gpu_*` natives in src/vm/libs/gpu.rs
+-- (`wgpu`: Direct3D 12 on Windows, Metal on macOS, Vulkan or OpenGL ES
+-- elsewhere).
+--
+-- This is a separate path from `@neyuki/ui`, not a backend for it. `ui`
+-- keeps rendering on the CPU with the same guarantees as before: no GPU, no
+-- driver, works headless. A window opened with `gpu = true` is given to this
+-- module instead, has no CPU back buffer, and raises an error from every
+-- `ui` drawing call and from `window:present()`.
+--
+-- The module is behind a cargo feature that is off in stock builds of
+-- Neyuki, so always check `gpu.isAvailable()` first.
+--
+-- This is milestone 1: a window, a device and a clear colour. Pipelines,
+-- shaders, meshes, textures and the depth buffer that is the point of the
+-- whole module are not here yet. The conventions the rest will be built on
+-- are already fixed, though, so matrices written now stay correct:
+--
+--  * Clip space: x and y in -1..1 with **y up**, z in **0..1** (0 near,
+--    1 far) -- the Direct3D and Metal depth range, not OpenGL's -1..1.
+--  * Framebuffer and texture coordinates: origin **top left**, y down,
+--    as in `@neyuki/ui`.
+--  * World and view space: **right-handed**, y up, looking down -z. The
+--    projection matrix does the flip into clip space.
+--  * Matrices: **column-major**, column-vector convention, so
+--    `clip = projection * view * model * position` and a 4x4 uniform is
+--    16 numbers written column after column -- what a WGSL `mat4x4<f32>`
+--    reads with no transpose.
+
+-- Whether this build has GPU support and the machine has an adapter. False
+-- on a build without the `gpu` cargo feature, and on a machine with no
+-- usable graphics driver. Every other function raises an error there.
+function gpu.isAvailable(): boolean
+    return __gpu_available()
+end
+
+-- The adapter in use: `name`, `backend` ("vulkan", "dx12", "metal", "gl"),
+-- `type` ("discrete", "integrated", "cpu", "virtual", "other") and
+-- `driver`. The adapter is chosen for the first GPU window, so this raises
+-- an error until one is open.
+function gpu.adapter(): {any}
+    return __gpu_adapter()
+end
+
+-- Fills `window` with `color` and presents the frame. `window` must have
+-- been opened with `gpu = true`; `color` takes the same forms as in
+-- `@neyuki/ui` ("#rgb", "#rrggbb", "#rrggbbaa", a { r, g, b, a? } table or a
+-- packed integer).
+function gpu.clear(window: {any}, color: any): ()
+    if (type(window) != "table" or type(window.id) != "number") then
+        error("window must be a window from ui.open")
+    end
+    __gpu_clear(window.id, color)
+end
+
+return table.freeze(gpu)
