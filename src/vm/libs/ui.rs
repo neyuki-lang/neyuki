@@ -1671,6 +1671,28 @@ pub(crate) fn with_window_gpu<T>(
     })
 }
 
+/// Runs `body` on the pixels of image `id`, for `@neyuki/gpu` uploading it
+/// as a texture. The bytes are the first frame's, premultiplied RGBA, eight
+/// bits a channel and tightly packed, which is how `tiny-skia` keeps them.
+#[cfg(feature = "gpu")]
+pub(crate) fn with_image_rgba<T>(
+    id: u64,
+    body: impl FnOnce(u32, u32, &[u8]) -> Result<T, String>,
+) -> Result<T, String> {
+    IMAGES.with(|images| {
+        let images = images.borrow();
+        let entry = images
+            .get(&id)
+            .ok_or_else(|| "image is closed".to_string())?;
+        let frame = &entry.frames[0];
+        body(
+            frame.pixmap.width(),
+            frame.pixmap.height(),
+            frame.pixmap.data(),
+        )
+    })
+}
+
 /// What the drawing natives report for a window opened with `gpu = true`,
 /// which has no back buffer for them to paint into.
 const IS_A_GPU_WINDOW: &str =
