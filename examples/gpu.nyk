@@ -1,0 +1,36 @@
+-- Opens a GPU window and clears it to a colour that drifts, through
+-- `@neyuki/gpu`. That is all milestone 1 of the module can do: there are no
+-- pipelines, meshes or textures yet.
+--
+-- `@neyuki/gpu` needs a build with the `gpu` cargo feature, which stock
+-- builds do not have:
+--
+--     cargo run --features gpu -- examples/gpu.nyk
+local gpu = require("@neyuki/gpu")
+local ui = require("@neyuki/ui")
+
+if (not gpu.isAvailable()) then
+    print("no GPU support in this build of Neyuki, or no adapter on this machine")
+    return
+end
+
+local win = ui.open({ title = "Neyuki GPU", width = 640, height = 360, gpu = true })
+
+local info = gpu.adapter()
+print("adapter: " .. info.name .. " (" .. info.backend .. ", " .. info.type .. ")")
+
+-- A GPU window has no CPU back buffer, so the `ui` drawing calls refuse it
+-- rather than painting somewhere nothing shows.
+local _ok, err = try(function(): any
+    win:line(0, 0, 10, 10, "#fff")
+    return nil
+end)
+print("win:line on a GPU window -> " .. tostring(err))
+
+local t = 0
+ui.run(function(_events, dt)
+    t += dt
+    local pulse = math.floor(128 + 127 * math.sin(t * 1.5))
+    gpu.clear(win, { r = 24, g = 40, b = pulse })
+    return true
+end)
