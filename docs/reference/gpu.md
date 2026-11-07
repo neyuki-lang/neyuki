@@ -6,11 +6,15 @@ This is a separate path from [@neyuki/ui](ui.md), not a backend for it. `ui` kee
 
 A window opened with `gpu = true` is handed to this module. It has **no CPU back buffer**: every `ui` drawing call on it, and `window:present()`, raises an error, because softbuffer and wgpu cannot both present to one window. Everything else about the window is unchanged — `ui.poll`, `ui.run`, events, resizing, the title bar and the rest of `ui` work exactly as they do for a CPU window.
 
+Shaders are WGSL. A pipeline's bindings are read from the shader itself — whatever it declares as `@group(0) @binding(n)` — so there is no second place to keep in step, and a pipeline's vertex layout is the one thing a script states twice. Vertex, index and uniform data come from `buffer` values, which is what makes uploading a mesh one copy with no table conversion.
+
+Colours come out as they went in. The surface is configured with a plain, non-sRGB format, so `gpu.clear(win, "#9ac2e8")` shows the same colour `win:clear("#9ac2e8")` would on a CPU window, and a texture made from a `ui` image matches what `ui` draws from it. A script that wants linear shading converts in its shader.
+
 The module is behind the `gpu` cargo feature, which is **off** in stock builds, as it adds a large dependency tree and several MiB to the executable. Check `gpu.isAvailable()` first: it is `false` both on a build without the feature and on a machine with no usable adapter.
 
-wgpu's own environment variables apply — `WGPU_BACKEND=vulkan` pins a backend, `WGPU_POWER_PREF=low` prefers the integrated GPU — and `NEYUKI_GPU_SOFTWARE=1` adds the one wgpu has no variable for: use the software adapter (WARP on Windows, lavapipe elsewhere) instead of real hardware. That is how a machine with no GPU runs the same code, slowly but correctly.
+wgpu's own environment variables apply — `WGPU_BACKEND=vulkan` pins a backend, `WGPU_POWER_PREF=low` prefers the integrated GPU — and `NEYUKI_GPU_SOFTWARE=1` adds the one wgpu has no variable for: use the software adapter (WARP on Windows, lavapipe elsewhere) instead of real hardware. That is how a machine with no GPU runs the same code, slowly but correctly, and `frame:read()` makes those runs checkable with no display.
 
-> **Status: milestone 1.** A window, a device and a clear colour. Pipelines, shaders, meshes, buffers, textures, uniforms and the depth buffer are not here yet.
+> **Status: milestone 2.** A textured, depth-tested mesh. Still to come: uploading a `ui.canvas` as a texture for heads-up displays and text, more than one vertex buffer or bind group, instance data, render targets other than the window, and mipmaps.
 
 ```lua
 local gpu = require("@neyuki/gpu")
@@ -18,12 +22,35 @@ local ui = require("@neyuki/ui")
 
 if not gpu.isAvailable() then return end
 
-local win = ui.open({ width = 640, height = 360, gpu = true })
+local win = ui.open({ width = 960, height = 560, gpu = true })
+local device = gpu.device(win)
+
+local pipeline = device:pipeline({
+    shader = device:shader(wgsl),
+    vertex = { "vec3", "vec2" },   -- @location(0), @location(1)
+    depth = true,
+    cull = "back",
+})
+local mesh = device:buffer(vertexBytes, "vertex")
+local matrix = device:buffer(64, "uniform")
+local atlas = device:texture(ui.loadImage("atlas.png"))
+local sampler = device:sampler()
+
 ui.run(function()
-    gpu.clear(win, "#9ac2e8")
+    matrix:write(viewProjectionBytes)
+    device:frame({ clear = "#11131a" })
+        :pipeline(pipeline)
+        :bind(0, matrix)
+        :bind(1, atlas)
+        :bind(2, sampler)
+        :vertices(mesh)
+        :draw(vertexCount)
+        :finish()
     return true
 end)
 ```
+
+A full example, including the matrix arithmetic, is in [examples/gpu.nyk](../../examples/gpu.nyk).
 
 ## Conventions
 
@@ -36,8 +63,13 @@ Fixed now, before anything uses them, because scripts hard-code matrices against
 | Framebuffer and texture coordinates | origin **top left**, y down, as in `@neyuki/ui` |
 | World and view space | **right-handed**, y up, looking down `-z` |
 | Matrices | **column-major**, column-vector convention: `clip = projection * view * model * position` |
+| Front faces | **counter-clockwise**, which is what `cull = "back"` keeps |
 
 A 4×4 matrix is 16 numbers written column after column, which is what a WGSL `mat4x4<f32>` reads with no transpose.
+
+Every frame on a GPU window has a depth buffer, whether or not the pipeline uses it: `depth = false` means the pipeline never tests or writes it, not that there is none. So one frame can draw depth-tested geometry and then a flat overlay over it without a second kind of render pass, and a window that only ever clears never allocates one.
+
+Resources are freed by `:close()`, and closing twice does nothing. The GPU memory goes when the driver has finished with it, which may be after a frame still using it has been submitted. Resources outlive the window they were made through: they belong to the device, which every GPU window shares.
 
 ## gpu.isAvailable(): boolean
 
@@ -54,6 +86,114 @@ The adapter in use:
 
 The adapter is chosen for the first GPU window, so this raises an error until one is open.
 
-## gpu.clear(window, color): ()
+## gpu.clear(window: Window, color: any): ()
 
-Fills `window` with one colour and presents the frame. `window` must have been opened with `gpu = true`. `color` takes the same forms as in `@neyuki/ui`: `"#rgb"`, `"#rrggbb"`, `"#rrggbbaa"`, a `{ r, g, b, a? }` table with channels 0–255, or a packed `0xRRGGBBAA` integer.
+Fills `window` with one colour and presents the frame — the whole of drawing it, in one call. `window` must have been opened with `gpu = true`. `color` takes the same forms as in `@neyuki/ui`: `"#rgb"`, `"#rrggbb"`, `"#rrggbbaa"`, a `{ r, g, b, a? }` table with channels 0–255, or a packed `0xRRGGBBAA` integer. Raises while a frame from `device:frame` is open.
+
+## gpu.device(window: Window): Device
+
+The device for `window`, which must have been opened with `gpu = true`. The device, its adapter and its queue are shared by every GPU window; the frames this one opens are `window`'s.
+
+Raises here, rather than from the first resource built, when the machine has no adapter or this build has no GPU support.
+
+## Device:shader(source: string): Shader
+
+Compiles WGSL. The shader needs one `@vertex` and one `@fragment` entry point; which they are called does not matter.
+
+A shader that does not compile raises with the driver's message, which carries the line, the column and a snippet of the source.
+
+## Device:buffer(data: buffer | number, usage: string): GpuBuffer
+
+A buffer on the GPU, from the bytes of a `buffer` or, given a number, that many zero bytes. `usage` is `"vertex"`, `"index"` or `"uniform"`, and decides what the buffer may be bound as; a buffer used as the wrong kind is refused by name.
+
+`size` on the result is what was actually allocated: the request rounded up to what the usage needs, so a 12-byte uniform buffer is 16 bytes. `usage` is on the result too.
+
+## GpuBuffer:write(data: buffer, offset: number?): ()
+
+Replaces part of the contents, which is how a uniform buffer is refreshed each frame without making a new one. `offset` and the length of `data` must both be multiples of 4, and the write must fit.
+
+## GpuBuffer:close(): ()
+
+Frees the buffer.
+
+## Device:texture(image: Image): Texture
+
+Uploads an `@neyuki/ui` image: its first frame, RGBA, premultiplied as `@neyuki/ui` keeps it — which is why `blend = "alpha"` blends premultiplied. `width` and `height` are on the result.
+
+Textures are sampled with `0..1` coordinates whose origin is the top left, so `v` runs down the image as `y` does in `@neyuki/ui`.
+
+## Texture:close(): ()
+
+Frees the texture.
+
+## Device:sampler(options: table?): Sampler
+
+How a shader reads a texture.
+
+| option | |
+| --- | --- |
+| `filter` | `"linear"` (the default) or `"nearest"` |
+| `wrap` | `"clamp"` (the default), `"repeat"` or `"mirror"` |
+
+## Sampler:close(): ()
+
+Frees the sampler.
+
+## Device:pipeline(options: table): Pipeline
+
+One shader, one vertex layout, and the fixed state around them.
+
+| option | |
+| --- | --- |
+| `shader` | the compiled WGSL |
+| `vertex` | the attribute list, packed in order from the start of a vertex and numbered from `@location(0)` |
+| `depth` | test and write the depth buffer (`false` by default) |
+| `cull` | `"none"` (the default), `"back"` or `"front"` |
+| `topology` | `"triangles"` (the default), `"triangleStrip"`, `"lines"`, `"lineStrip"` or `"points"` |
+| `blend` | `"none"` (the default) or `"alpha"`, premultiplied |
+
+An attribute is one of `"float"`, `"vec2"`, `"vec3"`, `"vec4"`, `"half2"`, `"half4"`, `"int"`, `"uint"`, `"ubyte4"` or `"unorm4"`. They are packed tightly: `{ "vec3", "unorm4" }` is a 16-byte vertex of a position and a colour, written straight into a `buffer` with no padding.
+
+Bindings are not declared here. The shader's own `@group(0) @binding(n)` lines are the layout, and `frame:bind` fills them; a binding the shader does not declare, or one of the wrong kind, is refused by the next `draw`. Only group 0 is bound.
+
+## Pipeline:close(): ()
+
+Frees the pipeline.
+
+## Device:frame(options: table?): Frame
+
+Starts a frame on this device's window: takes the window's next image, clears the colour and depth buffers, and opens a render pass. `options.clear` is the colour (black by default, in the same forms as `@neyuki/ui`) and `options.depth` the depth to clear to (1, the far plane, by default).
+
+Only one frame can be open at a time, because it holds the window's next image. `frame:finish()` presents it; a script that stops short leaves the window's image held until it starts another frame.
+
+A frame whose window cannot be drawn — minimized, hidden, or the compositor was busy — is opened anyway and **skipped**: every call on it still checks its arguments, nothing is drawn, and `finish` reports `false`. A draw loop needs no special case for a window nobody can see.
+
+## Frame:pipeline(pipeline: Pipeline): Frame
+
+Draws with `pipeline` from here on. Bindings are rebuilt against its layout, so set the pipeline before binding.
+
+## Frame:bind(index: number, resource: GpuBuffer | Texture | Sampler): Frame
+
+Points `@group(0) @binding(index)` at a uniform buffer, a texture or a sampler. The bind group is built once before the next draw, from everything bound by then, so binding once and drawing many times costs one.
+
+## Frame:vertices(buffer: GpuBuffer): Frame
+
+The vertex buffer to read attributes from. It must have been made with usage `"vertex"`.
+
+## Frame:indices(buffer: GpuBuffer, format: string?): Frame
+
+Makes the following draws indexed. `format` is `"u32"` (the default) or `"u16"`, and the buffer must have been made with usage `"index"`.
+
+## Frame:draw(count: number, instances: number?): Frame
+
+Draws `count` vertices, or `count` indices once `indices` has been called, `instances` times (1 by default). The count is measured against the bound buffers first, so a wrong number is a script error naming it rather than a driver error on a later call.
+
+## Frame:finish(): boolean
+
+Submits the frame and presents the window. Returns `false` when the frame was skipped, which is not an error. The frame cannot be used again.
+
+## Frame:read(): (boolean, buffer?, number?, number?)
+
+Finishes the frame as `finish` does, and also reads the image back: `presented, pixels, width, height`, where `pixels` is tightly packed RGBA and the size is in physical pixels — the window's logical size times whatever the display scales by. `pixels` is nil when the frame was skipped.
+
+This waits for the GPU, so it is for tests and screenshots, not for a draw loop. It is what lets a script check that what was drawn is what was meant, on a hidden window and with no GPU at all.
