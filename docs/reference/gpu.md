@@ -12,7 +12,7 @@ Text and two-dimensional drawing come from `@neyuki/ui` itself: draw them on a c
 
 Colours come out as they went in. The surface is configured with a plain, non-sRGB format, so `gpu.clear(win, "#9ac2e8")` shows the same colour `win:clear("#9ac2e8")` would on a CPU window, and a texture made from a `ui` image matches what `ui` draws from it. A script that wants linear shading converts in its shader.
 
-The module is behind the `gpu` cargo feature, which is **off** in stock builds, as it adds a large dependency tree and several MiB to the executable. Check `gpu.isAvailable()` first: it is `false` both on a build without the feature and on a machine with no usable adapter.
+The module is behind the `gpu` cargo feature, which is **off** in stock builds, as it adds a large dependency tree and several MiB to the executable. A build that has it is `cargo install neyuki --features gpu`, `cargo build --release --features gpu` from a clone, or the `neyuki-gpu` executable packed beside `neyuki` in every release archive. Check `gpu.isAvailable()` first: it is `false` both on a build without the feature and on a machine with no usable adapter.
 
 wgpu's own environment variables apply — `WGPU_BACKEND=vulkan` pins a backend, `WGPU_POWER_PREF=low` prefers the integrated GPU — and `NEYUKI_GPU_SOFTWARE=1` adds the one wgpu has no variable for: use the software adapter (WARP on Windows, lavapipe elsewhere) instead of real hardware. That is how a machine with no GPU runs the same code, slowly but correctly, and `frame:read()` makes those runs checkable with no display.
 
