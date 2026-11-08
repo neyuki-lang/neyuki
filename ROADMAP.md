@@ -74,6 +74,7 @@ This document outlines the architectural milestones and engineering trajectory f
   - [x] WGSL shaders with errors that carry a line and a column, pipelines, and vertex, index and uniform data straight from `buffer` values.
   - [x] Textures from `@neyuki/ui` images and canvases, with `texture:update` for a canvas that is redrawn: 2D drawing and text over 3D without leaving `ui`.
   - [x] A depth buffer on every frame, back-face culling, premultiplied blending, and `frame:read()` so a frame can be checked with no display and no GPU.
+- [x] `@neyuki/audio`: WAV, FLAC, Ogg Vorbis, MP3 and AAC playback, tones and raw samples through `rodio`/`cpal`, with per-voice volume, pan, speed, looping, fades, pausing and seeking, loaded or streamed, and output device selection.
 - [ ] Tray icon with a menu whose items arrive as events.
 - [ ] Single-instance apps: a second launch signals and focuses the first.
 - [ ] Auto-update support.

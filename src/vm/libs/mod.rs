@@ -5,6 +5,7 @@
 //! and built on the `__`-prefixed natives registered here.
 
 pub mod args;
+pub mod audio;
 pub mod background;
 pub mod bit;
 pub mod buffer;
@@ -59,6 +60,7 @@ pub fn register_natives(vm: &mut VM) {
     for natives in [
         crypto::NATIVES,
         fs::NATIVES,
+        audio::NATIVES,
         gpu::NATIVES,
         hid::NATIVES,
         http::NATIVES,
