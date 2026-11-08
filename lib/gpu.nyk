@@ -293,16 +293,35 @@ function makeDevice(window: {any}): Device
         return table.freeze(buffer)
     end
 
-    -- Uploads an `@neyuki/ui` image as a texture: the first frame, RGBA,
-    -- premultiplied as `@neyuki/ui` keeps it, which is why `blend = "alpha"`
-    -- blends premultiplied.
-    function device.texture(self: Device, image: {any}): Texture
-        if (type(image) != "table" or type(image.id) != "function") then
-            error("image must be an image from ui.loadImage or ui.decodeImage")
+    -- Uploads an `@neyuki/ui` image or canvas as a texture: an image's
+    -- first frame, or a canvas as it stands, RGBA and premultiplied as
+    -- `@neyuki/ui` keeps it, which is why `blend = "alpha"` blends
+    -- premultiplied.
+    --
+    -- `width` and `height` on the result are physical pixels, so a canvas
+    -- made at a scale gives a texture that much bigger than the size it
+    -- was asked for.
+    function device.texture(self: Device, source: {any}): Texture
+        if (type(source) != "table" or type(source.id) != "function") then
+            error("source must be an image from ui.loadImage or ui.decodeImage, " ..
+                "or a canvas from ui.canvas")
         end
-        local id, width, height = __gpu_texture(image:id())
+        local id, width, height = __gpu_texture(source:id())
         local texture = { kind = "texture", id = id, width = width, height = height }
         local freed = false
+
+        -- Writes a redrawn image or canvas over the texture, which is how a
+        -- heads-up display reaches the GPU each frame: one copy, with no new
+        -- texture and so no new bind group. The size has to match.
+        function texture.update(self: Texture, source: {any}): Texture
+            if (type(source) != "table" or type(source.id) != "function") then
+                error("source must be an image from ui.loadImage or ui.decodeImage, " ..
+                    "or a canvas from ui.canvas")
+            end
+            if (freed) then error("texture is closed") end
+            __gpu_texture_update(id, source:id())
+            return self
+        end
 
         function texture.close(self: Texture): ()
             if (freed) then return end

@@ -121,6 +121,10 @@ mod stub {
             func: unsupported,
         },
         NativeDef {
+            name: "__gpu_texture_update",
+            func: unsupported,
+        },
+        NativeDef {
             name: "__gpu_sampler",
             func: unsupported,
         },
@@ -757,11 +761,15 @@ mod real {
         usage: Usage,
     }
 
-    /// Only the view is kept: a texture is bound and nothing else here
-    /// reads it back. The size goes to the script, which gets it from the
-    /// image it uploaded.
+    /// The texture is kept beside its view so that a canvas redrawn every
+    /// frame can be written over the same allocation, and its size so that
+    /// a write of the wrong size is refused by name rather than by the
+    /// driver. Nothing here reads a texture back.
     struct TextureEntry {
+        texture: wgpu::Texture,
         view: wgpu::TextureView,
+        width: u32,
+        height: u32,
     }
 
     /// A pipeline and what a draw call needs to know about it: the layout
@@ -1032,13 +1040,45 @@ mod real {
         Ok(vec![])
     }
 
-    /// `__gpu_texture(image)` uploads an `@neyuki/ui` image.
+    /// Writes tightly packed premultiplied RGBA over the whole of a
+    /// texture, which is what `@neyuki/ui` hands out for both an image and
+    /// a canvas.
+    fn upload(
+        queue: &wgpu::Queue,
+        texture: &wgpu::Texture,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+    ) {
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                // `tiny-skia` packs rows tightly.
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
+    /// `__gpu_texture(source)` uploads an `@neyuki/ui` image or canvas.
     ///
     /// The pixels arrive premultiplied, which is how `tiny-skia` keeps
     /// them, so `blend = "alpha"` uses premultiplied blending to match.
     fn texture(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
-        let image = ui::integer_arg(args, 0, "image")?;
-        let (id, width, height) = ui::with_image_rgba(image, |width, height, pixels| {
+        let source = ui::integer_arg(args, 0, "source")?;
+        let (id, width, height) = ui::with_pixels_rgba(source, |width, height, pixels| {
             let size = wgpu::Extent3d {
                 width,
                 height,
@@ -1058,24 +1098,12 @@ mod real {
                     usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                     view_formats: &[],
                 });
-                context.queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    pixels,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        // `tiny-skia` packs rows tightly.
-                        bytes_per_row: Some(width * 4),
-                        rows_per_image: Some(height),
-                    },
-                    size,
-                );
+                upload(&context.queue, &texture, width, height, pixels);
                 Ok(TextureEntry {
                     view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
+                    texture,
+                    width,
+                    height,
                 })
             })?;
             check_device_error("cannot create a texture")?;
@@ -1091,6 +1119,41 @@ mod real {
             ui::integer(width as u64),
             ui::integer(height as u64),
         ])
+    }
+
+    /// `__gpu_texture_update(texture, source)` writes an image or canvas
+    /// over a texture that is already on the GPU.
+    ///
+    /// This is the path a heads-up display needs: a canvas is redrawn with
+    /// `@neyuki/ui` every frame and arrives here as one copy into the
+    /// allocation the first upload made, with no new texture, no new view
+    /// and so no new bind group. The size has to match, because a texture
+    /// cannot be resized -- a canvas that grew needs a new one.
+    fn texture_update(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+        let id = ui::integer_arg(args, 0, "texture")?;
+        let source = ui::integer_arg(args, 1, "source")?;
+        // Lifted out before the pixels are borrowed: the two live in
+        // different thread locals, and nothing is held across the write.
+        let (texture, width, height) = with_resources(|resources| {
+            let entry = resources
+                .textures
+                .get(&id)
+                .ok_or_else(|| "texture is closed".to_string())?;
+            Ok((entry.texture.clone(), entry.width, entry.height))
+        })?;
+        ui::with_pixels_rgba(source, |source_width, source_height, pixels| {
+            if (source_width, source_height) != (width, height) {
+                return Err(format!(
+                    "the source is {source_width}x{source_height} and the texture is {width}x{height}: a texture cannot be resized, so make a new one"
+                ));
+            }
+            with_context(None, |context| {
+                upload(&context.queue, &texture, width, height, pixels);
+                Ok(())
+            })
+        })?;
+        check_device_error("cannot write to a texture")?;
+        Ok(vec![])
     }
 
     /// `__gpu_sampler(filter, wrap)` makes a sampler. `filter` is
@@ -1919,6 +1982,10 @@ mod real {
         NativeDef {
             name: "__gpu_texture",
             func: texture,
+        },
+        NativeDef {
+            name: "__gpu_texture_update",
+            func: texture_update,
         },
         NativeDef {
             name: "__gpu_sampler",

@@ -1671,19 +1671,38 @@ pub(crate) fn with_window_gpu<T>(
     })
 }
 
-/// Runs `body` on the pixels of image `id`, for `@neyuki/gpu` uploading it
-/// as a texture. The bytes are the first frame's, premultiplied RGBA, eight
-/// bits a channel and tightly packed, which is how `tiny-skia` keeps them.
+/// Runs `body` on the pixels of image or canvas `id`, for `@neyuki/gpu`
+/// uploading it as a texture. The bytes are premultiplied RGBA, eight bits
+/// a channel and tightly packed, which is how `tiny-skia` keeps them: an
+/// image's first frame, or a canvas exactly as it stands, which is what
+/// makes a canvas usable as a heads-up display over a frame.
+///
+/// A canvas is measured in physical pixels, so one made at a scale is that
+/// much bigger here than the size it was asked for -- the same pixels
+/// `window:drawCanvas` would copy.
 #[cfg(feature = "gpu")]
-pub(crate) fn with_image_rgba<T>(
+pub(crate) fn with_pixels_rgba<T>(
     id: u64,
     body: impl FnOnce(u32, u32, &[u8]) -> Result<T, String>,
 ) -> Result<T, String> {
+    if CANVASES.with(|canvases| canvases.borrow().contains_key(&id)) {
+        return CANVASES.with(|canvases| {
+            let canvases = canvases.borrow();
+            let canvas = canvases
+                .get(&id)
+                .ok_or_else(|| "canvas is closed".to_string())?;
+            body(
+                canvas.pixmap.width(),
+                canvas.pixmap.height(),
+                canvas.pixmap.data(),
+            )
+        });
+    }
     IMAGES.with(|images| {
         let images = images.borrow();
         let entry = images
             .get(&id)
-            .ok_or_else(|| "image is closed".to_string())?;
+            .ok_or_else(|| "the image or canvas is closed".to_string())?;
         let frame = &entry.frames[0];
         body(
             frame.pixmap.width(),
