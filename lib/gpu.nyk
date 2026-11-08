@@ -65,6 +65,11 @@ function checkOptionalNumber(n: any, name: string)
     if (n != nil and type(n) != "number") then error(name .. " must be a number") end
 end
 
+function checkBoolean(b: any, name: string)
+    if (b == nil) then error(name .. " must be provided") end
+    if (type(b) != "boolean") then error(name .. " must be a boolean") end
+end
+
 function checkOptionalBoolean(b: any, name: string)
     if (b != nil and type(b) != "boolean") then error(name .. " must be a boolean") end
 end
@@ -125,6 +130,35 @@ end
 function gpu.clear(window: {any}, color: any): ()
     checkWindow(window, "window")
     __gpu_clear(window.id, color)
+end
+
+-- Whether `window`'s frames wait for the display before they are shown.
+-- True unless `setVsync` turned it off, so a draw loop on this window runs
+-- at the refresh rate at most.
+function gpu.vsync(window: {any}): boolean
+    checkWindow(window, "window")
+    return __gpu_vsync(window.id)
+end
+
+-- Turns vsync on or off for `window` and reports what it does now, which is
+-- not always what was asked: `false` once frames no longer wait for the
+-- display, and `true` both for `setVsync(window, true)` and on an adapter
+-- that has no way to stop waiting (older Direct3D 12, some Wayland
+-- compositors). A frame rate cap is not an error, so nothing is raised
+-- there -- check the result where it matters.
+--
+-- Off, `device:frame()` no longer blocks until the display is ready, which
+-- is what a benchmark wants and what lets a loop draw as fast as the GPU
+-- can. The frame rate is then capped by nothing: expect tearing, a hot GPU,
+-- and `ui.run`'s own `fps` as the only limit left (its default is 60, so
+-- raise it as well to see any difference).
+--
+-- Raises while a frame from `device:frame` is open: that frame is the
+-- window's next image and reconfiguring takes it away.
+function gpu.setVsync(window: {any}, enabled: boolean): boolean
+    checkWindow(window, "window")
+    checkBoolean(enabled, "enabled")
+    return __gpu_set_vsync(window.id, enabled)
 end
 
 -- Discards whatever frame is open, as `frame:cancel()` does, and reports

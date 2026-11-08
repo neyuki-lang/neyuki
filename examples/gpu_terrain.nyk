@@ -14,7 +14,8 @@
 --     --chunks N    how far to see, in 16-block chunks each way (default 6)
 --     --seed N      which landscape (default 77)
 --     --bench N     fly a fixed circle for N seconds, print the timings,
---                   and exit instead of waiting for a key
+--                   and exit instead of waiting for a key (vsync goes off
+--                   for it, or the timings would be the display's)
 --     --cpu         draw the same quads with `@neyuki/ui` polygons instead,
 --                   which is the baseline the GPU path is measured against
 --     --headless    open no visible window and check the last frame's
@@ -432,6 +433,14 @@ function runOnGpu(): ()
         gpu = true
     })
     local device = gpu.device(win)
+    -- A benchmark that waits for the display measures the display: with
+    -- vsync on, `device:frame()` blocks until the next vertical blank and
+    -- every number below is the refresh rate, however little work a frame
+    -- actually took. It stays on for ordinary runs, where tearing for
+    -- frames nobody looks at is a poor trade.
+    if (options.bench > 0 and gpu.setVsync(win, false)) then
+        print("note: this adapter cannot turn vsync off, so the timings are the display's")
+    end
     local info = gpu.adapter()
     print(string.format("adapter: %s (%s, %s)", info.name, info.backend, info.type))
 

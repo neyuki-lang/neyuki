@@ -16,7 +16,7 @@ The module is behind the `gpu` cargo feature, which is **off** in stock builds, 
 
 wgpu's own environment variables apply — `WGPU_BACKEND=vulkan` pins a backend, `WGPU_POWER_PREF=low` prefers the integrated GPU — and `NEYUKI_GPU_SOFTWARE=1` adds the one wgpu has no variable for: use the software adapter (WARP on Windows, lavapipe elsewhere) instead of real hardware. That is how a machine with no GPU runs the same code, slowly but correctly, and `frame:read()` makes those runs checkable with no display.
 
-> **Status: new.** Textured, depth-tested meshes from a `buffer`, canvases as textures, and a chunked landscape as the acceptance test. Still to come: more than one vertex buffer or bind group, instance data, a first vertex and a base instance on a draw, render targets other than the window, mipmaps, and a choice of present mode.
+> **Status: new.** Textured, depth-tested meshes from a `buffer`, canvases as textures, and a chunked landscape as the acceptance test. Still to come: more than one vertex buffer or bind group, instance data, a first vertex and a base instance on a draw, render targets other than the window, mipmaps, and present modes beyond the two `gpu.setVsync` chooses between.
 
 ```lua
 local gpu = require("@neyuki/gpu")
@@ -91,6 +91,31 @@ The adapter is chosen for the first GPU window, so this raises an error until on
 ## gpu.clear(window: Window, color: any): ()
 
 Fills `window` with one colour and presents the frame — the whole of drawing it, in one call. `window` must have been opened with `gpu = true`. `color` takes the same forms as in `@neyuki/ui`: `"#rgb"`, `"#rrggbb"`, `"#rrggbbaa"`, a `{ r, g, b, a? }` table with channels 0–255, or a packed `0xRRGGBBAA` integer. Raises while a frame from `device:frame` is open.
+
+## gpu.vsync(window: Window): boolean
+
+Whether `window`'s frames wait for the display before they are shown. True unless `gpu.setVsync` turned it off, so a draw loop on this window runs at the refresh rate at most.
+
+## gpu.setVsync(window: Window, enabled: boolean): boolean
+
+Turns vsync on or off for `window`, and reports what it does now — which is not always what was asked.
+
+With vsync on, which is how every GPU window opens, `device:frame()` blocks until the display is ready for another image: no tearing, and a loop that cannot run faster than the monitor refreshes. Off, it does not block, so the loop draws as fast as the GPU can finish a frame. That is what a benchmark wants, and what a frame time measured against anything other than the refresh interval needs.
+
+The result is `false` once frames no longer wait, and `true` both for `setVsync(window, true)` and on an adapter with no mode that can stop waiting — older Direct3D 12 and some Wayland compositors have none. A frame rate cap is not an error, so nothing is raised there; check the result where it matters.
+
+```lua
+local win = ui.open({ width = 960, height = 560, gpu = true })
+if gpu.setVsync(win, false) then
+    print("this adapter can only present on the vertical blank")
+end
+```
+
+Two things to expect with it off. Tearing, because `"vsync off"` is `Immediate` where the adapter has it: the front buffer is swapped the moment the GPU is done, part-way down the screen as often as not. (Where it has only `Mailbox` — "fast vsync" — the loop is uncapped but the image still changes at the vertical blank, so that one does not tear.) And no cap at all on how often the loop runs, which is a hot GPU for frames nobody sees, so it belongs behind a setting rather than on by default.
+
+`ui.run` in [@neyuki/ui](ui.md) has a frame rate of its own, 60 by default, and it is the one still in the way: with vsync off and nothing else changed the loop keeps running 60 times a second. Raise `fps` to see the difference — `ui.run(handler, { fps = 1000 })` — and `dt` then reports what the GPU actually managed.
+
+Raises while a frame from `device:frame` is open: that frame is the window's next image, and reconfiguring the swap chain takes it away.
 
 ## gpu.cancelFrame(): boolean
 
