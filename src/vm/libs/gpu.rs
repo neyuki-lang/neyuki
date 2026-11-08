@@ -1558,9 +1558,15 @@ mod real {
             if let Some(target) = frame.target.as_mut() {
                 target.pass.set_pipeline(&entry.pipeline);
             }
-            // The bind group layout belongs to the pipeline, so whatever
-            // was bound has to be rebuilt against the new one.
-            frame.rebind = !frame.bindings.is_empty();
+            // The bind group layout belongs to the pipeline, and a layout
+            // is derived from one shader's own declarations: what the last
+            // pipeline wanted bound is not what this one wants. So the
+            // bindings go with it, and a frame that draws a landscape and
+            // then a flat overlay binds each pipeline's own resources
+            // without the first pipeline's extra sampler making the
+            // second's bind group the wrong size.
+            frame.bindings.clear();
+            frame.rebind = false;
             frame.pipeline = Some(entry);
             Ok(())
         })?;
