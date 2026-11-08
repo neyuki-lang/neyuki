@@ -1592,7 +1592,13 @@ Shader '{SHADER_LABEL}' "
             // without the first pipeline's extra sampler making the
             // second's bind group the wrong size.
             frame.bindings.clear();
-            frame.rebind = false;
+            // And the next draw builds a group against this pipeline's own
+            // layout, rather than leaving the one the last pipeline set on
+            // the pass. Where the two layouts happen to agree that group
+            // would still be usable, so a script that changed pipeline and
+            // forgot to bind would draw with the resources of the one
+            // before it; now it is told which binding is missing.
+            frame.rebind = true;
             frame.pipeline = Some(entry);
             Ok(())
         })?;

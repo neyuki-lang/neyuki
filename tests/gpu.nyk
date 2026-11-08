@@ -408,6 +408,18 @@ frame:pipeline(depthTested):bind(0, texture):bind(1, sampler):vertices(mesh):dra
 frame:pipeline(bareline):draw(3)
 assert(frame:finish(), "a pipeline that binds nothing follows one that binds two")
 
+-- And the other way round: the group the first pipeline set is not left on
+-- the pass for the second to draw with, so forgetting to bind names the
+-- binding that is missing instead of quietly drawing the wrong resources.
+frame = device:frame()
+frame:pipeline(bareline):vertices(mesh):draw(3)
+frame:pipeline(depthTested)
+expectError(frame.draw, "cannot bind", "a pipeline change needs its own bindings", frame, 3)
+-- Finished rather than cancelled: the first draw did land, and a run of
+-- cancels in a row can leave the surface with no image to hand out, which
+-- the next frame reports as skipped.
+frame:finish()
+
 -- CANCELLING A FRAME ------------------------------------------------------
 --
 -- An error on a frame leaves the frame open, because a mistyped argument
