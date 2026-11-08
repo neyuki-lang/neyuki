@@ -36,5 +36,6 @@ Load these with `require("@neyuki/name")`.
 | [@neyuki/ui](ui.md) | Windows, drawing, input events and animation |
 | [@neyuki/webview](webview.md) | Web pages in a window: load a URL, HTML or app files, and exchange messages with the page |
 | [@neyuki/gpu](gpu.md) | GPU rendering on a `ui` window, behind the `gpu` cargo feature: textured, depth-tested meshes and canvases as textures |
+| [@neyuki/audio](audio.md) | Playing sound files, tones and samples: volume, panning, speed, looping, fades and seeking |
 | [@neyuki/hid](hid.md) | Keyboard and mouse automation, screen size, clipboard |
 | [@neyuki/profile](profile.md) | Finding slow functions |
