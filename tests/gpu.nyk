@@ -108,9 +108,28 @@ fn fragment(in: Vertex) -> @location(0) vec4<f32> {
 ]]
 
 local shader = device:shader(source)
-expectError(device.shader, "cannot compile the shader", "a broken shader raises", device,
-    "@vertex fn vertex() -> @builtin(position) vec4<f32> { return nonsense; }")
 expectError(device.shader, "source must be a string", "shader checks its source", device, 7)
+
+-- A WGSL mistake has to reach the script with somewhere to look: the line,
+-- the column and a snippet of its own source. wgpu's own framing -- which
+-- function was called and what this module labelled the shader module --
+-- says nothing to a script and is trimmed off.
+local compiled, why = try(device.shader, device,
+    "@vertex
+fn vertex() -> @builtin(position) vec4<f32> {
+    return nonsense;
+}
+")
+assert(not compiled, "a broken shader raises")
+why = tostring(why)
+assert(string.find(why, "cannot compile the shader", 1, true) != nil,
+    "the shader error says what failed: " .. why)
+assert(string.find(why, "wgsl:3:", 1, true) != nil,
+    "the shader error carries the line and column: " .. why)
+assert(string.find(why, "nonsense", 1, true) != nil,
+    "the shader error quotes the source: " .. why)
+assert(string.find(why, "create_shader_module", 1, true) == nil,
+    "the shader error leaves wgpu's framing out: " .. why)
 
 -- tests/fixtures/pixels.bmp is 3x2: red, green, blue across the top row and
 -- white, black, grey across the bottom. Sampling the top row with `nearest`
@@ -329,6 +348,66 @@ frame:pipeline(depthTested):bind(0, sampler):bind(1, texture):vertices(mesh)
 expectError(frame.draw, "cannot bind", "a mistyped binding is refused", frame, 3)
 frame:finish()
 
+-- A CANVAS AS A TEXTURE ---------------------------------------------------
+--
+-- A heads-up display is an `@neyuki/ui` canvas uploaded as a texture and
+-- drawn flat over depth-tested geometry, in the same frame. The canvas here
+-- is two texels wide: the left one opaque blue, the right one left
+-- transparent, and the mesh samples the left.
+
+local panel = ui.canvas(2, 1)
+panel:fillRect(0, 0, 1, 1, "#0000ff")
+local hud = device:texture(panel)
+assert(hud.width == 2 and hud.height == 1,
+    "a canvas texture is the canvas's size in physical pixels")
+local overlay = device:pipeline({
+    shader = shader, vertex = layout, depth = false, blend = "alpha" })
+
+function drawWithHud(): (number, number, number)
+    local held = device:frame({ clear = "#000" })
+    held:pipeline(depthTested):bind(0, texture):bind(1, sampler):vertices(mesh):draw(3)
+    -- Flat and blended, over geometry that was depth tested: one depth
+    -- attachment fits every pipeline, so this needs no second render pass.
+    held:pipeline(overlay):bind(0, hud):bind(1, sampler):vertices(mesh):draw(3)
+    local shown, shot, shotWidth, shotHeight = held:read()
+    assert(shown, "the frame with a display on it presented")
+    local spot = ((shotHeight // 2) * shotWidth + shotWidth // 2) * 4
+    return buffer.readu8(shot, spot), buffer.readu8(shot, spot + 1),
+        buffer.readu8(shot, spot + 2)
+end
+
+local hr, hg, hb = drawWithHud()
+assert(hr == 0 and hg == 0 and hb == 255, "an opaque display covers the geometry under it, got "
+    .. tostring(hr) .. "," .. tostring(hg) .. "," .. tostring(hb))
+
+-- Redrawn and written over the same texture, which is the path a display
+-- that changes every frame needs: no new texture, and so no new bind group.
+panel:clear()
+hud:update(panel)
+hr, hg, hb = drawWithHud()
+assert(hr == 255 and hg == 0 and hb == 0, "a transparent display lets the geometry through, got "
+    .. tostring(hr) .. "," .. tostring(hg) .. "," .. tostring(hb))
+
+-- An image can be written over a texture too, and a canvas that grew cannot:
+-- a texture is not resizable, so the script is told to make another.
+hud:close()
+hud = device:texture(image)
+hud:update(image)
+expectError(hud.update, "cannot be resized", "a source of another size is refused", hud,
+    ui.canvas(4, 4))
+expectError(hud.update, "must be an image", "update checks its source", hud, {})
+hud:close()
+expectError(hud.update, "texture is closed", "a closed texture cannot be written", hud, image)
+
+-- Setting a pipeline starts the bindings over, because a layout comes from
+-- one shader's own declarations and the next shader's are not the same. The
+-- display above is exactly the case: two bindings, then a pipeline that
+-- takes none, in one frame.
+frame = device:frame()
+frame:pipeline(depthTested):bind(0, texture):bind(1, sampler):vertices(mesh):draw(3)
+frame:pipeline(bareline):draw(3)
+assert(frame:finish(), "a pipeline that binds nothing follows one that binds two")
+
 -- CANCELLING A FRAME ------------------------------------------------------
 --
 -- An error on a frame leaves the frame open, because a mistyped argument
@@ -373,6 +452,8 @@ frame:finish()
 gpu.clear(win, "#000")
 
 texture:close()
+overlay:close()
+panel:close()
 sampler:close()
 mesh:close()
 padded:close()

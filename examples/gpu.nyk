@@ -70,43 +70,22 @@ end
 
 -- A TEXTURE ----------------------------------------------------------------
 --
--- Built in the script rather than loaded, so the example needs no asset.
--- A 24-bit BMP is the shortest image a script can write, and `ui.decodeImage`
--- reads it; uploading an `@neyuki/ui` canvas straight to the GPU is the next
--- milestone's job.
+-- Drawn with `@neyuki/ui` on a canvas and handed straight to the GPU, so the
+-- example needs no asset on disk and no image decoding. A canvas is also how
+-- text and anything else two-dimensional reaches a GPU window: draw it with
+-- `ui`, upload it, and refresh it with `texture:update`.
 
-function checkerBmp(cells: number, pixels: number): any
-    local width = cells * pixels
-    local stride = width * 3
-    local padding = (4 - stride % 4) % 4
-    local rows = (stride + padding) * width
-    local bmp = buffer.create(54 + rows)
-    buffer.writestring(bmp, 0, "BM")
-    buffer.writeu32(bmp, 2, 54 + rows)
-    buffer.writeu32(bmp, 10, 54)
-    buffer.writeu32(bmp, 14, 40)
-    buffer.writei32(bmp, 18, width)
-    buffer.writei32(bmp, 22, width)
-    buffer.writeu16(bmp, 26, 1)
-    buffer.writeu16(bmp, 28, 24)
-    buffer.writeu32(bmp, 34, rows)
-    for y = 0, width - 1 do
-        for x = 0, width - 1 do
-            local dark = (x // pixels + y // pixels) % 2 == 0
-            local offset = 54 + y * (stride + padding) + x * 3
-            -- BMP keeps pixels blue, green, red.
-            if (dark) then
-                buffer.writeu8(bmp, offset, 90)
-                buffer.writeu8(bmp, offset + 1, 60)
-                buffer.writeu8(bmp, offset + 2, 40)
-            else
-                buffer.writeu8(bmp, offset, 232)
-                buffer.writeu8(bmp, offset + 1, 194)
-                buffer.writeu8(bmp, offset + 2, 154)
-            end
+function checkerCanvas(cells: number, pixels: number): any
+    local size = cells * pixels
+    local checker = ui.canvas(size, size)
+    for y = 0, cells - 1 do
+        for x = 0, cells - 1 do
+            local dark = (x + y) % 2 == 0
+            checker:fillRect(x * pixels, y * pixels, pixels, pixels,
+                dark and "#283c5a" or "#9ac2e8")
         end
     end
-    return bmp
+    return checker
 end
 
 -- A CUBE -------------------------------------------------------------------
@@ -181,8 +160,7 @@ local device = gpu.device(win)
 local info = gpu.adapter()
 print("adapter: " .. info.name .. " (" .. info.backend .. ", " .. info.type .. ")")
 
-local image = ui.decodeImage(checkerBmp(8, 8))
-local texture = device:texture(image)
+local texture = device:texture(checkerCanvas(8, 8))
 local sampler = device:sampler({ filter = "nearest" })
 local mesh = device:buffer(vertices, "vertex")
 local elements = device:buffer(indices, "index")

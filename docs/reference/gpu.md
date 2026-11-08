@@ -8,13 +8,15 @@ A window opened with `gpu = true` is handed to this module. It has **no CPU back
 
 Shaders are WGSL. A pipeline's bindings are read from the shader itself — whatever it declares as `@group(0) @binding(n)` — so there is no second place to keep in step, and a pipeline's vertex layout is the one thing a script states twice. Vertex, index and uniform data come from `buffer` values, which is what makes uploading a mesh one copy with no table conversion.
 
+Text and two-dimensional drawing come from `@neyuki/ui` itself: draw them on a canvas and upload that as a texture. `Texture:update` writes a redrawn canvas over the same allocation, which is what a heads-up display needs, and a pipeline with `depth = false` and `blend = "alpha"` draws it over depth-tested geometry in the same frame.
+
 Colours come out as they went in. The surface is configured with a plain, non-sRGB format, so `gpu.clear(win, "#9ac2e8")` shows the same colour `win:clear("#9ac2e8")` would on a CPU window, and a texture made from a `ui` image matches what `ui` draws from it. A script that wants linear shading converts in its shader.
 
 The module is behind the `gpu` cargo feature, which is **off** in stock builds, as it adds a large dependency tree and several MiB to the executable. Check `gpu.isAvailable()` first: it is `false` both on a build without the feature and on a machine with no usable adapter.
 
 wgpu's own environment variables apply — `WGPU_BACKEND=vulkan` pins a backend, `WGPU_POWER_PREF=low` prefers the integrated GPU — and `NEYUKI_GPU_SOFTWARE=1` adds the one wgpu has no variable for: use the software adapter (WARP on Windows, lavapipe elsewhere) instead of real hardware. That is how a machine with no GPU runs the same code, slowly but correctly, and `frame:read()` makes those runs checkable with no display.
 
-> **Status: milestone 2.** A textured, depth-tested mesh. Still to come: uploading a `ui.canvas` as a texture for heads-up displays and text, more than one vertex buffer or bind group, instance data, render targets other than the window, and mipmaps.
+> **Status: new.** Textured, depth-tested meshes from a `buffer`, canvases as textures, and a chunked landscape as the acceptance test. Still to come: more than one vertex buffer or bind group, instance data, a first vertex and a base instance on a draw, render targets other than the window, mipmaps, and a choice of present mode.
 
 ```lua
 local gpu = require("@neyuki/gpu")
@@ -50,7 +52,7 @@ ui.run(function()
 end)
 ```
 
-A full example, including the matrix arithmetic, is in [examples/gpu.nyk](../../examples/gpu.nyk).
+A full example, including the matrix arithmetic, is in [examples/gpu.nyk](../../examples/gpu.nyk). The larger one is [examples/gpu_terrain.nyk](../../examples/gpu_terrain.nyk): a chunked landscape meshed into `buffer` values, a heads-up display on a canvas, and a benchmark that will draw the same quads through `@neyuki/ui` instead for comparison.
 
 ## Conventions
 
@@ -108,7 +110,17 @@ Raises here, rather than from the first resource built, when the machine has no 
 
 Compiles WGSL. The shader needs one `@vertex` and one `@fragment` entry point; which they are called does not matter.
 
-A shader that does not compile raises with the driver's message, which carries the line, the column and a snippet of the source.
+A shader that does not compile raises with the compiler's own message, which carries the line, the column and a snippet of the source:
+
+```
+cannot compile the shader: parsing error: no definition in scope for identifier: `nope`
+  — wgsl:3:12
+  |
+3 |     return nope;
+  |            ^^^^ unknown identifier
+```
+
+wgpu's framing around it — which function was called, and the label this module gave the shader module — is trimmed off, because neither is anything the script wrote.
 
 ## Device:buffer(data: buffer | number, usage: string): GpuBuffer
 
@@ -124,11 +136,21 @@ Replaces part of the contents, which is how a uniform buffer is refreshed each f
 
 Frees the buffer.
 
-## Device:texture(image: Image): Texture
+## Device:texture(source: Image | Canvas): Texture
 
-Uploads an `@neyuki/ui` image: its first frame, RGBA, premultiplied as `@neyuki/ui` keeps it — which is why `blend = "alpha"` blends premultiplied. `width` and `height` are on the result.
+Uploads an `@neyuki/ui` image or canvas: an image's first frame, or a canvas as it stands, RGBA and premultiplied as `@neyuki/ui` keeps it — which is why `blend = "alpha"` blends premultiplied.
+
+`width` and `height` on the result are physical pixels, so a canvas made with `{ scale = win:scale() }` gives a texture that much larger than the size it was asked for — the same pixels `window:drawImage` would copy.
 
 Textures are sampled with `0..1` coordinates whose origin is the top left, so `v` runs down the image as `y` does in `@neyuki/ui`.
+
+## Texture:update(source: Image | Canvas): Texture
+
+Writes a redrawn image or canvas over the texture, and returns it.
+
+This is how a heads-up display reaches the GPU: draw it on a canvas with `@neyuki/ui`, upload it once with `device:texture`, then call this whenever it changes. The texture, its view and every bind group holding it stay as they are, so a frame costs one copy and nothing is rebuilt. Redraw a display when it changes rather than every frame: `text` costs far more than the copy does.
+
+The source has to be the size the texture already is. A texture cannot be resized, so a canvas that grew needs a new one.
 
 ## Texture:close(): ()
 
@@ -178,7 +200,9 @@ A frame whose window cannot be drawn — minimized, hidden, or the compositor wa
 
 ## Frame:pipeline(pipeline: Pipeline): Frame
 
-Draws with `pipeline` from here on. Bindings are rebuilt against its layout, so set the pipeline before binding.
+Draws with `pipeline` from here on, and **clears the bindings**: a layout comes from one shader's own `@group(0)` declarations, and the next shader's are not the same. So bind after setting the pipeline, and bind again after changing it.
+
+That is what lets one frame hold a depth-tested landscape and then a flat, blended overlay. Each pipeline is given its own resources, and a sampler the first one wanted does not make the second one's bind group the wrong size.
 
 ## Frame:bind(index: number, resource: GpuBuffer | Texture | Sampler): Frame
 
