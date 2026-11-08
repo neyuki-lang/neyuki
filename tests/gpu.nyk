@@ -14,6 +14,8 @@ expectError(gpu.clear, "window must be a window from ui.open", "clear checks its
 expectError(gpu.clear, "window must be a window from ui.open", "clear rejects a plain table", {}, "#fff")
 expectError(gpu.device, "window must be a window from ui.open", "device checks its window", nil)
 expectError(gpu.device, "window must be a window from ui.open", "device rejects a plain table", {})
+expectError(gpu.vsync, "window must be a window from ui.open", "vsync checks its window", nil)
+expectError(gpu.setVsync, "window must be a window from ui.open", "setVsync checks its window", nil, false)
 
 -- Without the `gpu` cargo feature everything but `isAvailable` says so, and
 -- `ui.open` refuses `gpu = true`. With it, the adapter is chosen for the
@@ -69,6 +71,25 @@ gpu.clear(win, { r = 10, g = 20, b = 30 })
 gpu.clear(win, 0x9ac2e8ff)
 expectError(gpu.clear, "color must be", "clear checks its colour", win, "nope")
 
+-- VSYNC -------------------------------------------------------------------
+--
+-- A window opens waiting for the display. Turning that off is a hint: an
+-- adapter with neither `Immediate` nor `Mailbox` keeps waiting and says so
+-- in the result rather than raising, so both answers are right here and the
+-- one thing that must hold is that the report matches what `vsync` says
+-- afterwards. Either way the window still presents, which is what a
+-- reconfigured swap chain can quietly stop doing.
+assert(gpu.vsync(win), "a GPU window opens with vsync on")
+expectError(gpu.setVsync, "enabled must be a boolean", "setVsync checks its flag", win, "off")
+expectError(gpu.setVsync, "enabled must be provided", "setVsync wants a flag", win)
+local waiting = gpu.setVsync(win, false)
+assert(gpu.vsync(win) == waiting, "setVsync reports the state vsync then reads")
+gpu.clear(win, "#203040")
+assert(gpu.setVsync(win, false) == waiting, "turning it off twice settles on the same mode")
+assert(gpu.setVsync(win, true), "vsync can always be turned back on")
+assert(gpu.vsync(win), "and reads as on afterwards")
+gpu.clear(win, "#203040")
+
 -- A CPU window is the other way round: `ui` draws it and `@neyuki/gpu` will
 -- not touch it.
 local cpu = ui.open({ width = 80, height = 60, visible = false })
@@ -76,6 +97,9 @@ cpu:clear("#000")
 cpu:present()
 expectError(gpu.clear, "not opened with gpu = true", "gpu.clear refuses a CPU window", cpu, "#fff")
 expectError(gpu.device, "not opened with gpu = true", "gpu.device refuses a CPU window", cpu)
+expectError(gpu.vsync, "not opened with gpu = true", "gpu.vsync refuses a CPU window", cpu)
+expectError(gpu.setVsync, "not opened with gpu = true", "gpu.setVsync refuses a CPU window",
+    cpu, false)
 cpu:close()
 
 -- RESOURCES ---------------------------------------------------------------
@@ -440,6 +464,8 @@ assert(frame:finish(), "a frame starts again after a cancel")
 -- error it caught: the frame is open and nothing names it.
 frame = device:frame()
 expectError(device.frame, "already open", "the frame is still open", device)
+expectError(gpu.setVsync, "a frame is open", "setVsync will not reconfigure under a frame",
+    win, false)
 assert(gpu.cancelFrame(), "cancelFrame reports the frame it discarded")
 assert(not gpu.cancelFrame(), "and reports nothing the second time")
 gpu.clear(win, "#000")

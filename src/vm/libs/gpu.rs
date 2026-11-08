@@ -101,6 +101,14 @@ mod stub {
             func: unsupported,
         },
         NativeDef {
+            name: "__gpu_vsync",
+            func: unsupported,
+        },
+        NativeDef {
+            name: "__gpu_set_vsync",
+            func: unsupported,
+        },
+        NativeDef {
             name: "__gpu_device",
             func: unsupported,
         },
@@ -453,6 +461,13 @@ Shader '{SHADER_LABEL}' "
             if capabilities.formats.contains(&plain) {
                 config.format = plain;
             }
+            // Vsync, named rather than taken from `get_default_config`,
+            // which uses whichever mode the adapter listed first. Waiting
+            // for the display is the right default -- a loop drawing
+            // faster than the screen refreshes only heats the room -- and
+            // naming it means every adapter starts in the same state, which
+            // is the one `gpu.setVsync(window, true)` comes back to.
+            config.present_mode = wgpu::PresentMode::Fifo;
             Ok(config)
         })?;
         // Pipelines have to name the format they render to, and they are
@@ -480,6 +495,49 @@ Shader '{SHADER_LABEL}' "
         with_context(None, |context| {
             surface.configure(&context.device, config);
             Ok(())
+        })
+    }
+
+    /// Whether a present mode makes a draw loop wait for the display.
+    /// `Fifo` and `FifoRelaxed` queue frames for the vertical blank and
+    /// block `get_current_texture` until the queue has room, which is what
+    /// holds a loop at the refresh rate. `Immediate` and `Mailbox` never
+    /// block it: the first swaps the buffer as soon as the GPU is done
+    /// (tearing and all), the second replaces the one frame waiting to be
+    /// shown, so neither caps the frame rate.
+    fn is_vsync(mode: wgpu::PresentMode) -> bool {
+        use wgpu::PresentMode as Mode;
+        match mode {
+            Mode::Immediate | Mode::Mailbox | Mode::AutoNoVsync => false,
+            Mode::Fifo | Mode::FifoRelaxed | Mode::AutoVsync => true,
+        }
+    }
+
+    /// The present mode to configure `target` with. `Fifo` is the one mode
+    /// every adapter supports, so vsync can always be turned back on.
+    /// Turning it off prefers `Immediate` -- what "vsync off" means as a
+    /// graphics setting -- and falls back to `Mailbox`, which also never
+    /// blocks the loop but swaps at the vertical blank, so it does not
+    /// tear. An adapter with neither (older Direct3D 12, some Wayland
+    /// compositors) stays on `Fifo`, and the caller reports that vsync is
+    /// still on rather than raising: a frame rate cap is not a failure.
+    ///
+    /// The capability list is read here rather than handing wgpu
+    /// `AutoNoVsync`, whose fallback happens inside the driver where
+    /// nothing can see which mode it settled on.
+    fn present_mode(target: &Surface, vsync: bool) -> Result<wgpu::PresentMode, String> {
+        if vsync {
+            return Ok(wgpu::PresentMode::Fifo);
+        }
+        with_context(None, |context| {
+            let modes = target
+                .surface
+                .get_capabilities(&context.adapter)
+                .present_modes;
+            Ok([wgpu::PresentMode::Immediate, wgpu::PresentMode::Mailbox]
+                .into_iter()
+                .find(|mode| modes.contains(mode))
+                .unwrap_or(wgpu::PresentMode::Fifo))
         })
     }
 
@@ -686,6 +744,43 @@ Shader '{SHADER_LABEL}' "
         ];
         ui::with_window_gpu(id, |surface| present(surface, color))?;
         Ok(vec![])
+    }
+
+    /// `__gpu_vsync(window)` reports whether the window's swap chain waits
+    /// for the display before showing a frame.
+    fn vsync(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+        let id = ui::integer_arg(args, 0, "window")?;
+        let on = ui::with_window_gpu(id, |target| Ok(is_vsync(target.config.present_mode)))?;
+        Ok(vec![Value::Bool(on)])
+    }
+
+    /// `__gpu_set_vsync(window, enabled)` reconfigures the window's swap
+    /// chain and reports what it does now: `false` once frames no longer
+    /// wait for the display, and `true` both when vsync was asked for and
+    /// when the adapter has no mode that turns it off.
+    ///
+    /// Refused while a frame is open, as `__gpu_clear` is: that frame is
+    /// the swap chain's next image, and reconfiguring would take it away
+    /// underneath it.
+    fn set_vsync(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+        let id = ui::integer_arg(args, 0, "window")?;
+        let enabled = bool_arg(args, 1, "enabled")?;
+        if FRAME.with(|frame| frame.borrow().is_some()) {
+            return Err(
+                "a frame is open: finish it, or discard it with gpu.cancelFrame()".to_string(),
+            );
+        }
+        let on = ui::with_window_gpu(id, |target| {
+            let mode = present_mode(target, enabled)?;
+            // `configure` waits for the GPU to go idle, which is not worth
+            // doing for a setting that is already what was asked for.
+            if target.config.present_mode != mode {
+                target.config.present_mode = mode;
+                configure(target)?;
+            }
+            Ok(is_vsync(mode))
+        })?;
+        Ok(vec![Value::Bool(on)])
     }
 
     // RESOURCES ------------------------------------------------------------
@@ -2000,6 +2095,14 @@ Shader '{SHADER_LABEL}' "
         NativeDef {
             name: "__gpu_clear",
             func: clear,
+        },
+        NativeDef {
+            name: "__gpu_vsync",
+            func: vsync,
+        },
+        NativeDef {
+            name: "__gpu_set_vsync",
+            func: set_vsync,
         },
         NativeDef {
             name: "__gpu_device",
