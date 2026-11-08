@@ -127,6 +127,19 @@ function gpu.clear(window: {any}, color: any): ()
     __gpu_clear(window.id, color)
 end
 
+-- Discards whatever frame is open, as `frame:cancel()` does, and reports
+-- whether there was one. Nothing is presented.
+--
+-- This is the way out when the handle is gone. An error raised between
+-- `device:frame()` and `frame:finish()` leaves the frame open -- which is
+-- what lets a mistyped argument be an ordinary error rather than the end of
+-- the window -- and a draw loop that caught the error has usually lost the
+-- frame with the call that raised. A loop can call this before starting a
+-- frame, or after catching an error, and need keep no handle.
+function gpu.cancelFrame(): boolean
+    return __gpu_cancel_frame()
+end
+
 -- FRAMES -------------------------------------------------------------------
 
 -- Builds the `Frame` object around an open frame. Each call checks its
@@ -188,6 +201,18 @@ function makeFrame(id: number): Frame
     -- cannot be used again afterwards.
     function frame.finish(self: Frame): boolean
         return __gpu_frame_finish(id)
+    end
+
+    -- Throws the frame away without presenting it: the window keeps
+    -- whatever it last showed. A frame cannot be used again afterwards.
+    --
+    -- This is how a draw loop recovers from an error raised mid-frame.
+    -- Such an error leaves the frame open, and the frame holds the
+    -- window's next image, so every later `device:frame()` is refused
+    -- until it is let go of. Use `gpu.cancelFrame()` where the handle is
+    -- out of reach.
+    function frame.cancel(self: Frame): ()
+        __gpu_frame_cancel(id)
     end
 
     -- Finishes the frame as `finish` does, and also reads the image back:

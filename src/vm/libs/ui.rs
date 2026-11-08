@@ -3360,6 +3360,10 @@ fn builtin_close(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let id = integer_arg(args, 0, "window")?;
     let removed = WINDOWS.with(|windows| windows.borrow_mut().remove(&id));
     if let Some(win) = removed {
+        // A frame still open holds this window's next image, which cannot
+        // outlive the surface it came from. `win` still owns that surface
+        // here, so the frame goes first.
+        gpu::discard_window_frame(id);
         // The OS controls belong to the window, so the session ends with it.
         MEDIA.with(|media| {
             let mut media = media.borrow_mut();

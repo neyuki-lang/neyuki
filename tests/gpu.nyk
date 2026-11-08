@@ -329,6 +329,41 @@ frame:pipeline(depthTested):bind(0, sampler):bind(1, texture):vertices(mesh)
 expectError(frame.draw, "cannot bind", "a mistyped binding is refused", frame, 3)
 frame:finish()
 
+-- CANCELLING A FRAME ------------------------------------------------------
+--
+-- An error on a frame leaves the frame open, because a mistyped argument
+-- must not be the end of the window. The frame holds the window's next
+-- image, though, so something has to let go of it: without that, one
+-- caught error in a draw loop refuses every frame after it.
+
+frame = device:frame()
+expectError(frame.draw, "no pipeline is set", "the draw failed as intended", frame, 3)
+frame:cancel()
+expectError(frame.finish, "frame is finished", "a cancelled frame cannot be finished", frame)
+expectError(frame.cancel, "frame is finished", "a cancelled frame cannot be cancelled twice", frame)
+assert(not gpu.cancelFrame(), "nothing is open after a cancel")
+frame = device:frame()
+assert(frame:finish(), "a frame starts again after a cancel")
+
+-- The same recovery with no handle, which is what a loop has after an
+-- error it caught: the frame is open and nothing names it.
+frame = device:frame()
+expectError(device.frame, "already open", "the frame is still open", device)
+assert(gpu.cancelFrame(), "cancelFrame reports the frame it discarded")
+assert(not gpu.cancelFrame(), "and reports nothing the second time")
+gpu.clear(win, "#000")
+
+-- A window closed with a frame open used to drop the window's image after
+-- the surface it came from, which panics inside the driver -- in a thread
+-- local's destructor, so it aborted the process instead of reaching the
+-- script. The frame has to go with the window.
+local doomed = ui.open({ title = "Neyuki gpu close", width = 64, height = 64,
+    visible = false, gpu = true })
+local doomedDevice = gpu.device(doomed)
+doomedDevice:frame({ clear = "#000" })
+doomed:close()
+assert(not gpu.cancelFrame(), "closing a window discards its open frame")
+
 -- Resources can be freed, and a freed one is not usable again.
 elements:close()
 elements:close()

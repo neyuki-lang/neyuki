@@ -90,6 +90,14 @@ The adapter is chosen for the first GPU window, so this raises an error until on
 
 Fills `window` with one colour and presents the frame — the whole of drawing it, in one call. `window` must have been opened with `gpu = true`. `color` takes the same forms as in `@neyuki/ui`: `"#rgb"`, `"#rrggbb"`, `"#rrggbbaa"`, a `{ r, g, b, a? }` table with channels 0–255, or a packed `0xRRGGBBAA` integer. Raises while a frame from `device:frame` is open.
 
+## gpu.cancelFrame(): boolean
+
+Discards whatever frame is open, as `Frame:cancel` does, and reports whether there was one. Nothing is presented.
+
+This is the way out when the handle is gone. An error raised between `device:frame()` and `frame:finish()` leaves the frame open — which is what lets a mistyped argument be an ordinary error rather than the end of the window — and a draw loop that caught the error has usually lost the frame with the call that raised it. The frame holds the window's next image, so until it is let go of every later `device:frame()` is refused. A loop can call this before starting a frame, or after catching an error, and need keep no handle.
+
+Closing a window discards its open frame too, so neither is something a script has to unwind by hand.
+
 ## gpu.device(window: Window): Device
 
 The device for `window`, which must have been opened with `gpu = true`. The device, its adapter and its queue are shared by every GPU window; the frames this one opens are `window`'s.
@@ -191,6 +199,12 @@ Draws `count` vertices, or `count` indices once `indices` has been called, `inst
 ## Frame:finish(): boolean
 
 Submits the frame and presents the window. Returns `false` when the frame was skipped, which is not an error. The frame cannot be used again.
+
+## Frame:cancel(): ()
+
+Throws the frame away without presenting it: the window keeps whatever it last showed. The frame cannot be used again.
+
+This is how a draw loop recovers from an error raised mid-frame. Use `gpu.cancelFrame()` where the handle is out of reach, which in a loop it usually is.
 
 ## Frame:read(): (boolean, buffer?, number?, number?)
 

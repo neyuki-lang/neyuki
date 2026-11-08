@@ -40,12 +40,12 @@
 //!   without a transpose.
 
 #[cfg(feature = "gpu")]
-pub(crate) use real::{Surface, create_surface, resize};
+pub(crate) use real::{Surface, create_surface, discard_window_frame, resize};
 #[cfg(feature = "gpu")]
 pub(crate) const NATIVES: &[crate::vm::value::NativeDef] = real::NATIVES;
 
 #[cfg(not(feature = "gpu"))]
-pub(crate) use stub::{Surface, create_surface, resize};
+pub(crate) use stub::{Surface, create_surface, discard_window_frame, resize};
 #[cfg(not(feature = "gpu"))]
 pub(crate) const NATIVES: &[crate::vm::value::NativeDef] = stub::NATIVES;
 
@@ -75,6 +75,9 @@ mod stub {
     pub(crate) fn resize(surface: &mut Surface, _: u32, _: u32) {
         match *surface {}
     }
+
+    /// No frame can be open, so a window being closed has none to discard.
+    pub(crate) fn discard_window_frame(_: u64) {}
 
     fn available(_vm: &mut VM, _args: &[Value]) -> Result<Vec<Value>, String> {
         Ok(vec![Value::Bool(false)])
@@ -159,6 +162,14 @@ mod stub {
         },
         NativeDef {
             name: "__gpu_frame_read",
+            func: unsupported,
+        },
+        NativeDef {
+            name: "__gpu_frame_cancel",
+            func: unsupported,
+        },
+        NativeDef {
+            name: "__gpu_cancel_frame",
             func: unsupported,
         },
     ];
@@ -631,7 +642,9 @@ mod real {
         let id = ui::integer_arg(args, 0, "window")?;
         let (r, g, b, a) = ui::color_arg(args, 1, "color")?;
         if FRAME.with(|frame| frame.borrow().is_some()) {
-            return Err("a frame is open: finish it first".to_string());
+            return Err(
+                "a frame is open: finish it, or discard it with gpu.cancelFrame()".to_string(),
+            );
         }
         // The surface is configured with a plain (non-sRGB) format, so the
         // channels reach the screen as the script wrote them, exactly as
@@ -1290,6 +1303,65 @@ mod real {
         })
     }
 
+    /// Takes the open frame out of the thread local if it is frame `id`.
+    ///
+    /// Finishing, reading and cancelling all start this way: the frame is
+    /// gone whatever happens next. An error after this point must not leave
+    /// a frame open, or the window's image would be held until the script
+    /// happened to start another one.
+    fn take_frame(id: u64) -> Option<Frame> {
+        FRAME.with(|frame| {
+            let mut frame = frame.borrow_mut();
+            match frame.as_ref().is_some_and(|open| open.id == id) {
+                true => frame.take(),
+                false => None,
+            }
+        })
+    }
+
+    /// Throws a frame away without presenting it. An unpresented
+    /// `SurfaceTexture` discards itself, so the window keeps whatever it
+    /// last showed.
+    ///
+    /// The order matters: the render pass records into the encoder and the
+    /// encoder into the window's image, so they go in that order.
+    fn discard(frame: Option<Frame>) {
+        let Some(Frame {
+            target: Some(target),
+            ..
+        }) = frame
+        else {
+            return;
+        };
+        let Target {
+            pass,
+            encoder,
+            texture,
+        } = target;
+        drop(pass);
+        drop(encoder);
+        drop(texture);
+    }
+
+    /// Discards the open frame if it belongs to `window`, for a window that
+    /// is being closed.
+    ///
+    /// A frame holds the window's next image, and that image cannot outlive
+    /// the surface it came from: dropping it afterwards panics inside wgpu,
+    /// and the panic lands in a thread local's destructor, which aborts the
+    /// process rather than reaching the script. So the frame goes while the
+    /// surface is still there.
+    pub(crate) fn discard_window_frame(window: u64) {
+        let frame = FRAME.with(|frame| {
+            let mut frame = frame.borrow_mut();
+            match frame.as_ref().is_some_and(|open| open.window == window) {
+                true => frame.take(),
+                false => None,
+            }
+        });
+        discard(frame);
+    }
+
     /// `__gpu_frame(window, color, depth)` starts a frame on a GPU window:
     /// acquires the window's next image, clears the colour and depth
     /// buffers, and opens a render pass.
@@ -1310,7 +1382,10 @@ mod real {
             return Err("depth must be between 0 and 1".to_string());
         }
         if FRAME.with(|frame| frame.borrow().is_some()) {
-            return Err("a frame is already open: finish it first".to_string());
+            return Err(
+                "a frame is already open: finish it, or discard it with gpu.cancelFrame()"
+                    .to_string(),
+            );
         }
         let acquired = ui::with_window_gpu(window, |surface| {
             let acquired = match surface.surface.get_current_texture() {
@@ -1648,14 +1723,7 @@ mod real {
     /// another one.
     fn frame_finish(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         let id = ui::integer_arg(args, 0, "frame")?;
-        let frame = FRAME.with(|frame| {
-            let mut frame = frame.borrow_mut();
-            match frame.as_ref().is_some_and(|open| open.id == id) {
-                true => frame.take(),
-                false => None,
-            }
-        });
-        let frame = frame.ok_or_else(|| "frame is finished".to_string())?;
+        let frame = take_frame(id).ok_or_else(|| "frame is finished".to_string())?;
         let Some(target) = frame.target else {
             return Ok(vec![Value::Bool(false)]);
         };
@@ -1679,6 +1747,32 @@ mod real {
         Ok(vec![Value::Bool(true)])
     }
 
+    /// `__gpu_frame_cancel(frame)` throws the frame away without presenting
+    /// it. The window keeps whatever it last showed, and the frame cannot
+    /// be used again.
+    fn frame_cancel(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+        let id = ui::integer_arg(args, 0, "frame")?;
+        let frame = take_frame(id).ok_or_else(|| "frame is finished".to_string())?;
+        discard(Some(frame));
+        Ok(vec![])
+    }
+
+    /// `__gpu_cancel_frame()` discards whatever frame is open and reports
+    /// whether there was one.
+    ///
+    /// This is the way out of a frame whose handle a script no longer has.
+    /// An error raised between `device:frame()` and `frame:finish()` leaves
+    /// the frame open -- that is what keeps the checks on a frame from
+    /// having to be fatal -- and a draw loop that caught the error has
+    /// usually lost the handle with the call it was raised in. Nothing else
+    /// would let the next frame start.
+    fn cancel_frame(_vm: &mut VM, _args: &[Value]) -> Result<Vec<Value>, String> {
+        let frame = FRAME.with(|frame| frame.borrow_mut().take());
+        let open = frame.is_some();
+        discard(frame);
+        Ok(vec![Value::Bool(open)])
+    }
+
     /// Rows of a texture-to-buffer copy start on a multiple of this, so a
     /// readback is padded and then packed tightly again for the script.
     const COPY_ROW_ALIGNMENT: u32 = 256;
@@ -1696,14 +1790,7 @@ mod real {
     /// adapter, with no display and no GPU.
     fn frame_read(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         let id = ui::integer_arg(args, 0, "frame")?;
-        let frame = FRAME.with(|frame| {
-            let mut frame = frame.borrow_mut();
-            match frame.as_ref().is_some_and(|open| open.id == id) {
-                true => frame.take(),
-                false => None,
-            }
-        });
-        let frame = frame.ok_or_else(|| "frame is finished".to_string())?;
+        let frame = take_frame(id).ok_or_else(|| "frame is finished".to_string())?;
         let Some(target) = frame.target else {
             return Ok(vec![Value::Bool(false), Value::Nil, Value::Nil, Value::Nil]);
         };
@@ -1876,6 +1963,14 @@ mod real {
         NativeDef {
             name: "__gpu_frame_read",
             func: frame_read,
+        },
+        NativeDef {
+            name: "__gpu_frame_cancel",
+            func: frame_cancel,
+        },
+        NativeDef {
+            name: "__gpu_cancel_frame",
+            func: cancel_frame,
         },
     ];
 }
