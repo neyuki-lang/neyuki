@@ -372,6 +372,31 @@ mod real {
         }
     }
 
+    /// The label every shader module here is given. wgpu repeats it in an
+    /// error, where it says nothing to a script: there is one shader module
+    /// per `device:shader` call and the script did not name it.
+    const SHADER_LABEL: &str = "neyuki";
+
+    /// Trims wgpu's framing off a shader error. A WGSL mistake arrives
+    /// wrapped in two layers naming `Device::create_shader_module` and the
+    /// label above, with the part a script can act on last: the message,
+    /// the line and column, and a snippet of its own source. That part is
+    /// kept whole. An error not in that shape is passed through untouched,
+    /// because a wordy error beats a lost diagnostic.
+    fn tidy_shader_error(err: String) -> String {
+        let marker = format!(
+            "
+Shader '{SHADER_LABEL}' "
+        );
+        match err.find(&marker) {
+            Some(offset) => format!(
+                "cannot compile the shader: {}",
+                err[offset + marker.len()..].trim_end()
+            ),
+            None => err,
+        }
+    }
+
     /// Runs `body` on the shared context. `probe` is a surface the adapter
     /// must be able to present to, needed only the first time.
     fn with_context<T>(
@@ -932,11 +957,12 @@ mod real {
                 context
                     .device
                     .create_shader_module(wgpu::ShaderModuleDescriptor {
-                        label: Some("neyuki"),
+                        label: Some(SHADER_LABEL),
                         source: wgpu::ShaderSource::Wgsl(source.into()),
                     })
             })
-        })?;
+        })
+        .map_err(tidy_shader_error)?;
         let id = next_id();
         with_resources(|resources| {
             resources.shaders.insert(id, module);
