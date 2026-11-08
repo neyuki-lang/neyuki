@@ -202,7 +202,7 @@ A frame whose window cannot be drawn — minimized, hidden, or the compositor wa
 
 Draws with `pipeline` from here on, and **clears the bindings**: a layout comes from one shader's own `@group(0)` declarations, and the next shader's are not the same. So bind after setting the pipeline, and bind again after changing it.
 
-That is what lets one frame hold a depth-tested landscape and then a flat, blended overlay. Each pipeline is given its own resources, and a sampler the first one wanted does not make the second one's bind group the wrong size.
+That is what lets one frame hold a depth-tested landscape and then a flat, blended overlay. Each pipeline is given its own resources, and a sampler the first one wanted does not make the second one's bind group the wrong size. Forgetting to bind after a change is refused by the next draw, naming the binding, rather than quietly drawing with the previous pipeline's resources.
 
 ## Frame:bind(index: number, resource: GpuBuffer | Texture | Sampler): Frame
 
