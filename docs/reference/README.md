@@ -33,6 +33,9 @@ Load these with `require("@neyuki/name")`.
 | [@neyuki/net](net.md) | Pipes, Unix sockets, TCP sockets, WebSocket clients and servers, UDP sockets |
 | [@neyuki/sql](sql.md) | PostgreSQL, MySQL and MariaDB |
 | [@neyuki/crypto](crypto.md) | Hashes, passwords, encryption, signatures, secure random values |
+| [@neyuki/toml](toml.md) | Reading and writing TOML configuration files |
+| [@neyuki/csv](csv.md) | Reading and writing CSV, with or without a header line |
+| [@neyuki/html](html.md) | Parsing HTML like a browser, CSS selectors, text and rendering |
 | [@neyuki/ui](ui.md) | Windows, drawing, input events and animation |
 | [@neyuki/webview](webview.md) | Web pages in a window: load a URL, HTML or app files, and exchange messages with the page |
 | [@neyuki/gpu](gpu.md) | GPU rendering on a `ui` window, behind the `gpu` cargo feature: textured, depth-tested meshes and canvases as textures |

@@ -1,0 +1,28 @@
+local table = require("@neyuki/table")
+
+local toml = {}
+
+-- Reading and writing are native (src/vm/libs/toml.rs); this module checks
+-- arguments.
+
+-- Parses a TOML 1.1 document (which includes every TOML 1.0 document) into a
+-- table. Integers stay exact, `inf` and `nan` become floats, and dates and
+-- times become RFC 3339 strings such as "1979-05-27T07:32:00Z". Raises an
+-- error with the line and column of malformed input.
+function toml.decode(text: string): {[string]: any}
+    if (text == nil) then error("text must be provided") end
+    if (type(text) != "string") then error("text must be a string") end
+    return __toml_decode(text)
+end
+
+-- Writes a table as a TOML document with its keys sorted: plain values first,
+-- then a `[section]` per subtable and a `[[section]]` per entry of an array of
+-- tables. Raises an error for nil inside arrays, functions, cycles and
+-- integers outside the 64-bit range.
+function toml.encode(value: {[string]: any}): string
+    if (value == nil) then error("value must be provided") end
+    if (type(value) != "table") then error("value must be a table") end
+    return __toml_encode(value)
+end
+
+return table.freeze(toml)

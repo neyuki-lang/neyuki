@@ -116,6 +116,14 @@ souvlaki = { version = "0.8", default-features = false, features = ["use_zbus"] 
 # Linux) instead of spawning shell commands by hand.
 open = "5"
 
+# `@neyuki/html` parses with `html5ever`, Servo's implementation of the WHATWG
+# parsing algorithm, so broken markup is repaired the way a browser repairs it.
+# `kuchikiki` is the tree it parses into, which src/vm/libs/html.rs turns into
+# tables. Both are pure Rust and were already in the dependency graph through
+# `wry`. (`@neyuki/toml` and `@neyuki/csv` are hand-written, like `json`.)
+html5ever = "0.29"
+kuchikiki = "0.8.8-speedreader"
+
 # `@neyuki/hid` drives the keyboard and mouse through `enigo` (SendInput on
 # Windows, CoreGraphics on macOS, XTest over the pure-Rust `x11rb` on X11)
 # and the clipboard through `arboard`.

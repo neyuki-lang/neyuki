@@ -1,0 +1,56 @@
+local table = require("@neyuki/table")
+
+local csv = {}
+
+-- Reading and writing are native (src/vm/libs/csv.rs); this module checks
+-- arguments and fills in defaults.
+
+local function checkOptions(options: any)
+    if (options != nil and type(options) != "table") then error("options must be a table") end
+end
+
+local function delimiterOption(options: any): string
+    local delimiter = options.delimiter ?? ","
+    if (type(delimiter) != "string") then error("delimiter must be a string") end
+    return delimiter
+end
+
+-- Parses CSV text (RFC 4180) into an array of records. `options` may hold:
+--   delimiter  the field separator, one ASCII character (default ",")
+--   header     true to read the first record as column names and return
+--              one table per record keyed by them (default false: each
+--              record is an array of strings)
+-- Fields are always strings. Blank lines are skipped.
+function csv.decode(text: string, options: {[string]: any}?): {any}
+    if (text == nil) then error("text must be provided") end
+    if (type(text) != "string") then error("text must be a string") end
+    checkOptions(options)
+    local opts = options ?? {}
+    local header = opts.header ?? false
+    if (type(header) != "boolean") then error("header must be a boolean") end
+    return __csv_decode(text, delimiterOption(opts), header)
+end
+
+-- Writes records as CSV text. Each record is an array of fields or a table
+-- keyed by column name. `options` may hold:
+--   delimiter  the field separator (default ",")
+--   columns    the column names, in order, for keyed records (default: every
+--              key of every keyed record, sorted)
+--   header     false to leave out the line of column names
+--   newline    "\n" (default) or "\r\n"
+-- Fields that hold the delimiter, a quote or a line break are quoted.
+function csv.encode(rows: {any}, options: {[string]: any}?): string
+    if (rows == nil) then error("rows must be provided") end
+    if (type(rows) != "table") then error("rows must be a table") end
+    checkOptions(options)
+    local opts = options ?? {}
+    local columns = opts.columns
+    if (columns != nil and type(columns) != "table") then error("columns must be an array of strings") end
+    local header = opts.header ?? true
+    if (type(header) != "boolean") then error("header must be a boolean") end
+    local newline = opts.newline ?? "\n"
+    if (newline != "\n" and newline != "\r\n") then error('newline must be "\\n" or "\\r\\n"') end
+    return __csv_encode(rows, delimiterOption(opts), columns, header, newline)
+end
+
+return table.freeze(csv)

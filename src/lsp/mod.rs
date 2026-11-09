@@ -2180,7 +2180,9 @@ mod tests {
         // The bundled modules that load without a desktop session or a web
         // engine. `ui`, `hid` and `webview` need one, so what their pages
         // document is not compared with the runtime here.
-        let headless = ["crypto", "fs", "http", "io", "net", "profile", "sql"];
+        let headless = [
+            "crypto", "csv", "fs", "html", "http", "io", "net", "profile", "sql", "toml",
+        ];
         let modules: HashMap<&str, Value> = headless
             .iter()
             .map(|name| (*name, load_module(&format!("@neyuki/{name}"))))

@@ -1,0 +1,140 @@
+-- toml: TOML 1.1 decoding, sorted encoding, round trips and strict errors.
+
+local toml = require("@neyuki/toml")
+
+local doc = toml.decode([[
+# a comment
+title = "TOML \"example\""
+literal = 'C:\Users\nodejs'
+multi = """
+Roses are red
+Violets are \
+    blue"""
+raw = '''first line
+second line'''
+
+[owner]
+name = "Tom"
+dob = 1979-05-27T07:32:00-08:00
+"quoted key".inner = true
+
+[database]
+ports = [ 8000, 8001, 8002 ]
+data = [ ["delta", "phi"], [3.14] ]
+limits = { max = 0x10, min = -1_000, ratio = 6.5e-1 }
+enabled = true
+
+[servers.alpha]
+ip = "10.0.0.1"
+
+[[products]]
+name = "Hammer"
+sku = 738594937
+
+[[products]]
+
+[[products]]
+name = "Nail"
+color = "gray"
+]])
+
+assert(doc.title == 'TOML "example"', "basic strings unescape")
+assert(doc.literal == "C:\\Users\\nodejs", "literal strings keep backslashes")
+assert(doc.multi == "Roses are red\nViolets are blue", "multi-line strings trim and join lines: " .. doc.multi)
+assert(doc.raw == "first line\nsecond line", "multi-line literal strings")
+assert(doc.owner.name == "Tom", "tables")
+assert(doc.owner.dob == "1979-05-27T07:32:00-08:00", "date-times become RFC 3339 strings")
+assert(doc.owner["quoted key"].inner == true, "dotted and quoted keys")
+assert(#doc.database.ports == 3 and doc.database.ports[3] == 8002, "arrays")
+assert(doc.database.data[1][2] == "phi" and doc.database.data[2][1] == 3.14, "nested arrays")
+assert(doc.database.limits.max == 16 and doc.database.limits.min == -1000, "hex and underscores")
+assert(doc.database.limits.ratio == 0.65, "floats")
+assert(doc.servers.alpha.ip == "10.0.0.1", "implicit super-tables")
+assert(#doc.products == 3, "arrays of tables")
+assert(doc.products[1].sku == 738594937 and doc.products[3].color == "gray", "array of tables entries")
+assert(next(doc.products[2]) == nil, "an empty array-of-tables entry")
+
+-- TOML 1.1: newlines and a trailing comma in inline tables, optional
+-- seconds, \e and \x escapes.
+local v11 = toml.decode('point = {\n  x = 1, # first\n  y = 2,\n}\nt = 07:32\ne = "\\e\\x41"\n')
+assert(v11.point.x == 1 and v11.point.y == 2, "multi-line inline tables")
+assert(v11.t == "07:32:00", "seconds are optional")
+assert(v11.e == "\x1bA", "\\e and \\x escapes")
+
+local special = toml.decode("a = inf\nb = -inf\nc = nan\nd = 2026-11-09\ne = 1979-05-27 00:32:00.999999\nbig = 9223372036854775807")
+assert(special.a == math.huge and special.b == -math.huge, "infinities")
+assert(special.c != special.c, "nan")
+assert(special.d == "2026-11-09", "local dates")
+assert(special.e == "1979-05-27T00:32:00.999999", "a space separates date and time")
+assert(special.big == 9223372036854775807, "64-bit integers stay exact")
+
+-- encode: sorted keys, plain values before sections, round trips.
+local text = toml.encode({
+    name = "neyuki",
+    version = 1,
+    ratio = 0.5,
+    tags = { "small", "fast" },
+    point = {},
+    server = { host = "localhost", ports = { 80, 443 }, tls = { enabled = false } },
+    plugin = { { name = "a" }, { name = "b", options = { level = 2 } } },
+    ["odd key"] = "x\ny",
+})
+local expected = [[name = "neyuki"
+"odd key" = "x\ny"
+ratio = 0.5
+tags = ["small", "fast"]
+version = 1
+
+[point]
+
+[server]
+host = "localhost"
+ports = [80, 443]
+
+[server.tls]
+enabled = false
+
+[[plugin]]
+name = "a"
+
+[[plugin]]
+name = "b"
+
+[plugin.options]
+level = 2
+]]
+assert(text == expected, "encode layout:\n" .. text)
+
+local back = toml.decode(text)
+assert(back.server.tls.enabled == false and back.plugin[2].options.level == 2, "round trip")
+assert(back["odd key"] == "x\ny", "quoted keys round trip")
+assert(toml.encode({ a = { { 1, 2 }, { x = 1 } } }) == "a = [[1, 2], { x = 1 }]\n", "mixed arrays stay inline")
+assert(toml.encode({ f = 1.0, n = 0 / 0 }) == "f = 1.0\nn = nan\n", "floats keep a fraction")
+
+for _, bad in {
+    "a = 1\na = 2",
+    "[a]\n[a]",
+    "a = {}\n[a]",
+    "a = 01",
+    "a = 1__0",
+    "a = 9223372036854775808",
+    "a = 1979-02-30",
+    'a = "\\q"',
+    "a = [1,,2]",
+    "a = 1 b = 2",
+    "a = \"unterminated",
+    "= 1",
+} do
+    local ok, err = try(toml.decode, bad)
+    assert(not ok, "rejects " .. bad)
+    assert(string.find(err, "line %d+, column %d+") != nil, "errors carry a position: " .. err)
+end
+
+local loop = {}
+loop.self = loop
+local okLoop, errLoop = try(toml.encode, loop)
+assert(not okLoop and string.find(errLoop, "contains itself") != nil, "cycles are rejected")
+assert(not try(toml.encode, { 1, 2 }), "the top level must have keys")
+assert(not try(toml.encode, { f = print }), "functions are rejected")
+assert(not try(toml.encode, { big = 2 ^ 70 }), "integers beyond 64 bits are rejected")
+assert(not try(toml.decode, 42), "text must be a string")
