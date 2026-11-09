@@ -1,0 +1,50 @@
+-- csv: RFC 4180 reading and writing, headers, delimiters and errors.
+
+local csv = require("@neyuki/csv")
+
+local rows = csv.decode('name,quote\r\nAda,"Says ""hi"", then leaves"\n"Grace\nHopper",\n\nlast')
+assert(#rows == 4, "blank lines are skipped: " .. #rows)
+assert(rows[1][1] == "name" and rows[1][2] == "quote", "first record")
+assert(rows[2][2] == 'Says "hi", then leaves', "quoted fields with quotes and delimiters")
+assert(rows[3][1] == "Grace\nHopper" and rows[3][2] == "", "line breaks inside quotes and empty fields")
+assert(#rows[4] == 1 and rows[4][1] == "last", "no trailing newline")
+assert(#csv.decode("") == 0, "empty text")
+assert(#csv.decode("a,b\n") == 1, "a trailing newline adds no record")
+assert(csv.decode("\u{feff}a")[1][1] == "a", "a byte order mark is dropped")
+
+local people = csv.decode("name;age\nAda;36\nAlan;41;extra\n", { delimiter = ";" })
+assert(#people == 3 and people[3][3] == "extra", "custom delimiter")
+
+local keyed = csv.decode("name,age\nAda,36\nAlan\n", { header = true })
+assert(#keyed == 2 and keyed[1].name == "Ada" and keyed[1].age == "36", "header rows become tables")
+assert(keyed[2].name == "Alan" and keyed[2].age == nil, "missing fields are nil")
+
+for _, case in {
+    { '"open', "never closed" },
+    { '"a"b,c', "closing quote" },
+    { "a,a\n1,2", "appears twice" },
+    { "a\n1,2", "header names 1" },
+} do
+    local ok, err = try(csv.decode, case[1], { header = true })
+    assert(not ok and string.find(err, case[2], 1, true) != nil, "rejects " .. case[1] .. ": " .. tostring(err))
+end
+assert(not try(csv.decode, "a", { delimiter = "::" }), "the delimiter is one character")
+assert(not try(csv.decode, "a", { delimiter = '"' }), "the delimiter cannot be a quote")
+assert(not try(csv.decode, "a", { header = "yes" }), "header must be a boolean")
+
+-- encode
+local written = csv.encode({ { "a", "b,c" }, { 'say "x"', "two\nlines" }, { 1, 2.5, true } })
+assert(written == 'a,"b,c"\n"say ""x""","two\nlines"\n1,2.5,true\n', "quoting and number fields: " .. written)
+assert(csv.encode({ { "" } }) == '""\n', "a lone empty field is quoted")
+assert(csv.encode({ { "a", "b" } }, { delimiter = "\t", newline = "\r\n" }) == "a\tb\r\n", "delimiter and newline")
+
+local records = { { name = "Ada", age = 36 }, { name = "Alan", city = "London" } }
+assert(csv.encode(records) == "age,city,name\n36,,Ada\n,London,Alan\n", "keyed rows use sorted columns")
+assert(csv.encode(records, { columns = { "name", "age" } }) == "name,age\nAda,36\nAlan,\n", "columns order fields")
+assert(csv.encode(records, { columns = { "name" }, header = false }) == "Ada\nAlan\n", "header = false")
+
+local round = csv.decode(csv.encode(records, { columns = { "name", "city" } }), { header = true })
+assert(round[2].city == "London" and round[1].city == "", "round trip through headers")
+assert(not try(csv.encode, { { {} } }), "tables cannot be fields")
+assert(not try(csv.encode, { "row" }), "rows must be tables")
+assert(not try(csv.encode, {}, { newline = "\r" }), "newline is checked")

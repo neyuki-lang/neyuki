@@ -11,10 +11,12 @@ pub mod bit;
 pub mod buffer;
 pub mod coroutine;
 pub mod crypto;
+pub mod csv;
 pub mod debug;
 pub mod fs;
 pub mod gpu;
 pub mod hid;
+pub mod html;
 pub mod http;
 pub mod io;
 pub mod json;
@@ -26,6 +28,7 @@ pub mod string;
 pub mod strlib;
 pub mod table;
 pub mod task;
+pub mod toml;
 pub mod ui;
 pub mod utf8;
 pub mod webview;
@@ -59,14 +62,17 @@ pub(crate) const BUNDLED_LIBRARIES: &[(&str, &str)] =
 pub fn register_natives(vm: &mut VM) {
     for natives in [
         crypto::NATIVES,
+        csv::NATIVES,
         fs::NATIVES,
         audio::NATIVES,
         gpu::NATIVES,
         hid::NATIVES,
+        html::NATIVES,
         http::NATIVES,
         io::NATIVES,
         net::NATIVES,
         sql::NATIVES,
+        toml::NATIVES,
         ui::NATIVES,
         webview::NATIVES,
     ] {

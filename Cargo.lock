@@ -3336,6 +3336,7 @@ dependencies = [
  "gtk",
  "hkdf",
  "hmac 0.12.1",
+ "html5ever",
  "image",
  "keyring",
  "md-5 0.10.6",
