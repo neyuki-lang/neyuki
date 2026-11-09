@@ -1,8 +1,8 @@
 //! Long-lived connections for `@neyuki/net`, and `os.spawn`.
 //!
 //! A connection is a local pipe (a Windows named pipe or a Unix domain
-//! socket), a TCP socket, a WebSocket client or the standard streams of a
-//! child process. Each one is backed by a reader thread that fills a shared
+//! socket), a TCP socket, a WebSocket (either end) or the standard streams of
+//! a child process; UDP sockets and WebSocket servers live beside them. Each one is backed by a reader thread that fills a shared
 //! buffer, so the interpreter thread never waits on the network: `read` and
 //! `receive` return at once when enough data is buffered, and otherwise wait
 //! on a worker thread through `background::run`, which suspends only the
@@ -14,11 +14,17 @@
 //! wrapper; `lib/net.nyk` validates arguments for the connect functions.
 //! Dropping the connection (`close`) shuts the socket down, which ends the
 //! reader thread.
+//!
+//! A WebSocket server accepts on its own thread and runs each opening
+//! handshake on a short-lived thread of its own, so connections are ready
+//! (and their messages already arriving) by the time `accept` hands them
+//! out. A UDP socket has a reader thread that queues datagrams with their
+//! sender.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -49,6 +55,14 @@ pub(crate) const NATIVES: &[NativeDef] = &[
         name: "__net_websocket",
         func: builtin_websocket,
     },
+    NativeDef {
+        name: "__net_ws_listen",
+        func: builtin_ws_listen,
+    },
+    NativeDef {
+        name: "__net_udp",
+        func: builtin_udp,
+    },
 ];
 
 /// The most data held for one connection before its reader waits for the
@@ -63,6 +77,16 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 /// always wakes them.
 const WAKE: Duration = Duration::from_millis(200);
 
+/// Connections a WebSocket server holds for `accept`, and handshakes it runs
+/// at once; clients beyond either are turned away.
+const MAX_PENDING: usize = 128;
+const MAX_HANDSHAKES: usize = 64;
+
+/// The largest UDP payload, and how many datagrams one socket holds for
+/// `receive` before it drops new ones, as a full socket buffer would.
+const MAX_DATAGRAM: usize = 65_535;
+const MAX_DATAGRAMS: usize = 4096;
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -75,6 +99,8 @@ struct State {
     buf: VecDeque<u8>,
     /// Messages received on a WebSocket: (is text, payload).
     messages: VecDeque<(bool, Vec<u8>)>,
+    /// Datagrams received on a UDP socket, with their sender.
+    datagrams: VecDeque<(Vec<u8>, SocketAddr)>,
     /// The peer hung up, or reading failed (then `error` says why).
     eof: bool,
     error: Option<String>,
@@ -111,11 +137,28 @@ impl Shared {
 
     /// Blocks until `ready` holds or the connection is closed or hung up.
     fn wait_for(&self, ready: impl Fn(&State) -> bool) -> MutexGuard<'_, State> {
+        self.wait_until(ready, None)
+    }
+
+    /// Like `wait_for`, but also gives up once `deadline` passes.
+    fn wait_until(
+        &self,
+        ready: impl Fn(&State) -> bool,
+        deadline: Option<Instant>,
+    ) -> MutexGuard<'_, State> {
         let mut state = lock(&self.state);
         while !(state.closed || state.eof || ready(&state)) {
+            let mut wait = WAKE;
+            if let Some(deadline) = deadline {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    break;
+                }
+                wait = wait.min(left);
+            }
             state = self
                 .wake
-                .wait_timeout(state, WAKE)
+                .wait_timeout(state, wait)
                 .unwrap_or_else(|e| e.into_inner())
                 .0;
         }
@@ -125,10 +168,20 @@ impl Shared {
 
 type Writer = Arc<Mutex<Option<Box<dyn Write + Send>>>>;
 
+/// What travels over a connection, which decides the methods it has.
+#[derive(Clone, Copy, PartialEq)]
+enum Kind {
+    Stream,
+    /// The client end of a WebSocket, which masks what it sends.
+    WsClient,
+    /// A connection a WebSocket server accepted.
+    WsServer,
+}
+
 struct Conn {
     shared: Arc<Shared>,
     writer: Writer,
-    websocket: bool,
+    kind: Kind,
     /// Shuts the transport down so the reader thread ends.
     closer: Option<Box<dyn FnOnce() + Send>>,
 }
@@ -167,6 +220,8 @@ impl Process {
 thread_local! {
     static CONNS: RefCell<HashMap<u64, Conn>> = RefCell::new(HashMap::new());
     static PROCESSES: RefCell<HashMap<u64, Arc<Process>>> = RefCell::new(HashMap::new());
+    static LISTENERS: RefCell<HashMap<u64, Arc<Listener>>> = RefCell::new(HashMap::new());
+    static UDP: RefCell<HashMap<u64, Udp>> = RefCell::new(HashMap::new());
     static NEXT_ID: Cell<u64> = const { Cell::new(1) };
 }
 
@@ -186,12 +241,12 @@ fn register(conn: Conn) -> u64 {
 
 /// What a method needs of connection `id` without borrowing the registry
 /// while it works.
-fn parts(id: u64) -> Result<(Arc<Shared>, Writer, bool), String> {
+fn parts(id: u64) -> Result<(Arc<Shared>, Writer, Kind), String> {
     CONNS.with(|conns| {
         conns
             .borrow()
             .get(&id)
-            .map(|c| (c.shared.clone(), c.writer.clone(), c.websocket))
+            .map(|c| (c.shared.clone(), c.writer.clone(), c.kind))
             .ok_or_else(|| "connection is closed".to_string())
     })
 }
@@ -218,6 +273,26 @@ fn string_arg(args: &[Value], index: usize, name: &str) -> Result<String, String
         )),
         None => Err(format!("{} must be provided", name)),
     }
+}
+
+/// How long `accept` or `receive` may wait; nil or absent waits as long as
+/// it takes, and 0 only checks.
+fn wait_arg(args: &[Value], index: usize) -> Result<Option<Duration>, String> {
+    match args.get(index) {
+        None | Some(Value::Nil) => Ok(None),
+        Some(value) => {
+            let seconds = number(value).map_err(|_| "timeout must be a number".to_string())?;
+            if !seconds.is_finite() || seconds < 0.0 {
+                return Err("timeout must be a number of seconds, 0 or more".to_string());
+            }
+            Ok(Some(Duration::from_secs_f64(seconds.min(86_400.0))))
+        }
+    }
+}
+
+fn port_arg(args: &[Value], index: usize) -> Result<u16, String> {
+    let port = crate::vm::libs::args::int_arg(args, index, "port")?;
+    u16::try_from(port).map_err(|_| "port must be between 0 and 65535".to_string())
 }
 
 fn timeout_arg(args: &[Value], index: usize) -> Result<Duration, String> {
@@ -265,13 +340,17 @@ fn stream_table(id: u64) -> Value {
 }
 
 fn websocket_table(id: u64) -> Value {
+    frozen(websocket_fields(id))
+}
+
+fn websocket_fields(id: u64) -> VmTable {
     let mut table = VmTable::new();
     table.set_str("_id", Value::Int(id as i64));
     table.set_str("send", crate::native!("net.send", ws_send));
     table.set_str("receive", crate::native!("net.receive", ws_receive));
     table.set_str("close", crate::native!("net.close", conn_close));
     table.set_str("isOpen", crate::native!("net.isOpen", conn_is_open));
-    frozen(table)
+    table
 }
 
 // --- methods ----------------------------------------------------------------
@@ -309,8 +388,8 @@ fn conn_read(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         return Err(format!("n must be between 0 and {}", MAX_BUFFER));
     }
     let n = n as usize;
-    let (shared, _, websocket) = parts(id)?;
-    if websocket {
+    let (shared, _, kind) = parts(id)?;
+    if kind != Kind::Stream {
         return Err("use receive on a WebSocket".to_string());
     }
     {
@@ -439,7 +518,7 @@ fn stream_conn(
     Ok(Conn {
         shared,
         writer: Arc::new(Mutex::new(writer)),
-        websocket: false,
+        kind: Kind::Stream,
         closer,
     })
 }
@@ -486,8 +565,7 @@ fn finish_conn(_vm: &mut VM, conn: Conn) -> Result<Vec<Value>, String> {
 /// `__net_connect(host, port, timeout?)`.
 fn builtin_connect(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let host = string_arg(args, 0, "host")?;
-    let port = crate::vm::libs::args::int_arg(args, 1, "port")?;
-    let port = u16::try_from(port).map_err(|_| "port must be between 0 and 65535".to_string())?;
+    let port = port_arg(args, 1)?;
     let timeout = timeout_arg(args, 2)?;
     crate::vm::libs::background::run(
         vm,
@@ -584,7 +662,7 @@ fn connect_pipe(name: &str, timeout: Duration) -> Result<Conn, String> {
     Ok(Conn {
         shared,
         writer: Arc::new(Mutex::new(Some(Box::new(writer)))),
-        websocket: false,
+        kind: Kind::Stream,
         closer: None,
     })
 }
@@ -652,7 +730,7 @@ impl Read for PipeReader {
     }
 }
 
-// --- WebSocket client -------------------------------------------------------
+// --- WebSocket --------------------------------------------------------------
 
 enum Stream {
     Plain(TcpStream),
@@ -745,23 +823,31 @@ fn parse_ws_url(url: &str) -> Result<WsUrl, String> {
     })
 }
 
-/// One masked client frame.
-fn ws_frame(opcode: u8, payload: &[u8]) -> Vec<u8> {
+/// One frame; a client masks its frames and a server must not.
+fn ws_frame(opcode: u8, payload: &[u8], masked: bool) -> Vec<u8> {
     let mut frame = Vec::with_capacity(payload.len() + 14);
     frame.push(0x80 | opcode);
+    let mask_bit = if masked { 0x80 } else { 0 };
     match payload.len() {
-        n if n < 126 => frame.push(0x80 | n as u8),
+        n if n < 126 => frame.push(mask_bit | n as u8),
         n if n <= 0xFFFF => {
-            frame.push(0x80 | 126);
+            frame.push(mask_bit | 126);
             frame.extend_from_slice(&(n as u16).to_be_bytes());
         }
         n => {
-            frame.push(0x80 | 127);
+            frame.push(mask_bit | 127);
             frame.extend_from_slice(&(n as u64).to_be_bytes());
         }
     }
+    if !masked {
+        frame.extend_from_slice(payload);
+        return frame;
+    }
+    // `OsRng` rather than `thread_rng`: a connection still open when its
+    // thread ends sends its close frame from a thread-local destructor,
+    // where `thread_rng` may already be gone.
     let mut mask = [0u8; 4];
-    rand::thread_rng().fill_bytes(&mut mask);
+    rand::rngs::OsRng.fill_bytes(&mut mask);
     frame.extend_from_slice(&mask);
     frame.extend(payload.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
     frame
@@ -826,20 +912,7 @@ fn ws_connect(
         .and_then(|()| stream.flush())
         .map_err(|err| format!("WebSocket handshake failed: {}", err))?;
 
-    // Read byte by byte so nothing past the headers is consumed.
-    let mut head = Vec::new();
-    let mut byte = [0u8; 1];
-    while !head.ends_with(b"\r\n\r\n") {
-        if head.len() > 16 * 1024 {
-            return Err("WebSocket handshake response is too large".to_string());
-        }
-        match stream.read(&mut byte) {
-            Ok(0) => return Err("connection closed during the WebSocket handshake".to_string()),
-            Ok(_) => head.push(byte[0]),
-            Err(err) => return Err(format!("WebSocket handshake failed: {}", err)),
-        }
-    }
-    let head = String::from_utf8_lossy(&head).into_owned();
+    let head = read_head(&mut stream)?;
     let mut lines = head.split("\r\n");
     let status = lines.next().unwrap_or("");
     if status.split_whitespace().nth(1) != Some("101") {
@@ -853,32 +926,118 @@ fn ws_connect(
     if !accepted {
         return Err("WebSocket server sent a wrong Sec-WebSocket-Accept".to_string());
     }
+    ws_conn(stream, reader_tcp, closing, Kind::WsClient)
+}
 
-    // From here the reader thread polls with a short timeout so it never
-    // holds the stream while a send waits.
-    let _ = reader_tcp.set_read_timeout(Some(Duration::from_millis(50)));
-    let stream = Arc::new(Mutex::new(stream));
+/// Reads an HTTP head byte by byte, so nothing past it is consumed.
+fn read_head(stream: &mut impl Read) -> Result<String, String> {
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        if head.len() > 16 * 1024 {
+            return Err("WebSocket handshake is too large".to_string());
+        }
+        match stream.read(&mut byte) {
+            Ok(0) => return Err("connection closed during the WebSocket handshake".to_string()),
+            Ok(_) => head.push(byte[0]),
+            Err(err) => return Err(format!("WebSocket handshake failed: {}", err)),
+        }
+    }
+    Ok(String::from_utf8_lossy(&head).into_owned())
+}
+
+/// Starts the reader thread of a WebSocket whose handshake is done. `socket`
+/// is a handle to the TCP socket under `stream` for the reader, and
+/// `closing` one to shut it down with.
+///
+/// No read here ever times out: on Windows a receive that times out leaves
+/// the socket "in an indeterminate state" in which arriving data can be
+/// lost. A plain socket is read with blocking reads on a handle of its own,
+/// which `close` ends by shutting the socket down. A TLS stream cannot be
+/// split, so there the reader peeks at the socket (which consumes nothing,
+/// so its timeout is harmless) and takes the stream's lock only once there
+/// is something to read, so it never holds the lock while a send waits.
+fn ws_conn(
+    stream: Stream,
+    socket: TcpStream,
+    closing: TcpStream,
+    kind: Kind,
+) -> Result<Conn, String> {
+    let masked = kind == Kind::WsClient;
+    let reader: Box<dyn Read + Send>;
+    let writer: Box<dyn Write + Send>;
+    match stream {
+        Stream::Plain(tcp) => {
+            let _ = socket.set_read_timeout(None);
+            reader = Box::new(socket);
+            writer = Box::new(tcp);
+        }
+        tls => {
+            let _ = socket.set_read_timeout(Some(Duration::from_millis(50)));
+            let stream = Arc::new(Mutex::new(tls));
+            reader = Box::new(TlsReader {
+                stream: stream.clone(),
+                socket,
+            });
+            writer = Box::new(SharedStream(stream));
+        }
+    }
+    let writer: Writer = Arc::new(Mutex::new(Some(writer)));
     let shared = Shared::new();
-    let background = shared.clone();
-    let reader_stream = stream.clone();
+    let (background, replies) = (shared.clone(), writer.clone());
     spawn_thread("neyuki-ws-reader", move || {
-        ws_pump(background, reader_stream)
+        ws_pump(background, reader, replies, masked)
     })?;
-    let closing_stream = stream.clone();
+    let (closing_shared, closing_writer) = (shared.clone(), writer.clone());
     Ok(Conn {
         shared,
-        writer: Arc::new(Mutex::new(Some(Box::new(SharedStream(stream))))),
-        websocket: true,
+        writer,
+        kind,
         closer: Some(Box::new(move || {
-            // The reader thread is polling, so this gets the lock quickly.
-            let _ = SharedStream(closing_stream).write_all(&ws_frame(8, &1000u16.to_be_bytes()));
+            // A peer that already closed (or broke) was answered by the
+            // reader.
+            if !lock(&closing_shared.state).eof {
+                let close = ws_frame(8, &1000u16.to_be_bytes(), masked);
+                send_frame(&closing_writer, &close);
+            }
             let _ = closing.shutdown(std::net::Shutdown::Both);
         })),
     })
 }
 
-/// Reads frames off the WebSocket into the message queue, answering pings.
-fn ws_pump(shared: Arc<Shared>, stream: Arc<Mutex<Stream>>) {
+/// The reading half of a TLS stream that sends also use; see `ws_conn`.
+struct TlsReader {
+    stream: Arc<Mutex<Stream>>,
+    socket: TcpStream,
+}
+
+impl Read for TlsReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let buffered = match &*lock(&self.stream) {
+            Stream::Tls(tls) => tls.buffered_read_size().unwrap_or(0),
+            Stream::Plain(_) => 0,
+        };
+        if buffered == 0 {
+            // Times out while nothing arrives; the pump then looks again.
+            self.socket.peek(&mut [0u8; 1])?;
+        }
+        lock(&self.stream).read(buf)
+    }
+}
+
+/// Sends a control frame from the reader thread; a failure shows up on the
+/// next read.
+fn send_frame(writer: &Writer, frame: &[u8]) {
+    if let Some(out) = lock(writer).as_mut() {
+        let _ = out.write_all(frame).and_then(|()| out.flush());
+    }
+}
+
+/// Reads frames off the WebSocket into the message queue, answering pings
+/// and the peer's close through `writer`. `masked` is true on the client
+/// end, which masks what it sends; the server end requires masked frames in
+/// return.
+fn ws_pump(shared: Arc<Shared>, mut reader: Box<dyn Read + Send>, writer: Writer, masked: bool) {
     let mut pending: Vec<u8> = Vec::new();
     let mut partial: Option<(bool, Vec<u8>)> = None;
     let mut chunk = vec![0u8; 16 * 1024];
@@ -886,8 +1045,7 @@ fn ws_pump(shared: Arc<Shared>, stream: Arc<Mutex<Stream>>) {
         if lock(&shared.state).closed {
             return;
         }
-        let read = lock(&stream).read(&mut chunk);
-        match read {
+        match reader.read(&mut chunk) {
             Ok(0) => return shared.finish(None),
             Ok(n) => pending.extend_from_slice(&chunk[..n]),
             Err(err)
@@ -898,14 +1056,14 @@ fn ws_pump(shared: Arc<Shared>, stream: Arc<Mutex<Stream>>) {
                         | std::io::ErrorKind::Interrupted
                 ) =>
             {
-                // Give a waiting send the lock.
-                std::thread::sleep(Duration::from_millis(2));
                 continue;
             }
             Err(err) => return shared.finish(Some(format!("read failed: {}", err))),
         }
-        std::thread::yield_now();
         loop {
+            if !masked && pending.len() >= 2 && pending[1] & 0x80 == 0 {
+                return shared.finish(Some("WebSocket client sent an unmasked frame".into()));
+            }
             let frame = match next_frame(&mut pending) {
                 Ok(Some(frame)) => frame,
                 Ok(None) => break,
@@ -913,9 +1071,14 @@ fn ws_pump(shared: Arc<Shared>, stream: Arc<Mutex<Stream>>) {
             };
             let (fin, opcode, payload) = frame;
             match opcode {
-                0x8 => return shared.finish(None),
+                0x8 => {
+                    // Echo the status code, as the closing handshake asks.
+                    let code = &payload[..payload.len().min(2)];
+                    send_frame(&writer, &ws_frame(8, code, masked));
+                    return shared.finish(None);
+                }
                 0x9 => {
-                    let _ = SharedStream(stream.clone()).write_all(&ws_frame(0xA, &payload));
+                    send_frame(&writer, &ws_frame(0xA, &payload, masked));
                 }
                 0xA => {}
                 0x0..=0x2 => {
@@ -1059,14 +1222,21 @@ fn builtin_websocket(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> 
 fn ws_send(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let id = self_id(args)?;
     let (data, binary) = data_arg(args, 1, "data")?;
-    let (shared, writer, _) = parts(id)?;
+    let (shared, writer, kind) = parts(id)?;
+    if kind == Kind::Stream {
+        return Err("use write on a stream connection".to_string());
+    }
     {
         let state = lock(&shared.state);
         if state.closed || state.eof {
             return Err("connection is closed".to_string());
         }
     }
-    let frame = ws_frame(if binary { 0x2 } else { 0x1 }, &data);
+    let frame = ws_frame(
+        if binary { 0x2 } else { 0x1 },
+        &data,
+        kind == Kind::WsClient,
+    );
     write_all(vm, writer, frame)
 }
 
@@ -1120,6 +1290,585 @@ fn message_values(vm: &mut VM, message: Option<(bool, Vec<u8>)>) -> Result<Vec<V
             Ok(values)
         }
     }
+}
+
+// --- WebSocket server -------------------------------------------------------
+
+/// A client whose opening handshake is done, waiting for `accept`.
+struct Accepted {
+    conn: Conn,
+    path: String,
+    /// Header names in lower case.
+    headers: Vec<(String, String)>,
+    remote: SocketAddr,
+}
+
+#[derive(Default)]
+struct ListenState {
+    pending: VecDeque<Accepted>,
+    /// Handshakes running right now.
+    handshakes: usize,
+    closed: bool,
+}
+
+struct Listener {
+    state: Mutex<ListenState>,
+    wake: Condvar,
+}
+
+impl Listener {
+    /// Marks the server closed and drops the clients nobody accepted.
+    fn close(&self) {
+        let dropped = {
+            let mut state = lock(&self.state);
+            state.closed = true;
+            std::mem::take(&mut state.pending)
+        };
+        self.wake.notify_all();
+        drop(dropped);
+    }
+}
+
+fn listener_arg(args: &[Value]) -> Result<Arc<Listener>, String> {
+    let id = self_id(args)?;
+    LISTENERS.with(|listeners| {
+        listeners
+            .borrow()
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| "server is closed".to_string())
+    })
+}
+
+/// `__net_ws_listen(host, port)`: binds a WebSocket server (port 0 picks a
+/// free one) and returns `{ host, port, url, accept, close, isOpen }`.
+fn builtin_ws_listen(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let host = string_arg(args, 0, "host")?;
+    let port = port_arg(args, 1)?;
+    let socket = TcpListener::bind((host.as_str(), port))
+        .map_err(|err| format!("cannot listen on {}:{}: {}", host, port, err))?;
+    let bound = socket
+        .local_addr()
+        .map_err(|err| format!("socket error: {}", err))?;
+    // Non-blocking, so the accept thread notices `close` between polls.
+    socket
+        .set_nonblocking(true)
+        .map_err(|err| format!("socket error: {}", err))?;
+    let listener = Arc::new(Listener {
+        state: Mutex::new(ListenState::default()),
+        wake: Condvar::new(),
+    });
+    let background = listener.clone();
+    std::thread::Builder::new()
+        .name("neyuki-ws-accept".to_string())
+        .spawn(move || ws_accept_loop(background, socket))
+        .map_err(|err| format!("cannot start accept thread: {}", err))?;
+    let id = next_id();
+    LISTENERS.with(|listeners| listeners.borrow_mut().insert(id, listener));
+
+    let authority = match bound.ip() {
+        IpAddr::V6(_) => format!("[{}]:{}", host.trim_matches(['[', ']']), bound.port()),
+        IpAddr::V4(_) => format!("{}:{}", host, bound.port()),
+    };
+    let mut table = VmTable::new();
+    table.set_str("_id", Value::Int(id as i64));
+    table.set_str("host", Value::string(host));
+    table.set_str("port", Value::Int(i64::from(bound.port())));
+    table.set_str("url", Value::string(format!("ws://{}", authority)));
+    table.set_str("accept", crate::native!("net.accept", ws_server_accept));
+    table.set_str("close", crate::native!("net.close", ws_server_close));
+    table.set_str("isOpen", crate::native!("net.isOpen", ws_server_is_open));
+    Ok(vec![frozen(table)])
+}
+
+fn ws_accept_loop(listener: Arc<Listener>, socket: TcpListener) {
+    loop {
+        if lock(&listener.state).closed {
+            return;
+        }
+        let (tcp, remote) = match socket.accept() {
+            Ok(accepted) => accepted,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            // Nothing waiting, or a passing failure such as running out of
+            // file descriptors: either way, look again shortly.
+            Err(_) => {
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+        };
+        {
+            let mut state = lock(&listener.state);
+            if state.handshakes >= MAX_HANDSHAKES || state.pending.len() >= MAX_PENDING {
+                continue; // dropping `tcp` turns the client away
+            }
+            state.handshakes += 1;
+        }
+        let worker = listener.clone();
+        let started = spawn_thread("neyuki-ws-handshake", move || {
+            let accepted = ws_handshake(tcp, remote).ok();
+            let rejected = {
+                let mut state = lock(&worker.state);
+                state.handshakes -= 1;
+                match accepted {
+                    Some(accepted) if !state.closed && state.pending.len() < MAX_PENDING => {
+                        state.pending.push_back(accepted);
+                        worker.wake.notify_all();
+                        None
+                    }
+                    other => other,
+                }
+            };
+            // Closes a client that came too late, outside the lock.
+            drop(rejected);
+        });
+        if started.is_err() {
+            lock(&listener.state).handshakes -= 1;
+        }
+    }
+}
+
+/// Answers a client's opening handshake on `tcp`, or refuses it with an HTTP
+/// error status.
+fn ws_handshake(mut tcp: TcpStream, remote: SocketAddr) -> Result<Accepted, String> {
+    // An accepted socket inherits non-blocking mode on some platforms.
+    let _ = tcp.set_nonblocking(false);
+    let _ = tcp.set_nodelay(true);
+    let _ = tcp.set_read_timeout(Some(DEFAULT_TIMEOUT));
+    let _ = tcp.set_write_timeout(Some(DEFAULT_TIMEOUT));
+    let head = read_head(&mut tcp)?;
+    let (path, headers) = parse_upgrade_request(&head)
+        .inspect_err(|(status, extra)| refuse(&mut tcp, status, extra))
+        .map_err(|(status, _)| status.to_string())?;
+    let key = headers
+        .iter()
+        .find(|(name, _)| name == "sec-websocket-key")
+        .map_or("", |(_, value)| value.as_str());
+    let response = format!(
+        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+         Sec-WebSocket-Accept: {}\r\n\r\n",
+        ws_accept(key)
+    );
+    tcp.write_all(response.as_bytes())
+        .and_then(|()| tcp.flush())
+        .map_err(|err| format!("WebSocket handshake failed: {}", err))?;
+    let reader = tcp
+        .try_clone()
+        .map_err(|err| format!("socket error: {}", err))?;
+    let closing = tcp
+        .try_clone()
+        .map_err(|err| format!("socket error: {}", err))?;
+    let conn = ws_conn(Stream::Plain(tcp), reader, closing, Kind::WsServer)?;
+    Ok(Accepted {
+        conn,
+        path,
+        headers,
+        remote,
+    })
+}
+
+fn refuse(tcp: &mut TcpStream, status: &str, extra: &str) {
+    let _ = write!(
+        tcp,
+        "HTTP/1.1 {}\r\nConnection: close\r\nContent-Length: 0\r\n{}\r\n",
+        status, extra
+    );
+}
+
+/// An HTTP status line and any extra header lines to refuse a request with.
+type Refusal = (&'static str, &'static str);
+
+/// The target and the lower-cased headers of a WebSocket upgrade request, or
+/// how to refuse it.
+fn parse_upgrade_request(head: &str) -> Result<(String, Vec<(String, String)>), Refusal> {
+    const BAD_REQUEST: Refusal = ("400 Bad Request", "");
+    let mut lines = head.split("\r\n");
+    let mut request = lines.next().unwrap_or("").split_whitespace();
+    let (Some("GET"), Some(path)) = (request.next(), request.next()) else {
+        return Err(BAD_REQUEST);
+    };
+    let mut headers: Vec<(String, String)> = Vec::new();
+    for line in lines.filter(|line| !line.is_empty()) {
+        let (name, value) = line.split_once(':').ok_or(BAD_REQUEST)?;
+        let (name, value) = (name.trim().to_ascii_lowercase(), value.trim());
+        // Repeated headers are joined, as HTTP allows.
+        match headers.iter_mut().find(|(seen, _)| *seen == name) {
+            Some((_, joined)) => {
+                joined.push_str(", ");
+                joined.push_str(value);
+            }
+            None => headers.push((name, value.to_string())),
+        }
+    }
+    let header = |name: &str| {
+        headers
+            .iter()
+            .find(|(seen, _)| seen == name)
+            .map_or("", |(_, value)| value.as_str())
+    };
+    let upgrade = header("upgrade")
+        .split(',')
+        .any(|token| token.trim().eq_ignore_ascii_case("websocket"));
+    let connection = header("connection")
+        .split(',')
+        .any(|token| token.trim().eq_ignore_ascii_case("upgrade"));
+    if !upgrade || !connection || header("sec-websocket-key").is_empty() {
+        return Err(BAD_REQUEST);
+    }
+    if header("sec-websocket-version") != "13" {
+        return Err(("426 Upgrade Required", "Sec-WebSocket-Version: 13\r\n"));
+    }
+    Ok((path.to_string(), headers))
+}
+
+/// `server:accept(timeout?)`: the next client, as a WebSocket with `path`,
+/// `headers` and `remote`; nil once `timeout` seconds pass without one.
+fn ws_server_accept(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let listener = listener_arg(args)?;
+    let timeout = wait_arg(args, 1)?;
+    let deadline = timeout.map(|timeout| Instant::now() + timeout);
+    crate::vm::libs::background::run(
+        vm,
+        move || {
+            let mut state = lock(&listener.state);
+            loop {
+                if state.closed {
+                    return Err("server is closed".to_string());
+                }
+                if let Some(accepted) = state.pending.pop_front() {
+                    return Ok(Some(accepted));
+                }
+                let mut wait = WAKE;
+                if let Some(deadline) = deadline {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        return Ok(None);
+                    }
+                    wait = wait.min(left);
+                }
+                state = listener
+                    .wake
+                    .wait_timeout(state, wait)
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0;
+            }
+        },
+        |_vm, accepted| {
+            let Some(accepted) = accepted else {
+                return Ok(vec![Value::Nil]);
+            };
+            let mut headers = VmTable::new();
+            for (name, value) in &accepted.headers {
+                headers.set_str(name, Value::string(value.clone()));
+            }
+            let mut table = websocket_fields(register(accepted.conn));
+            table.set_str("path", Value::string(accepted.path));
+            table.set_str("headers", frozen(headers));
+            table.set_str("remote", Value::string(accepted.remote.to_string()));
+            Ok(vec![frozen(table)])
+        },
+    )
+}
+
+/// `server:close()`: stops listening and drops clients nobody accepted;
+/// accepted ones stay open. Closing twice is fine.
+fn ws_server_close(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = self_id(args)?;
+    let listener = LISTENERS.with(|listeners| listeners.borrow_mut().remove(&id));
+    if let Some(listener) = listener {
+        listener.close();
+    }
+    Ok(vec![])
+}
+
+fn ws_server_is_open(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = self_id(args)?;
+    let open = LISTENERS.with(|listeners| listeners.borrow().contains_key(&id));
+    Ok(vec![Value::Bool(open)])
+}
+
+// --- UDP --------------------------------------------------------------------
+
+struct Udp {
+    shared: Arc<Shared>,
+    socket: Arc<UdpSocket>,
+}
+
+impl Drop for Udp {
+    fn drop(&mut self) {
+        // The reader thread holds the other reference to the socket and
+        // lets go of it within one poll.
+        lock(&self.shared.state).closed = true;
+        self.shared.wake.notify_all();
+    }
+}
+
+fn udp_parts(args: &[Value]) -> Result<(Arc<Shared>, Arc<UdpSocket>), String> {
+    let id = self_id(args)?;
+    UDP.with(|sockets| {
+        sockets
+            .borrow()
+            .get(&id)
+            .map(|udp| (udp.shared.clone(), udp.socket.clone()))
+            .ok_or_else(|| "socket is closed".to_string())
+    })
+}
+
+/// `__net_udp(host, port, broadcast)`: binds a UDP socket (port 0 picks a
+/// free one) and returns `{ host, port, send, sendTo, receive, connect,
+/// joinMulticast, leaveMulticast, close, isOpen }`.
+fn builtin_udp(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let host = string_arg(args, 0, "host")?;
+    let port = port_arg(args, 1)?;
+    let broadcast = matches!(args.get(2), Some(Value::Bool(true)));
+    let socket = UdpSocket::bind((host.as_str(), port))
+        .map_err(|err| format!("cannot bind {}:{}: {}", host, port, err))?;
+    let bound = socket
+        .local_addr()
+        .map_err(|err| format!("socket error: {}", err))?;
+    socket
+        .set_broadcast(broadcast)
+        .and_then(|()| socket.set_read_timeout(Some(WAKE)))
+        .map_err(|err| format!("socket error: {}", err))?;
+    let socket = Arc::new(socket);
+    let shared = Shared::new();
+    let (background, reader) = (shared.clone(), socket.clone());
+    spawn_thread("neyuki-udp-reader", move || udp_pump(background, reader))?;
+    let id = next_id();
+    UDP.with(|sockets| sockets.borrow_mut().insert(id, Udp { shared, socket }));
+
+    let mut table = VmTable::new();
+    table.set_str("_id", Value::Int(id as i64));
+    table.set_str("host", Value::string(bound.ip().to_string()));
+    table.set_str("port", Value::Int(i64::from(bound.port())));
+    table.set_str("send", crate::native!("net.send", udp_send));
+    table.set_str("sendTo", crate::native!("net.sendTo", udp_send_to));
+    table.set_str("receive", crate::native!("net.receive", udp_receive));
+    table.set_str("connect", crate::native!("net.connect", udp_connect));
+    table.set_str(
+        "joinMulticast",
+        crate::native!("net.joinMulticast", udp_join_multicast),
+    );
+    table.set_str(
+        "leaveMulticast",
+        crate::native!("net.leaveMulticast", udp_leave_multicast),
+    );
+    table.set_str("close", crate::native!("net.close", udp_close));
+    table.set_str("isOpen", crate::native!("net.isOpen", udp_is_open));
+    Ok(vec![frozen(table)])
+}
+
+/// Queues every datagram the socket receives, with its sender.
+fn udp_pump(shared: Arc<Shared>, socket: Arc<UdpSocket>) {
+    let mut chunk = vec![0u8; MAX_DATAGRAM];
+    loop {
+        if lock(&shared.state).closed {
+            return;
+        }
+        // Waits by peeking, which consumes nothing, so its timeout cannot
+        // lose a datagram the way a timed-out receive can on Windows (see
+        // `ws_conn`); the receive then finds the datagram already there.
+        let received = socket
+            .peek_from(&mut chunk)
+            .and_then(|_| socket.recv_from(&mut chunk));
+        match received {
+            Ok((n, from)) => {
+                let mut state = lock(&shared.state);
+                if state.closed {
+                    return;
+                }
+                if state.datagrams.len() < MAX_DATAGRAMS {
+                    state.datagrams.push_back((chunk[..n].to_vec(), from));
+                    shared.wake.notify_all();
+                }
+            }
+            // The poll timing out, or the port of an earlier send being
+            // unreachable (reported on the next receive), which is no reason
+            // to stop listening.
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionRefused
+                ) => {}
+            Err(err) => return shared.finish(Some(format!("receive failed: {}", err))),
+        }
+    }
+}
+
+/// The first address of `host` in the family of the socket.
+fn resolve_for(socket: &UdpSocket, host: &str, port: u16) -> Result<SocketAddr, String> {
+    let v6 = socket.local_addr().is_ok_and(|addr| addr.is_ipv6());
+    (host, port)
+        .to_socket_addrs()
+        .map_err(|err| format!("cannot resolve {}: {}", host, err))?
+        .find(|addr| addr.is_ipv6() == v6)
+        .ok_or_else(|| {
+            format!(
+                "{} has no IPv{} address for this socket",
+                host,
+                if v6 { 6 } else { 4 }
+            )
+        })
+}
+
+/// `udp:sendTo(data, host, port)`: sends one datagram; returns its size.
+fn udp_send_to(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let (_, socket) = udp_parts(args)?;
+    let (data, _) = data_arg(args, 1, "data")?;
+    let host = string_arg(args, 2, "host")?;
+    let port = port_arg(args, 3)?;
+    // Resolving a name may take a while; an address resolves at once.
+    crate::vm::libs::background::run(
+        vm,
+        move || {
+            let addr = resolve_for(&socket, &host, port)?;
+            socket
+                .send_to(&data, addr)
+                .map_err(|err| format!("send failed: {}", err))
+        },
+        |_vm, sent| Ok(vec![Value::Int(sent as i64)]),
+    )
+}
+
+/// `udp:send(data)`: sends one datagram to the peer set by `connect`.
+fn udp_send(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let (_, socket) = udp_parts(args)?;
+    let (data, _) = data_arg(args, 1, "data")?;
+    if socket.peer_addr().is_err() {
+        return Err("socket has no peer; call connect first or use sendTo".to_string());
+    }
+    let sent = socket
+        .send(&data)
+        .map_err(|err| format!("send failed: {}", err))?;
+    Ok(vec![Value::Int(sent as i64)])
+}
+
+/// `udp:connect(host, port)`: sets the peer `send` goes to; from then on
+/// only datagrams from that peer are received.
+fn udp_connect(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let (_, socket) = udp_parts(args)?;
+    let host = string_arg(args, 1, "host")?;
+    let port = port_arg(args, 2)?;
+    crate::vm::libs::background::run(
+        vm,
+        move || {
+            let addr = resolve_for(&socket, &host, port)?;
+            socket
+                .connect(addr)
+                .map_err(|err| format!("cannot connect to {}:{}: {}", host, port, err))
+        },
+        |_vm, ()| Ok(vec![]),
+    )
+}
+
+/// `udp:receive(timeout?)`: the next datagram as a buffer, then the sender's
+/// address and port; nil once `timeout` seconds pass without one.
+fn udp_receive(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let (shared, _) = udp_parts(args)?;
+    let timeout = wait_arg(args, 1)?;
+    {
+        let mut state = lock(&shared.state);
+        if state.closed
+            || state.eof
+            || !state.datagrams.is_empty()
+            || timeout == Some(Duration::ZERO)
+        {
+            let datagram = take_datagram(&mut state)?;
+            drop(state);
+            return datagram_values(vm, datagram);
+        }
+    }
+    let deadline = timeout.map(|timeout| Instant::now() + timeout);
+    crate::vm::libs::background::run(
+        vm,
+        move || {
+            let mut state = shared.wait_until(|s| !s.datagrams.is_empty(), deadline);
+            take_datagram(&mut state)
+        },
+        datagram_values,
+    )
+}
+
+/// The next datagram; `Ok(None)` when none is queued.
+fn take_datagram(state: &mut State) -> Result<Option<(Vec<u8>, SocketAddr)>, String> {
+    if state.closed {
+        return Err("socket is closed".to_string());
+    }
+    if let Some(datagram) = state.datagrams.pop_front() {
+        return Ok(Some(datagram));
+    }
+    match state.error.take() {
+        Some(error) => Err(error),
+        None => Ok(None),
+    }
+}
+
+fn datagram_values(
+    vm: &mut VM,
+    datagram: Option<(Vec<u8>, SocketAddr)>,
+) -> Result<Vec<Value>, String> {
+    let Some((data, from)) = datagram else {
+        return Ok(vec![Value::Nil]);
+    };
+    let mut values = crate::vm::libs::buffer::new_buffer(vm, data)?;
+    values.push(Value::string(from.ip().to_string()));
+    values.push(Value::Int(i64::from(from.port())));
+    Ok(values)
+}
+
+/// `udp:joinMulticast(group, interface?)` and `udp:leaveMulticast(...)`.
+/// `interface` is the local IPv4 address to join on (default: any); IPv6
+/// groups use the default interface.
+fn udp_multicast(args: &[Value], join: bool) -> Result<Vec<Value>, String> {
+    let (_, socket) = udp_parts(args)?;
+    let group = string_arg(args, 1, "group")?;
+    let group: IpAddr = group
+        .parse()
+        .map_err(|_| format!("'{}' is not an IP address", group))?;
+    if !group.is_multicast() {
+        return Err(format!("{} is not a multicast address", group));
+    }
+    let interface = match args.get(2) {
+        None | Some(Value::Nil) => Ipv4Addr::UNSPECIFIED,
+        Some(_) => {
+            let text = string_arg(args, 2, "interface")?;
+            text.parse()
+                .map_err(|_| format!("interface must be an IPv4 address, got '{}'", text))?
+        }
+    };
+    let result = match (group, join) {
+        (IpAddr::V4(group), true) => socket.join_multicast_v4(&group, &interface),
+        (IpAddr::V4(group), false) => socket.leave_multicast_v4(&group, &interface),
+        (IpAddr::V6(group), true) => socket.join_multicast_v6(&group, 0),
+        (IpAddr::V6(group), false) => socket.leave_multicast_v6(&group, 0),
+    };
+    result.map_err(|err| format!("multicast group {}: {}", group, err))?;
+    Ok(vec![])
+}
+
+fn udp_join_multicast(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    udp_multicast(args, true)
+}
+
+fn udp_leave_multicast(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    udp_multicast(args, false)
+}
+
+/// `udp:close()`; closing twice is fine.
+fn udp_close(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = self_id(args)?;
+    let udp = UDP.with(|sockets| sockets.borrow_mut().remove(&id));
+    drop(udp);
+    Ok(vec![])
+}
+
+fn udp_is_open(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
+    let id = self_id(args)?;
+    let open = UDP.with(|sockets| sockets.borrow().contains_key(&id));
+    Ok(vec![Value::Bool(open)])
 }
 
 // --- os.spawn ---------------------------------------------------------------
@@ -1272,7 +2021,7 @@ pub(crate) fn os_spawn(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, Strin
         let conn = Conn {
             shared,
             writer: Arc::new(Mutex::new(Some(Box::new(pipe)))),
-            websocket: false,
+            kind: Kind::Stream,
             closer: None,
         };
         table.set_str("stdin", stream_table(register(conn)));
@@ -1375,14 +2124,52 @@ mod tests {
 
     #[test]
     fn test_frame_round_trip() {
-        let mut bytes = ws_frame(0x1, b"hello");
+        let mut bytes = ws_frame(0x1, b"hello", true);
         let (fin, opcode, payload) = next_frame(&mut bytes).unwrap().unwrap();
         assert!(fin && bytes.is_empty());
         assert_eq!((opcode, payload.as_slice()), (0x1, &b"hello"[..]));
-        let mut long = ws_frame(0x2, &[7u8; 300]);
+        let mut long = ws_frame(0x2, &[7u8; 300], true);
         let half = long.split_off(100);
         assert!(next_frame(&mut long).unwrap().is_none());
         long.extend(half);
         assert_eq!(next_frame(&mut long).unwrap().unwrap().2.len(), 300);
+    }
+
+    #[test]
+    fn test_server_frames_are_unmasked() {
+        let mut bytes = ws_frame(0x2, &[1, 2, 3], false);
+        assert_eq!(bytes, [0x82, 3, 1, 2, 3]);
+        let (fin, opcode, payload) = next_frame(&mut bytes).unwrap().unwrap();
+        assert!(fin && bytes.is_empty());
+        assert_eq!((opcode, payload.as_slice()), (0x2, &[1u8, 2, 3][..]));
+        let long = ws_frame(0x1, &[0u8; 70_000], false);
+        assert_eq!((long[1], long.len()), (127, 70_000 + 10));
+    }
+
+    #[test]
+    fn test_parse_upgrade_request() {
+        let head = "GET /chat?room=1 HTTP/1.1\r\nHost: localhost\r\nUpgrade: WebSocket\r\n\
+                    Connection: keep-alive, Upgrade\r\nSec-WebSocket-Key: abc\r\n\
+                    Sec-WebSocket-Version: 13\r\nX-Tag: a\r\nx-tag: b\r\n\r\n";
+        let (path, headers) = parse_upgrade_request(head).unwrap();
+        assert_eq!(path, "/chat?room=1");
+        assert!(headers.contains(&("x-tag".to_string(), "a, b".to_string())));
+        assert!(headers.contains(&("sec-websocket-key".to_string(), "abc".to_string())));
+
+        let plain = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        assert_eq!(
+            parse_upgrade_request(plain).unwrap_err().0,
+            "400 Bad Request"
+        );
+        let post = head.replacen("GET", "POST", 1);
+        assert_eq!(
+            parse_upgrade_request(&post).unwrap_err().0,
+            "400 Bad Request"
+        );
+        let old = head.replace("Version: 13", "Version: 8");
+        assert_eq!(
+            parse_upgrade_request(&old).unwrap_err().0,
+            "426 Upgrade Required"
+        );
     }
 }

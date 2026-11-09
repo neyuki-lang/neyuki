@@ -1,0 +1,38 @@
+-- A WebSocket chat room: every message a client sends goes to all clients.
+
+local net = require("@neyuki/net")
+
+local server = net.listenWebSocket({ host = "127.0.0.1", port = 9000 })
+local clients = {}
+
+-- Connect with any WebSocket client, e.g. from a browser console:
+--   const ws = new WebSocket("ws://127.0.0.1:9000/?name=you")
+--   ws.onmessage = (e) => console.log(e.data); ws.send("hi")
+print("chat room on " .. server.url)
+
+local function broadcast(text: string)
+    for _, client in clients do
+        if (client:isOpen()) then client:send(text) end
+    end
+end
+
+-- Each client gets a task of its own, so a quiet client never holds up the
+-- others; the accept loop is a task too, as the main chunk blocking in
+-- accept would keep the scheduler from running them.
+task.spawn(function()
+    while true do
+        local ws = server:accept()
+        local name = ws.path:match("name=([%w_]+)") ?? ws.remote
+        clients[ws] = ws
+        broadcast(name .. " joined")
+        task.spawn(function()
+            while true do
+                local message, kind = ws:receive()
+                if (message == nil) then break end
+                if (kind == "text") then broadcast(name .. ": " .. message) end
+            end
+            clients[ws] = nil
+            broadcast(name .. " left")
+        end)
+    end
+end)

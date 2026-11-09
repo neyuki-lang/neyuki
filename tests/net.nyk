@@ -81,4 +81,100 @@ sleeper:kill()
 sleeper:wait()
 assert(not sleeper:isRunning(), "kill ends the process")
 
+-- WebSocket server: a client connects and messages go both ways.
+local wsServer = net.listenWebSocket({ host = "127.0.0.1", port = 0 })
+assert(wsServer.port > 0 and wsServer:isOpen(), "the WebSocket server listens")
+assert(wsServer.url == "ws://127.0.0.1:" .. tostring(wsServer.port), "the server has a ws:// url")
+assert(wsServer:accept(0) == nil, "accept gives nil when nobody connected in time")
+
+-- The handshake runs on the server's own threads, so the main chunk can
+-- connect first and accept after.
+local wsHeaders = {}
+wsHeaders["X-Test"] = "yes"
+local client = net.websocket(wsServer.url .. "/chat?room=1", { headers = wsHeaders })
+local peer = wsServer:accept(10)
+assert(peer ~= nil, "the server accepts the client")
+assert(peer.path == "/chat?room=1", "the request target: " .. tostring(peer.path))
+assert(peer.headers["x-test"] == "yes", "header names are lower case")
+assert(peer.remote:find("127.0.0.1:", 1, true) == 1, "the client's address: " .. peer.remote)
+
+client:send("hello")
+local message, kind = peer:receive()
+assert(message == "hello" and kind == "text", "the server receives text")
+peer:send(buffer.fromhex("010203"))
+local data, dataKind = client:receive()
+assert(dataKind == "binary" and buffer.equal(data, buffer.fromhex("010203")), "the client receives binary")
+
+-- Inside tasks, receive suspends only the waiting task.
+local echoed = nil
+task.spawn(function()
+    local text = peer:receive()
+    peer:send(text .. "!")
+end)
+task.spawn(function()
+    client:send("ping")
+    echoed = client:receive()
+end)
+waitFor(function()
+    return echoed ~= nil
+end)
+assert(echoed == "ping!", "the server echoes: " .. tostring(echoed))
+
+-- Closing one end ends the other.
+client:close()
+assert(peer:receive() == nil, "receive gives nil once the client has closed")
+assert(not peer:isOpen() and not client:isOpen(), "both ends are closed")
+
+-- A plain HTTP request is refused.
+local raw = net.connect("127.0.0.1", wsServer.port)
+raw:write("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+local status = buffer.tostring(raw:read(12))
+assert(status == "HTTP/1.1 400", "a request without an upgrade is refused: " .. status)
+raw:close()
+
+wsServer:close()
+wsServer:close()
+assert(not wsServer:isOpen(), "a closed server is not open")
+assert(not try(wsServer.accept, wsServer, 0), "accepting on a closed server raises")
+assert(not try(net.listenWebSocket, "8080"), "options must be a port number or a table")
+
+-- UDP: datagrams between two sockets, with their sender.
+local a = net.udp({ host = "127.0.0.1" })
+local b = net.udp({ host = "127.0.0.1", port = 0 })
+assert(a.host == "127.0.0.1" and a.port > 0 and b.port > 0 and a.port ~= b.port, "both sockets are bound")
+assert(b:receive(0) == nil, "receive(0) only checks")
+assert(b:receive(0.05) == nil, "receive gives nil once the timeout passes")
+assert(a:sendTo("hello", "127.0.0.1", b.port) == 5, "sendTo returns the datagram size")
+local datagram, fromHost, fromPort = b:receive(5)
+assert(datagram ~= nil and buffer.tostring(datagram) == "hello", "the datagram arrives")
+assert(fromHost == "127.0.0.1" and fromPort == a.port, "with its sender")
+
+assert(not try(a.send, a, "x"), "send needs a peer")
+a:connect("127.0.0.1", b.port)
+a:send(buffer.fromhex("cafe"))
+local binary = b:receive(5)
+assert(binary ~= nil and buffer.equal(binary, buffer.fromhex("cafe")), "a connected socket sends to its peer")
+
+local answered = nil
+task.spawn(function()
+    local got, host, port = b:receive(5)
+    b:sendTo(got, host, port)
+end)
+task.spawn(function()
+    a:send("echo")
+    answered = a:receive(5)
+end)
+waitFor(function()
+    return answered ~= nil
+end)
+assert(answered ~= nil and buffer.tostring(answered) == "echo", "the reply reaches the connected socket")
+
+assert(not try(a.joinMulticast, a, "127.0.0.1"), "only multicast groups can be joined")
+assert(not try(net.udp, { broadcast = 1 }), "broadcast must be a boolean")
+b:close()
+b:close()
+assert(not b:isOpen(), "a closed socket is not open")
+assert(not try(b.receive, b, 0), "receiving on a closed socket raises")
+a:close()
+
 print("[pass] net")
