@@ -1,6 +1,6 @@
 # @neyuki/csv
 
-Reading and writing CSV (RFC 4180). Quoted fields may hold the delimiter, quotes (written twice) and line breaks; LF, CRLF and CR line endings are all read, a leading byte order mark is dropped and blank lines are skipped. Fields are read as strings; use `tonumber` for numbers.
+Reading and writing CSV (RFC 4180). Quoted fields may hold the delimiter, quotes (written twice) and line breaks; LF, CRLF and CR line endings are all read, a leading byte order mark is dropped and blank lines are ignored. Fields are read as strings; use `tonumber` for numbers.
 
 ```lua
 local csv = require("@neyuki/csv")

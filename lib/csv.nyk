@@ -20,7 +20,7 @@ end
 --   header     true to read the first record as column names and return
 --              one table per record keyed by them (default false: each
 --              record is an array of strings)
--- Fields are always strings. Blank lines are skipped.
+-- Fields are always strings. Blank lines are ignored.
 function csv.decode(text: string, options: {[string]: any}?): {any}
     if (text == nil) then error("text must be provided") end
     if (type(text) != "string") then error("text must be a string") end

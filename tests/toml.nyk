@@ -2,7 +2,7 @@
 
 local toml = require("@neyuki/toml")
 
-local doc = toml.decode([[
+local doc = toml.decode([==[
 # a comment
 title = "TOML \"example\""
 literal = 'C:\Users\nodejs'
@@ -36,7 +36,7 @@ sku = 738594937
 [[products]]
 name = "Nail"
 color = "gray"
-]])
+]==])
 
 assert(doc.title == 'TOML "example"', "basic strings unescape")
 assert(doc.literal == "C:\\Users\\nodejs", "literal strings keep backslashes")
@@ -79,7 +79,7 @@ local text = toml.encode({
     plugin = { { name = "a" }, { name = "b", options = { level = 2 } } },
     ["odd key"] = "x\ny",
 })
-local expected = [[name = "neyuki"
+local expected = [==[name = "neyuki"
 "odd key" = "x\ny"
 ratio = 0.5
 tags = ["small", "fast"]
@@ -102,7 +102,7 @@ name = "b"
 
 [plugin.options]
 level = 2
-]]
+]==]
 assert(text == expected, "encode layout:\n" .. text)
 
 local back = toml.decode(text)

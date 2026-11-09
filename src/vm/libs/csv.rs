@@ -3,7 +3,7 @@
 //! The format is RFC 4180 with the usual leniencies: LF, CRLF or CR line
 //! endings, any single ASCII delimiter, a leading byte order mark, and
 //! quotes inside an unquoted field kept as they are. Blank lines are
-//! skipped. Fields are always strings when read; `lib/csv.nyk` checks the
+//! ignored. Fields are always strings when read; `lib/csv.nyk` checks the
 //! options.
 
 use std::cell::RefCell;

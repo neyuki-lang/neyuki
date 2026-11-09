@@ -216,7 +216,9 @@ fn insert_value(table: &mut Table, keys: &[String], value: Node) -> Result<(), S
 
 fn days_in_month(year: u32, month: u32) -> u32 {
     match month {
-        2 if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 => 29,
+        2 if (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400) => {
+            29
+        }
         2 => 28,
         4 | 6 | 9 | 11 => 30,
         _ => 31,
@@ -224,7 +226,7 @@ fn days_in_month(year: u32, month: u32) -> u32 {
 }
 
 /// Whether `s` is digits with single underscores between them.
-fn valid_digits(s: &str, digit: fn(u8) -> bool) -> bool {
+fn valid_digits(s: &str, digit: DigitTest) -> bool {
     let bytes = s.as_bytes();
     !bytes.is_empty()
         && bytes[0] != b'_'
@@ -232,6 +234,9 @@ fn valid_digits(s: &str, digit: fn(u8) -> bool) -> bool {
         && !s.contains("__")
         && bytes.iter().all(|b| *b == b'_' || digit(*b))
 }
+
+/// Whether a byte is a digit of some base.
+type DigitTest = fn(u8) -> bool;
 
 fn is_decimal(b: u8) -> bool {
     b.is_ascii_digit()
@@ -269,7 +274,7 @@ fn parse_number(token: &str) -> Result<Node, &'static str> {
         "nan" => return Ok(Node::Float(f64::NAN)),
         _ => {}
     }
-    let radix: Option<(u32, fn(u8) -> bool)> = match body.get(..2) {
+    let radix: Option<(u32, DigitTest)> = match body.get(..2) {
         Some("0x") => Some((16, is_hex)),
         Some("0o") => Some((8, is_octal)),
         Some("0b") => Some((2, is_binary)),
