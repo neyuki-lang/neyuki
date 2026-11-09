@@ -1265,6 +1265,9 @@ mod tests {
     #[test]
     fn deep_nesting_is_an_error() {
         let text = format!("a = {}{}", "[".repeat(1000), "]".repeat(1000));
-        assert!(decode(&text).unwrap_err().contains("too deep"));
+        let Err(err) = decode(&text) else {
+            panic!("deep nesting was accepted")
+        };
+        assert!(err.contains("too deep"), "{}", err);
     }
 }

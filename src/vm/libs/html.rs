@@ -1,7 +1,7 @@
 //! Native HTML parsing, querying and writing backing `@neyuki/html`.
 //!
-//! Parsing goes through html5ever, the WHATWG parser from Servo (by way of
-//! `kuchikiki`'s tree), so broken markup is repaired the way a browser
+//! Parsing goes through html5ever, the WHATWG parser from Servo, into a
+//! small tree of our own, so broken markup is repaired the way a browser
 //! repairs it. The result is plain tables a script can read and change:
 //!
 //! ```text
@@ -16,13 +16,14 @@
 //! selectors against such a tree, `text` gathers its text and `render`
 //! writes it back as HTML. `lib/html.nyk` checks the arguments.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use html5ever::{LocalName, Namespace, QualName};
-use kuchikiki::traits::TendrilSink;
-use kuchikiki::{NodeData, NodeRef};
+use html5ever::tendril::{StrTendril, TendrilSink};
+use html5ever::tree_builder::{ElementFlags, NodeOrText, QuirksMode, TreeSink};
+use html5ever::{Attribute, LocalName, Namespace, ParseOpts, QualName};
 
 use crate::vm::libs::args::{array, bool_arg, str_arg, table_arg};
 use crate::vm::machine::VM;
@@ -96,82 +97,358 @@ fn builtin_parse(_vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     Ok(vec![parse(text, fragment)?])
 }
 
+fn html_name(local: &str) -> QualName {
+    QualName::new(
+        None,
+        Namespace::from("http://www.w3.org/1999/xhtml"),
+        LocalName::from(local),
+    )
+}
+
 fn parse(text: &str, fragment: bool) -> Result<Value, String> {
     let mut root = VmTable::new();
     if fragment {
-        let context = QualName::new(
-            None,
-            Namespace::from("http://www.w3.org/1999/xhtml"),
-            LocalName::from("body"),
-        );
-        let document = kuchikiki::parse_fragment(context, Vec::new()).one(text);
+        let dom = html5ever::parse_fragment(
+            Dom::new(),
+            ParseOpts::default(),
+            html_name("body"),
+            Vec::new(),
+        )
+        .one(text);
         // html5ever puts the nodes of a fragment under an `html` element.
-        let holder = document.first_child().unwrap_or(document);
+        let holder = dom.nodes.borrow()[DOCUMENT]
+            .children
+            .first()
+            .copied()
+            .unwrap_or(DOCUMENT);
         root.set_str("type", Value::str("fragment"));
-        root.set_str("children", convert_children(&holder, 0)?);
+        root.set_str("children", dom.convert_children(holder, 0)?);
     } else {
-        let document = kuchikiki::parse_html().one(text);
+        let dom = html5ever::parse_document(Dom::new(), ParseOpts::default()).one(text);
         root.set_str("type", Value::str("document"));
-        root.set_str("children", convert_children(&document, 0)?);
+        root.set_str("children", dom.convert_children(DOCUMENT, 0)?);
     }
     Ok(new_table(root))
 }
 
-fn convert_children(node: &NodeRef, depth: usize) -> Result<Value, String> {
-    if depth >= MAX_DEPTH {
-        return Err(depth_error());
-    }
-    let mut items = Vec::new();
-    for child in node.children() {
-        if let Some(value) = convert(&child, depth)? {
-            items.push(value);
-        }
-    }
-    Ok(array(items))
+/// The document node's index in `Dom::nodes`.
+const DOCUMENT: usize = 0;
+
+enum DomData {
+    /// The document, or the contents of a `<template>`.
+    Document,
+    Doctype(String),
+    Text(String),
+    Comment(String),
+    Element {
+        name: QualName,
+        attrs: Vec<Attribute>,
+        /// The node holding a `<template>`'s contents.
+        template: Option<usize>,
+        mathml_integration_point: bool,
+    },
+    /// A processing instruction, which HTML does not have.
+    Ignored,
 }
 
-fn convert(node: &NodeRef, depth: usize) -> Result<Option<Value>, String> {
-    let mut table = VmTable::new();
-    match node.data() {
-        NodeData::Element(element) => {
-            table.set_str("type", Value::str("element"));
-            table.set_str("tag", Value::string(element.name.local.to_string()));
-            let mut attrs = VmTable::new();
-            for (name, attribute) in element.attributes.borrow().map.iter() {
-                let key = match &attribute.prefix {
-                    Some(prefix) => format!("{}:{}", prefix, name.local),
-                    None => name.local.to_string(),
-                };
-                attrs
-                    .fields
-                    .insert(StrRef::from(key), Value::string(attribute.value.clone()));
-            }
-            table.set_str("attrs", new_table(attrs));
-            // A `<template>` keeps its children in a separate fragment.
-            let contents = element.template_contents.as_ref().unwrap_or(node);
-            table.set_str("children", convert_children(contents, depth + 1)?);
+struct DomNode {
+    parent: Option<usize>,
+    children: Vec<usize>,
+    data: DomData,
+}
+
+/// What html5ever holds on to for a node: its index and, for elements, its
+/// name. The name lives outside the tree so `elem_name` can lend it out
+/// while the tree changes.
+struct Named {
+    id: usize,
+    name: QualName,
+}
+
+type Handle = Rc<Named>;
+
+/// The tree html5ever builds, as a flat list of nodes.
+struct Dom {
+    nodes: RefCell<Vec<DomNode>>,
+}
+
+impl Dom {
+    fn new() -> Self {
+        Dom {
+            nodes: RefCell::new(vec![DomNode {
+                parent: None,
+                children: Vec::new(),
+                data: DomData::Document,
+            }]),
         }
-        NodeData::Text(text) => {
-            table.set_str("type", Value::str("text"));
-            table.set_str("text", Value::string(text.borrow().clone()));
-        }
-        NodeData::Comment(text) => {
-            table.set_str("type", Value::str("comment"));
-            table.set_str("text", Value::string(text.borrow().clone()));
-        }
-        NodeData::Doctype(doctype) => {
-            table.set_str("type", Value::str("doctype"));
-            table.set_str("name", Value::string(doctype.name.clone()));
-        }
-        NodeData::Document(_) | NodeData::DocumentFragment => {
-            table.set_str("type", Value::str("document"));
-            table.set_str("children", convert_children(node, depth + 1)?);
-        }
-        // HTML has no processing instructions; html5ever reads them as
-        // comments.
-        NodeData::ProcessingInstruction(_) => return Ok(None),
     }
-    Ok(Some(new_table(table)))
+
+    fn add(&self, data: DomData) -> usize {
+        let mut nodes = self.nodes.borrow_mut();
+        nodes.push(DomNode {
+            parent: None,
+            children: Vec::new(),
+            data,
+        });
+        nodes.len() - 1
+    }
+
+    fn handle(id: usize) -> Handle {
+        Rc::new(Named {
+            id,
+            name: html_name(""),
+        })
+    }
+
+    fn detach(nodes: &mut [DomNode], id: usize) {
+        if let Some(parent) = nodes[id].parent.take() {
+            nodes[parent].children.retain(|child| *child != id);
+        }
+    }
+
+    /// Inserts `child` into `parent` before position `index` (at the end
+    /// when none), merging text into a text node right before it.
+    fn insert(&self, parent: usize, index: Option<usize>, child: NodeOrText<Handle>) {
+        let mut nodes = self.nodes.borrow_mut();
+        match child {
+            NodeOrText::AppendText(text) => {
+                let at = index.unwrap_or(nodes[parent].children.len());
+                let before = at.checked_sub(1).map(|i| nodes[parent].children[i]);
+                if let Some(before) = before
+                    && let DomData::Text(existing) = &mut nodes[before].data
+                {
+                    existing.push_str(&text);
+                    return;
+                }
+                nodes.push(DomNode {
+                    parent: Some(parent),
+                    children: Vec::new(),
+                    data: DomData::Text(text.to_string()),
+                });
+                let id = nodes.len() - 1;
+                nodes[parent].children.insert(at, id);
+            }
+            NodeOrText::AppendNode(node) => {
+                Self::detach(&mut nodes, node.id);
+                nodes[node.id].parent = Some(parent);
+                let children = &mut nodes[parent].children;
+                let at = index.unwrap_or(children.len()).min(children.len());
+                children.insert(at, node.id);
+            }
+        }
+    }
+
+    fn convert_children(&self, id: usize, depth: usize) -> Result<Value, String> {
+        if depth >= MAX_DEPTH {
+            return Err(depth_error());
+        }
+        let children = self.nodes.borrow()[id].children.clone();
+        let mut items = Vec::new();
+        for child in children {
+            if let Some(value) = self.convert(child, depth)? {
+                items.push(value);
+            }
+        }
+        Ok(array(items))
+    }
+
+    fn convert(&self, id: usize, depth: usize) -> Result<Option<Value>, String> {
+        let mut table = VmTable::new();
+        let children_of = {
+            let nodes = self.nodes.borrow();
+            match &nodes[id].data {
+                DomData::Element {
+                    name,
+                    attrs,
+                    template,
+                    ..
+                } => {
+                    table.set_str("type", Value::str("element"));
+                    table.set_str("tag", Value::string(name.local.to_string()));
+                    let mut fields = VmTable::new();
+                    for attribute in attrs {
+                        let key = match &attribute.name.prefix {
+                            Some(prefix) => format!("{}:{}", prefix, attribute.name.local),
+                            None => attribute.name.local.to_string(),
+                        };
+                        fields.fields.insert(
+                            StrRef::from(key),
+                            Value::string(attribute.value.to_string()),
+                        );
+                    }
+                    table.set_str("attrs", new_table(fields));
+                    // A `<template>` keeps its children in a separate node.
+                    Some(template.unwrap_or(id))
+                }
+                DomData::Text(text) => {
+                    table.set_str("type", Value::str("text"));
+                    table.set_str("text", Value::string(text.clone()));
+                    None
+                }
+                DomData::Comment(text) => {
+                    table.set_str("type", Value::str("comment"));
+                    table.set_str("text", Value::string(text.clone()));
+                    None
+                }
+                DomData::Doctype(name) => {
+                    table.set_str("type", Value::str("doctype"));
+                    table.set_str("name", Value::string(name.clone()));
+                    None
+                }
+                DomData::Document => {
+                    table.set_str("type", Value::str("document"));
+                    Some(id)
+                }
+                DomData::Ignored => return Ok(None),
+            }
+        };
+        if let Some(source) = children_of {
+            table.set_str("children", self.convert_children(source, depth + 1)?);
+        }
+        Ok(Some(new_table(table)))
+    }
+}
+
+impl TreeSink for Dom {
+    type Handle = Handle;
+    type Output = Self;
+    type ElemName<'a> = &'a QualName;
+
+    fn finish(self) -> Self {
+        self
+    }
+
+    // Parse errors are never fatal in HTML; the tree is repaired instead.
+    fn parse_error(&self, _msg: Cow<'static, str>) {}
+
+    fn get_document(&self) -> Handle {
+        Self::handle(DOCUMENT)
+    }
+
+    fn elem_name<'a>(&'a self, target: &'a Handle) -> &'a QualName {
+        &target.name
+    }
+
+    fn create_element(&self, name: QualName, attrs: Vec<Attribute>, flags: ElementFlags) -> Handle {
+        let template = flags.template.then(|| self.add(DomData::Document));
+        let id = self.add(DomData::Element {
+            name: name.clone(),
+            attrs,
+            template,
+            mathml_integration_point: flags.mathml_annotation_xml_integration_point,
+        });
+        Rc::new(Named { id, name })
+    }
+
+    fn create_comment(&self, text: StrTendril) -> Handle {
+        Self::handle(self.add(DomData::Comment(text.to_string())))
+    }
+
+    fn create_pi(&self, _target: StrTendril, _data: StrTendril) -> Handle {
+        Self::handle(self.add(DomData::Ignored))
+    }
+
+    fn append(&self, parent: &Handle, child: NodeOrText<Handle>) {
+        self.insert(parent.id, None, child);
+    }
+
+    fn append_based_on_parent_node(
+        &self,
+        element: &Handle,
+        prev_element: &Handle,
+        child: NodeOrText<Handle>,
+    ) {
+        let has_parent = self.nodes.borrow()[element.id].parent.is_some();
+        if has_parent {
+            self.append_before_sibling(element, child);
+        } else {
+            self.append(prev_element, child);
+        }
+    }
+
+    fn append_doctype_to_document(
+        &self,
+        name: StrTendril,
+        _public_id: StrTendril,
+        _system_id: StrTendril,
+    ) {
+        let doctype = Self::handle(self.add(DomData::Doctype(name.to_string())));
+        self.insert(DOCUMENT, None, NodeOrText::AppendNode(doctype));
+    }
+
+    fn get_template_contents(&self, target: &Handle) -> Handle {
+        let template = match &self.nodes.borrow()[target.id].data {
+            DomData::Element { template, .. } => *template,
+            _ => None,
+        };
+        Self::handle(template.unwrap_or(target.id))
+    }
+
+    fn same_node(&self, x: &Handle, y: &Handle) -> bool {
+        x.id == y.id
+    }
+
+    fn set_quirks_mode(&self, _mode: QuirksMode) {}
+
+    fn append_before_sibling(&self, sibling: &Handle, new_node: NodeOrText<Handle>) {
+        let place = {
+            let nodes = self.nodes.borrow();
+            nodes[sibling.id].parent.map(|parent| {
+                let siblings = &nodes[parent].children;
+                let index = siblings.iter().position(|c| *c == sibling.id);
+                // Moving a node out of the same parent shifts the sibling left.
+                let own = match &new_node {
+                    NodeOrText::AppendNode(node) => siblings.iter().position(|c| *c == node.id),
+                    NodeOrText::AppendText(_) => None,
+                };
+                let index = match (own, index) {
+                    (Some(own), Some(index)) if own < index => Some(index - 1),
+                    _ => index,
+                };
+                (parent, index)
+            })
+        };
+        if let Some((parent, index)) = place {
+            self.insert(parent, index, new_node);
+        }
+    }
+
+    fn add_attrs_if_missing(&self, target: &Handle, attrs: Vec<Attribute>) {
+        let mut nodes = self.nodes.borrow_mut();
+        if let DomData::Element {
+            attrs: existing, ..
+        } = &mut nodes[target.id].data
+        {
+            for attr in attrs {
+                if !existing.iter().any(|a| a.name == attr.name) {
+                    existing.push(attr);
+                }
+            }
+        }
+    }
+
+    fn remove_from_parent(&self, target: &Handle) {
+        Self::detach(&mut self.nodes.borrow_mut(), target.id);
+    }
+
+    fn reparent_children(&self, node: &Handle, new_parent: &Handle) {
+        let mut nodes = self.nodes.borrow_mut();
+        let children = std::mem::take(&mut nodes[node.id].children);
+        for &child in &children {
+            nodes[child].parent = Some(new_parent.id);
+        }
+        nodes[new_parent.id].children.extend(children);
+    }
+
+    fn is_mathml_annotation_xml_integration_point(&self, handle: &Handle) -> bool {
+        matches!(
+            self.nodes.borrow()[handle.id].data,
+            DomData::Element {
+                mathml_integration_point: true,
+                ..
+            }
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------

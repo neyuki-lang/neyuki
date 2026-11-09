@@ -3339,7 +3339,6 @@ dependencies = [
  "html5ever",
  "image",
  "keyring",
- "kuchikiki",
  "md-5 0.10.6",
  "mimalloc",
  "mysql",
