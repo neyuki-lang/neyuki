@@ -48,6 +48,34 @@ function net.websocket(url: string, options: any?): any
     return __net_websocket(url, options)
 end
 
+-- Options given as a port number or a table with `host` and `port`.
+function addressOptions(options: any?): any
+    if (type(options) == "number") then options = { port = options } end
+    if (options != nil and type(options) != "table") then error("options must be a port number or a table") end
+    options = options ?? {}
+    if (options.host != nil) then checkString(options.host, "host") end
+    if (options.port != nil and type(options.port) != "number") then error("port must be a number") end
+    return options
+end
+
+-- Opens a WebSocket server. `options` may be a port number or a table with
+-- `host` (default "127.0.0.1") and `port` (default 8080; 0 picks a free one).
+-- Handshakes run natively, so clients are ready to talk when `accept` returns
+-- them.
+function net.listenWebSocket(options: any?): any
+    options = addressOptions(options)
+    return __net_ws_listen(options.host ?? "127.0.0.1", options.port ?? 8080)
+end
+
+-- Opens a UDP socket. `options` may be a port number or a table with `host`
+-- (default "0.0.0.0", every IPv4 interface; "::" for IPv6), `port` (default
+-- 0, a free one) and `broadcast` (allow sending to broadcast addresses).
+function net.udp(options: any?): any
+    options = addressOptions(options)
+    if (options.broadcast != nil and type(options.broadcast) != "boolean") then error("broadcast must be a boolean") end
+    return __net_udp(options.host ?? "0.0.0.0", options.port ?? 0, options.broadcast ?? false)
+end
+
 -- Same as `os.spawn`.
 function net.spawn(command: string | {string}, options: any?): any
     return os.spawn(command, options)

@@ -30,7 +30,7 @@ Load these with `require("@neyuki/name")`.
 | [@neyuki/fs](fs.md) | Files, directories and paths |
 | [@neyuki/io](io.md) | Reading from and writing to the terminal |
 | [@neyuki/http](http.md) | HTTP client and server, port forwarding |
-| [@neyuki/net](net.md) | Pipes, Unix sockets, TCP sockets and WebSocket clients |
+| [@neyuki/net](net.md) | Pipes, Unix sockets, TCP sockets, WebSocket clients and servers, UDP sockets |
 | [@neyuki/sql](sql.md) | PostgreSQL, MySQL and MariaDB |
 | [@neyuki/crypto](crypto.md) | Hashes, passwords, encryption, signatures, secure random values |
 | [@neyuki/ui](ui.md) | Windows, drawing, input events and animation |
