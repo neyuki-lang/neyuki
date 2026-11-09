@@ -926,7 +926,7 @@ fn ws_connect(
     if !accepted {
         return Err("WebSocket server sent a wrong Sec-WebSocket-Accept".to_string());
     }
-    ws_conn(stream, &reader_tcp, closing, Kind::WsClient)
+    ws_conn(stream, reader_tcp, closing, Kind::WsClient)
 }
 
 /// Reads an HTTP head byte by byte, so nothing past it is consumed.
@@ -946,48 +946,98 @@ fn read_head(stream: &mut impl Read) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&head).into_owned())
 }
 
-/// Starts the reader thread of a WebSocket whose handshake is done. `tcp` is
-/// the socket under `stream`, and `closing` a handle to shut it down with.
+/// Starts the reader thread of a WebSocket whose handshake is done. `socket`
+/// is a handle to the TCP socket under `stream` for the reader, and
+/// `closing` one to shut it down with.
+///
+/// No read here ever times out: on Windows a receive that times out leaves
+/// the socket "in an indeterminate state" in which arriving data can be
+/// lost. A plain socket is read with blocking reads on a handle of its own,
+/// which `close` ends by shutting the socket down. A TLS stream cannot be
+/// split, so there the reader peeks at the socket (which consumes nothing,
+/// so its timeout is harmless) and takes the stream's lock only once there
+/// is something to read, so it never holds the lock while a send waits.
 fn ws_conn(
     stream: Stream,
-    tcp: &TcpStream,
+    socket: TcpStream,
     closing: TcpStream,
     kind: Kind,
 ) -> Result<Conn, String> {
-    // From here the reader thread polls with a short timeout so it never
-    // holds the stream while a send waits.
-    let _ = tcp.set_read_timeout(Some(Duration::from_millis(50)));
     let masked = kind == Kind::WsClient;
-    let stream = Arc::new(Mutex::new(stream));
+    let reader: Box<dyn Read + Send>;
+    let writer: Box<dyn Write + Send>;
+    match stream {
+        Stream::Plain(tcp) => {
+            let _ = socket.set_read_timeout(None);
+            reader = Box::new(socket);
+            writer = Box::new(tcp);
+        }
+        tls => {
+            let _ = socket.set_read_timeout(Some(Duration::from_millis(50)));
+            let stream = Arc::new(Mutex::new(tls));
+            reader = Box::new(TlsReader {
+                stream: stream.clone(),
+                socket,
+            });
+            writer = Box::new(SharedStream(stream));
+        }
+    }
+    let writer: Writer = Arc::new(Mutex::new(Some(writer)));
     let shared = Shared::new();
-    let background = shared.clone();
-    let reader_stream = stream.clone();
+    let (background, replies) = (shared.clone(), writer.clone());
     spawn_thread("neyuki-ws-reader", move || {
-        ws_pump(background, reader_stream, masked)
+        ws_pump(background, reader, replies, masked)
     })?;
-    let closing_stream = stream.clone();
-    let closing_shared = shared.clone();
+    let (closing_shared, closing_writer) = (shared.clone(), writer.clone());
     Ok(Conn {
         shared,
-        writer: Arc::new(Mutex::new(Some(Box::new(SharedStream(stream))))),
+        writer,
         kind,
         closer: Some(Box::new(move || {
             // A peer that already closed (or broke) was answered by the
-            // reader. Otherwise the reader is polling, so this gets the lock
-            // quickly.
+            // reader.
             if !lock(&closing_shared.state).eof {
                 let close = ws_frame(8, &1000u16.to_be_bytes(), masked);
-                let _ = SharedStream(closing_stream).write_all(&close);
+                send_frame(&closing_writer, &close);
             }
             let _ = closing.shutdown(std::net::Shutdown::Both);
         })),
     })
 }
 
+/// The reading half of a TLS stream that sends also use; see `ws_conn`.
+struct TlsReader {
+    stream: Arc<Mutex<Stream>>,
+    socket: TcpStream,
+}
+
+impl Read for TlsReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let buffered = match &*lock(&self.stream) {
+            Stream::Tls(tls) => tls.buffered_read_size().unwrap_or(0),
+            Stream::Plain(_) => 0,
+        };
+        if buffered == 0 {
+            // Times out while nothing arrives; the pump then looks again.
+            self.socket.peek(&mut [0u8; 1])?;
+        }
+        lock(&self.stream).read(buf)
+    }
+}
+
+/// Sends a control frame from the reader thread; a failure shows up on the
+/// next read.
+fn send_frame(writer: &Writer, frame: &[u8]) {
+    if let Some(out) = lock(writer).as_mut() {
+        let _ = out.write_all(frame).and_then(|()| out.flush());
+    }
+}
+
 /// Reads frames off the WebSocket into the message queue, answering pings
-/// and the peer's close. `masked` is true on the client end, which masks
-/// what it sends; the server end requires masked frames in return.
-fn ws_pump(shared: Arc<Shared>, stream: Arc<Mutex<Stream>>, masked: bool) {
+/// and the peer's close through `writer`. `masked` is true on the client
+/// end, which masks what it sends; the server end requires masked frames in
+/// return.
+fn ws_pump(shared: Arc<Shared>, mut reader: Box<dyn Read + Send>, writer: Writer, masked: bool) {
     let mut pending: Vec<u8> = Vec::new();
     let mut partial: Option<(bool, Vec<u8>)> = None;
     let mut chunk = vec![0u8; 16 * 1024];
@@ -995,8 +1045,7 @@ fn ws_pump(shared: Arc<Shared>, stream: Arc<Mutex<Stream>>, masked: bool) {
         if lock(&shared.state).closed {
             return;
         }
-        let read = lock(&stream).read(&mut chunk);
-        match read {
+        match reader.read(&mut chunk) {
             Ok(0) => return shared.finish(None),
             Ok(n) => pending.extend_from_slice(&chunk[..n]),
             Err(err)
@@ -1007,13 +1056,10 @@ fn ws_pump(shared: Arc<Shared>, stream: Arc<Mutex<Stream>>, masked: bool) {
                         | std::io::ErrorKind::Interrupted
                 ) =>
             {
-                // Give a waiting send the lock.
-                std::thread::sleep(Duration::from_millis(2));
                 continue;
             }
             Err(err) => return shared.finish(Some(format!("read failed: {}", err))),
         }
-        std::thread::yield_now();
         loop {
             if !masked && pending.len() >= 2 && pending[1] & 0x80 == 0 {
                 return shared.finish(Some("WebSocket client sent an unmasked frame".into()));
@@ -1028,12 +1074,11 @@ fn ws_pump(shared: Arc<Shared>, stream: Arc<Mutex<Stream>>, masked: bool) {
                 0x8 => {
                     // Echo the status code, as the closing handshake asks.
                     let code = &payload[..payload.len().min(2)];
-                    let _ = SharedStream(stream.clone()).write_all(&ws_frame(8, code, masked));
+                    send_frame(&writer, &ws_frame(8, code, masked));
                     return shared.finish(None);
                 }
                 0x9 => {
-                    let pong = ws_frame(0xA, &payload, masked);
-                    let _ = SharedStream(stream.clone()).write_all(&pong);
+                    send_frame(&writer, &ws_frame(0xA, &payload, masked));
                 }
                 0xA => {}
                 0x0..=0x2 => {
@@ -1412,7 +1457,7 @@ fn ws_handshake(mut tcp: TcpStream, remote: SocketAddr) -> Result<Accepted, Stri
     let closing = tcp
         .try_clone()
         .map_err(|err| format!("socket error: {}", err))?;
-    let conn = ws_conn(Stream::Plain(tcp), &reader, closing, Kind::WsServer)?;
+    let conn = ws_conn(Stream::Plain(tcp), reader, closing, Kind::WsServer)?;
     Ok(Accepted {
         conn,
         path,
@@ -1619,7 +1664,13 @@ fn udp_pump(shared: Arc<Shared>, socket: Arc<UdpSocket>) {
         if lock(&shared.state).closed {
             return;
         }
-        match socket.recv_from(&mut chunk) {
+        // Waits by peeking, which consumes nothing, so its timeout cannot
+        // lose a datagram the way a timed-out receive can on Windows (see
+        // `ws_conn`); the receive then finds the datagram already there.
+        let received = socket
+            .peek_from(&mut chunk)
+            .and_then(|_| socket.recv_from(&mut chunk));
+        match received {
             Ok((n, from)) => {
                 let mut state = lock(&shared.state);
                 if state.closed {
