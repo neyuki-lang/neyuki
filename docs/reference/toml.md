@@ -20,7 +20,7 @@ print(toml.encode(config))
 
 ## toml.decode(text: string): table
 
-Parses a TOML document into a table. Tables, inline tables and arrays of tables (`[[name]]`) all become tables; integers stay exact, floats include `inf` and `nan`, and dates and times become RFC 3339 strings such as `"1979-05-27T07:32:00Z"`, `"1979-05-27"` or `"07:32:00"` (`T` and `Z` upper case, seconds always present). Raises an error with the line and column of malformed input, a key defined twice, or an integer outside the 64-bit range.
+Parses a TOML document into a table. Tables, inline tables and arrays of tables (`[[name]]`) all become tables; integers stay exact, floats include `inf` and `nan`, and dates and times become RFC 3339 strings such as `"1979-05-27T07:32:00Z"`, `"1979-05-27"` or `"07:32:00"` (`T` and `Z` upper case, seconds always present). Line breaks inside multi-line strings come back as `"\n"`, whether the file uses LF or CRLF. Raises an error with the line and column of malformed input, a key defined twice, or an integer outside the 64-bit range.
 
 ```lua
 local data = toml.decode('when = 2026-11-09\npoint = { x = 1, y = 2 }')

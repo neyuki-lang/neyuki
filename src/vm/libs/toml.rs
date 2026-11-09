@@ -897,7 +897,9 @@ impl Parser<'_> {
                     if self.peek_at(1) != Some(b'\n') {
                         return Err(self.error("carriage return without a line feed"));
                     }
-                    out.push_str("\r\n");
+                    // Line breaks inside the string become "\n", so a
+                    // document reads the same with CRLF line endings.
+                    out.push('\n');
                     self.pos += 2;
                 }
                 None => return Err(self.error("unfinished string")),

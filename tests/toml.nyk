@@ -103,6 +103,8 @@ name = "b"
 [plugin.options]
 level = 2
 ]==]
+-- A checkout with CRLF line endings puts them in the long string too.
+expected = (string.gsub(expected, "\r\n", "\n"))
 assert(text == expected, "encode layout:\n" .. text)
 
 local back = toml.decode(text)
