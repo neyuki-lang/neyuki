@@ -35,7 +35,7 @@ Opens a WebSocket client connection to a `ws://` or `wss://` URL (TLS through th
 
 ## net.listenWebSocket(options: number | table?): WebSocketServer
 
-Opens a WebSocket server. `options` is a port number or a table with `host` (default `"127.0.0.1"`; `"0.0.0.0"` listens on every interface) and `port` (default 8080; 0 picks a free one). Raises when the address is taken. Clients connect over plain `ws://`; for `wss://`, put the server behind a TLS proxy.
+Opens a WebSocket server. `options` is a port number or a table with `host` (default `"127.0.0.1"`; `"0.0.0.0"` listens on every interface) and `port` (default 8080; 0 picks a free one). Raises when the address is taken. The server's `host` and `port` fields hold the address it listens on (`port` is the one picked when 0 was asked for), and `url` is `ws://host:port`. Clients connect over plain `ws://`; for `wss://`, put the server behind a TLS proxy.
 
 Opening handshakes are answered on the server's own threads, so a client is ready, and its messages are already arriving, by the time `accept` returns it. Requests that are not WebSocket upgrades are refused with `400`, and clients asking for a protocol version other than 13 with `426`.
 
@@ -63,7 +63,7 @@ end)
 
 ## net.udp(options: number | table?): UdpSocket
 
-Opens a UDP socket. `options` is a port number or a table with `host` (default `"0.0.0.0"`, every IPv4 interface; `"::"` for IPv6), `port` (default 0, a free one) and `broadcast` (true to allow sending to broadcast addresses such as `255.255.255.255`). Datagrams are queued by a reader thread as they arrive; up to 4096 wait for `receive`, and further ones are dropped, as a full socket buffer would.
+Opens a UDP socket. `options` is a port number or a table with `host` (default `"0.0.0.0"`, every IPv4 interface; `"::"` for IPv6), `port` (default 0, a free one) and `broadcast` (true to allow sending to broadcast addresses such as `255.255.255.255`). The socket's `host` and `port` fields hold the local address it is bound to. Datagrams are queued by a reader thread as they arrive; up to 4096 wait for `receive`, and further ones are dropped, as a full socket buffer would.
 
 ```lua
 local socket = net.udp()
@@ -137,10 +137,6 @@ False after `close` and once the other end has closed the connection.
 
 Sends a close frame and shuts the connection down.
 
-## server.host: string, server.port: number, server.url: string
-
-The address the server listens on; `port` is the one picked when 0 was asked for, and `url` is `ws://host:port`.
-
 ## server:accept(timeout: number?): WebSocket?
 
 Waits for the next client and returns it as a WebSocket with the same `send`, `receive`, `isOpen` and `close` as a client connection, plus:
@@ -158,10 +154,6 @@ Stops listening and drops the clients nobody accepted yet; accepted ones stay op
 ## server:isOpen(): boolean
 
 False after `close`.
-
-## udp.host: string, udp.port: number
-
-The local address and port the socket is bound to.
 
 ## udp:sendTo(data: string | buffer, host: string, port: number): number
 

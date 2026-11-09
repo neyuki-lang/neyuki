@@ -843,8 +843,11 @@ fn ws_frame(opcode: u8, payload: &[u8], masked: bool) -> Vec<u8> {
         frame.extend_from_slice(payload);
         return frame;
     }
+    // `OsRng` rather than `thread_rng`: a connection still open when its
+    // thread ends sends its close frame from a thread-local destructor,
+    // where `thread_rng` may already be gone.
     let mut mask = [0u8; 4];
-    rand::thread_rng().fill_bytes(&mut mask);
+    rand::rngs::OsRng.fill_bytes(&mut mask);
     frame.extend_from_slice(&mask);
     frame.extend(payload.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
     frame
@@ -1426,12 +1429,13 @@ fn refuse(tcp: &mut TcpStream, status: &str, extra: &str) {
     );
 }
 
+/// An HTTP status line and any extra header lines to refuse a request with.
+type Refusal = (&'static str, &'static str);
+
 /// The target and the lower-cased headers of a WebSocket upgrade request, or
-/// the status (and any extra header lines) to refuse it with.
-fn parse_upgrade_request(
-    head: &str,
-) -> Result<(String, Vec<(String, String)>), (&'static str, &'static str)> {
-    const BAD_REQUEST: (&str, &str) = ("400 Bad Request", "");
+/// how to refuse it.
+fn parse_upgrade_request(head: &str) -> Result<(String, Vec<(String, String)>), Refusal> {
+    const BAD_REQUEST: Refusal = ("400 Bad Request", "");
     let mut lines = head.split("\r\n");
     let mut request = lines.next().unwrap_or("").split_whitespace();
     let (Some("GET"), Some(path)) = (request.next(), request.next()) else {
