@@ -86,7 +86,7 @@ assert(fields.year == 1971 and fields.month == 1 and fields.day == 1 and fields.
 local now = os.time()
 assert(os.time(os.date("*t", now)) == now, "time and date round-trip in local time")
 assert(os.time({ year = 2024, month = 13, day = 1 }) == os.time({ year = 2025, month = 1, day = 1 }), "fields carry over")
-assert(not try(os.date, "%Q"), "unknown format codes are errors")
+assert(not try(os.date, "%K"), "unknown format codes are errors")
 assert(not try(os.time, { year = 2024 }), "date tables need a month and day")
 
 -- os.run waits for a program and captures its output
