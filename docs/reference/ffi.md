@@ -13,11 +13,11 @@ ffi.free(ptr)
 
 ## ffi.open(path: string?, signatures: table): table
 
-Opens a shared library at `path` (or the current process when `path` is `nil` on Unix) and binds each named symbol in `signatures` (`{ args = { ... }, returns = "..." }`). Returns a frozen table of callable functions plus `:close()`.
+Opens a shared library at `path` (or the current process when `path` is `nil` on Unix) and binds each named symbol in `signatures` (`{ args = { ... }, returns = "..." }`). Returns a frozen table of callable functions plus `:close()`. Under an allow-listed `--allow-ffi`, `path` must be an existing file inside the allow-list and is loaded by its resolved absolute path; bare names such as `libc.so.6` and `nil` need unrestricted `--allow-ffi`.
 
 ## ffi.loadExtension(path: string): table
 
-Loads a Neyuki native extension (`cdylib` exporting `neyuki_extension_init`) and returns a frozen table of the functions it registered plus `:close()`.
+Loads a Neyuki native extension (`cdylib` exporting `neyuki_extension_init`) and returns a frozen table of the functions it registered plus `:close()`. Path rules under an allow-list are the same as for `ffi.open`.
 
 ### Extension ABI (`NeyukiExtValue`)
 
@@ -46,15 +46,15 @@ Bounds-checked read of a NUL-terminated C string from a live `ffi.alloc` allocat
 
 ## ffi.readUnsafe(ptr: int, type: string, offset: int?): any
 
-Unchecked variant of `ffi.read` that accepts raw foreign C pointers without `ffi.alloc` bounds checks. Requires non-denied `--allow-ffi`.
+Unchecked variant of `ffi.read` that accepts raw foreign C pointers without `ffi.alloc` bounds checks. Requires unrestricted `--allow-ffi` (an allow-list is refused, since a raw pointer can reach any process memory).
 
 ## ffi.writeUnsafe(ptr: int, type: string, value: any, offset: int?): void
 
-Unchecked variant of `ffi.write` that accepts raw foreign C pointers without `ffi.alloc` bounds checks. Requires non-denied `--allow-ffi`.
+Unchecked variant of `ffi.write` that accepts raw foreign C pointers without `ffi.alloc` bounds checks. Requires unrestricted `--allow-ffi` (an allow-list is refused, since a raw pointer can reach any process memory).
 
 ## ffi.readCStringUnsafe(ptr: int?, maxLen: int?): string?
 
-Unchecked variant of `ffi.readCString` that reads a NUL-terminated C string from a raw foreign pointer. Requires non-denied `--allow-ffi`.
+Unchecked variant of `ffi.readCString` that reads a NUL-terminated C string from a raw foreign pointer. Requires unrestricted `--allow-ffi` (an allow-list is refused, since a raw pointer can reach any process memory).
 
 ## ffi.sizeof(type: string): int
 

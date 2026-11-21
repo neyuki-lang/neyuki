@@ -72,6 +72,7 @@ function ffi.readCString(ptr: int?, maxLen: int?): string?
     return __ffi_read_cstring(ptr, maxLen)
 end
 
+-- The Unsafe variants take raw foreign pointers and need unrestricted --allow-ffi.
 function ffi.readUnsafe(ptr: int, ty: string, offset: int?): any
     if (type(ptr) != "number") then error("ptr must be a number") end
     if (type(ty) != "string") then error("type must be a string") end

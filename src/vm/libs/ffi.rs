@@ -288,8 +288,8 @@ fn next_lib_id() -> u64 {
     })
 }
 
-fn open_library(path: &str) -> Result<Library, String> {
-    if path.is_empty() {
+fn open_library(path: &std::path::Path) -> Result<Library, String> {
+    if path.as_os_str().is_empty() {
         #[cfg(unix)]
         {
             let lib: libloading::os::unix::Library = libloading::os::unix::Library::this();
@@ -303,7 +303,7 @@ fn open_library(path: &str) -> Result<Library, String> {
     // SAFETY: Caller has passed `--allow-ffi` (or runs unrestricted); loading a
     // shared library runs its platform initializers as requested by the user.
     unsafe { Library::new(path) }
-        .map_err(|err| format!("failed to load library '{}': {}", path, err))
+        .map_err(|err| format!("failed to load library '{}': {}", path.display(), err))
 }
 
 // ---------------------------------------------------------------------------
@@ -369,10 +369,10 @@ fn builtin_open(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
         }
     };
     let perm_target = if path.is_empty() { "<self>" } else { path };
-    vm.permissions.check_ffi(perm_target)?;
+    let resolved = vm.permissions.resolve_ffi_library(path)?;
 
     let sigs_tbl = table_arg(args, 1, "signatures")?;
-    let lib = open_library(path)?;
+    let lib = open_library(&resolved)?;
 
     let mut symbols = Vec::new();
     let mut sym_map = VmTable::new();
@@ -811,8 +811,8 @@ pub fn init_extension_with_fn(
 
 fn builtin_load_extension(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String> {
     let path = str_arg(args, 0, "path")?;
-    vm.permissions.check_ffi(path)?;
-    let lib = open_library(path)?;
+    let resolved = vm.permissions.resolve_ffi_library(path)?;
+    let lib = open_library(&resolved)?;
     let init_fn: NeyukiExtInitFn = unsafe {
         *lib.get::<NeyukiExtInitFn>(b"neyuki_extension_init\0")
             .map_err(|err| format!("missing 'neyuki_extension_init' in '{}': {}", path, err))?
@@ -1062,7 +1062,11 @@ unsafe fn read_typed_ptr(ptr: *const u8, ty: FfiType, checked_cstr: bool) -> Res
 }
 
 fn read_impl(vm: &mut VM, args: &[Value], checked: bool) -> Result<Vec<Value>, String> {
-    vm.permissions.check_ffi_memory()?;
+    if checked {
+        vm.permissions.check_ffi_memory()?;
+    } else {
+        vm.permissions.check_ffi_unsafe_memory()?;
+    }
     let addr = ptr_arg_usize(args, 0, "ptr")?;
     let ty_str = str_arg(args, 1, "type")?;
     let ty = FfiType::parse(ty_str)?;
@@ -1091,7 +1095,11 @@ fn builtin_read_unsafe(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String
 }
 
 fn write_impl(vm: &mut VM, args: &[Value], checked: bool) -> Result<Vec<Value>, String> {
-    vm.permissions.check_ffi_memory()?;
+    if checked {
+        vm.permissions.check_ffi_memory()?;
+    } else {
+        vm.permissions.check_ffi_unsafe_memory()?;
+    }
     let addr = ptr_arg_usize(args, 0, "ptr")?;
     let ty_str = str_arg(args, 1, "type")?;
     let ty = FfiType::parse(ty_str)?;
@@ -1209,7 +1217,11 @@ fn read_cstring_checked(addr: usize, max_len: usize) -> Result<String, String> {
 }
 
 fn read_cstring_impl(vm: &mut VM, args: &[Value], checked: bool) -> Result<Vec<Value>, String> {
-    vm.permissions.check_ffi_memory()?;
+    if checked {
+        vm.permissions.check_ffi_memory()?;
+    } else {
+        vm.permissions.check_ffi_unsafe_memory()?;
+    }
     let addr = match args.first() {
         None | Some(Value::Nil) => return Ok(vec![Value::Nil]),
         Some(Value::Int(0)) => return Ok(vec![Value::Nil]),
@@ -1505,5 +1517,69 @@ mod tests {
             .is_err()
         );
         assert!(builtin_read_cstring(&mut vm, &[ptr]).is_err());
+    }
+
+    fn allow_list_vm(entries: &[&str]) -> VM {
+        use crate::vm::permissions::{PermissionScope, Permissions};
+        let mut vm = VM::new();
+        vm.set_permissions(
+            Permissions::allow_all().with_ffi(PermissionScope::AllowList(
+                entries.iter().map(|s| s.to_string()).collect(),
+            )),
+        );
+        vm
+    }
+
+    fn empty_sigs() -> Value {
+        Value::Table(Rc::new(RefCell::new(VmTable::new())))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn allow_list_rejects_search_path_and_self_loading() {
+        let mut vm = allow_list_vm(&["."]);
+        // Resolves to ./libc.so.6 (inside "."), which does not exist; dlopen
+        // must not fall back to the system search path.
+        for name in ["libc.so.6", "libm.so.6", "libdl.so.2"] {
+            let err = builtin_open(&mut vm, &[Value::str(name), empty_sigs()]).err();
+            assert!(err.is_some(), "{name} must not load by search path");
+        }
+        let err = builtin_open(&mut vm, &[Value::Nil, empty_sigs()])
+            .err()
+            .unwrap();
+        assert!(err.contains("permission denied"), "{err}");
+        let err = builtin_load_extension(&mut vm, &[Value::str("libc.so.6")])
+            .err()
+            .unwrap();
+        assert!(err.contains("permission denied"), "{err}");
+    }
+
+    #[test]
+    fn allow_list_blocks_unchecked_memory_ops() {
+        let mut vm = allow_list_vm(&["/opt/lib/demo.so"]);
+        let target = Value::Int(0x1000);
+        assert!(
+            builtin_read_unsafe(&mut vm, &[target.clone(), Value::str("i32")])
+                .unwrap_err()
+                .contains("unrestricted")
+        );
+        assert!(
+            builtin_write_unsafe(&mut vm, &[target.clone(), Value::str("i32"), Value::Int(1)])
+                .unwrap_err()
+                .contains("unrestricted")
+        );
+        assert!(
+            builtin_read_cstring_unsafe(&mut vm, &[target])
+                .unwrap_err()
+                .contains("unrestricted")
+        );
+        // Checked operations on ffi.alloc memory keep working.
+        let ptr = builtin_alloc(&mut vm, &[Value::Int(8)]).unwrap()[0].clone();
+        builtin_write(&mut vm, &[ptr.clone(), Value::str("i32"), Value::Int(7)]).unwrap();
+        assert_eq!(
+            builtin_read(&mut vm, &[ptr.clone(), Value::str("i32")]).unwrap()[0].to_string(),
+            "7"
+        );
+        builtin_free(&mut vm, &[ptr]).unwrap();
     }
 }
