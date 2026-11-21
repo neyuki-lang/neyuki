@@ -142,6 +142,7 @@ impl ThirLowerer {
             HirStmtKind::Function {
                 name,
                 is_const,
+                is_global,
                 params,
                 return_type,
                 body,
@@ -158,7 +159,8 @@ impl ThirLowerer {
                     is_vararg: params.iter().any(|p| p.variadic),
                 };
                 // Bind name before lowering body so recursive calls see it.
-                let fn_binding = name.as_ref().map(|n| {
+                // A `global function` has no local binding: it is assigned to the global.
+                let fn_binding = name.as_ref().filter(|_| !*is_global).map(|n| {
                     if let Some((Some(existing), _)) = self
                         .ctx
                         .scopes
@@ -191,6 +193,7 @@ impl ThirLowerer {
                 ThirStmtKind::Function {
                     binding: fn_binding,
                     name: name.clone(),
+                    is_global: *is_global,
                     params: thir_params,
                     return_type: effective_ret,
                     captures,

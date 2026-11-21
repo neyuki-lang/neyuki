@@ -63,6 +63,7 @@ pub enum HirStmtKind {
     Function {
         name: Option<String>,
         is_const: bool,
+        is_global: bool,
         params: Vec<Param>,
         return_type: Option<String>,
         body: Vec<HirStmt>,

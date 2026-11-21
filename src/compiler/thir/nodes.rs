@@ -78,6 +78,7 @@ pub enum ThirStmtKind {
     Function {
         binding: Option<BindingId>,
         name: Option<String>,
+        is_global: bool,
         params: Vec<ThirParam>,
         return_type: NeyukiType,
         captures: Vec<BindingId>,

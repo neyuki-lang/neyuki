@@ -60,7 +60,7 @@ Commands:
   emit-llvm [-O0|-O1] <file> [out.ll]
                           Emit LLVM IR (.ll) from MIR
   build [project]         Build a standalone app executable
-  test                    Run every script in tests/
+  test [filter|path...]   Run .nyk test scripts (default: tests/)
   repl                    Start an interactive session
   pkg <command>           Manage packages
   dap                     Serve the Debug Adapter Protocol on stdio
@@ -434,7 +434,10 @@ fn run_cli() {
             serialized.len()
         );
     } else if action == "test" {
-        tests::run_all_tests();
+        if let Err(err) = tests::run_cli(&args[2..]) {
+            eprintln!("{}", err);
+            process::exit(1);
+        }
     } else if action == "fuzz" {
         if let Err(err) = fuzz::driver::run_cli(&args[2..]) {
             eprintln!("{}", err);

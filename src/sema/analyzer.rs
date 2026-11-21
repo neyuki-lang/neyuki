@@ -15,6 +15,56 @@ use crate::sema::symbol::{Symbol, SymbolKind};
 use crate::sema::type_env::required_params;
 use crate::sema::types::NeyukiType;
 
+/// Built-in globals recognized by semantic analysis without per-compile heap
+/// allocations. Must stay strictly sorted for `binary_search`.
+const BUILTIN_GLOBALS: &[&str] = &[
+    "_G",
+    "_VERSION",
+    "assert",
+    "assert_type",
+    "asserttype",
+    "bit",
+    "bit32",
+    "buffer",
+    "checktype",
+    "collectgarbage",
+    "coroutine",
+    "debug",
+    "error",
+    "false",
+    "float",
+    "getmetatable",
+    "int",
+    "ipairs",
+    "json",
+    "math",
+    "next",
+    "nil",
+    "os",
+    "pairs",
+    "pcall",
+    "print",
+    "rawequal",
+    "rawget",
+    "rawlen",
+    "rawset",
+    "require",
+    "select",
+    "setmetatable",
+    "string",
+    "table",
+    "task",
+    "tonumber",
+    "tostring",
+    "true",
+    "try",
+    "type",
+    "typeof",
+    "utf8",
+    "warn",
+    "xpcall",
+];
+
 pub struct SemanticAnalyzer<'a> {
     pub source: &'a str,
     pub scope_mgr: ScopeManager,
@@ -28,63 +78,11 @@ pub struct SemanticAnalyzer<'a> {
 
 impl<'a> SemanticAnalyzer<'a> {
     pub fn new(source: &'a str) -> Self {
-        let mut known_globals = HashSet::new();
-        let globals = [
-            "print",
-            "assert",
-            "require",
-            "type",
-            "typeof",
-            "checktype",
-            "asserttype",
-            "assert_type",
-            "tostring",
-            "tonumber",
-            "int",
-            "float",
-            "pcall",
-            "xpcall",
-            "try",
-            "error",
-            "pairs",
-            "ipairs",
-            "next",
-            "select",
-            "rawget",
-            "rawset",
-            "rawequal",
-            "rawlen",
-            "setmetatable",
-            "getmetatable",
-            "collectgarbage",
-            "math",
-            "string",
-            "table",
-            "bit",
-            "bit32",
-            "buffer",
-            "os",
-            "coroutine",
-            "task",
-            "utf8",
-            "debug",
-            "json",
-            "true",
-            "false",
-            "nil",
-            "_G",
-            "_VERSION",
-            "warn",
-        ];
-        for g in globals {
-            known_globals.insert(g.to_string());
-        }
-
         Self {
             source,
             scope_mgr: ScopeManager::new(),
             diagnostics: Vec::new(),
-            known_globals,
+            known_globals: HashSet::new(),
             undeclared: HashSet::new(),
             current_return_type: None,
             current_line: 1,
@@ -100,7 +98,9 @@ impl<'a> SemanticAnalyzer<'a> {
     }
 
     fn is_known_global(&self, name: &str) -> bool {
-        self.known_globals.contains(name) || name.starts_with("__")
+        BUILTIN_GLOBALS.binary_search(&name).is_ok()
+            || self.known_globals.contains(name)
+            || name.starts_with("__")
     }
 
     pub fn analyze_program(&mut self, statements: &[Stmt]) {
@@ -128,6 +128,7 @@ impl<'a> SemanticAnalyzer<'a> {
             if let Stmt::Function {
                 name: Some(fn_name),
                 is_const,
+                is_global,
                 params,
                 return_type,
                 body,
@@ -139,6 +140,7 @@ impl<'a> SemanticAnalyzer<'a> {
                     stmt,
                     fn_name,
                     *is_const,
+                    *is_global,
                     params,
                     return_type.as_deref(),
                     body,
@@ -165,11 +167,13 @@ impl<'a> SemanticAnalyzer<'a> {
     }
 
     #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
     fn hoist_function(
         &mut self,
         stmt: &Stmt,
         fn_name: &str,
         is_const: bool,
+        is_global: bool,
         params: &[Param],
         return_type: Option<&str>,
         body: &[Stmt],
@@ -188,7 +192,12 @@ impl<'a> SemanticAnalyzer<'a> {
         sym.num_params = Some(params.iter().filter(|p| !p.variadic).count());
         sym.min_params = Some(required_params(params, |t| self.parse_ty(t)));
         sym.is_vararg = params.iter().any(|p| p.variadic);
-        let _ = self.scope_mgr.define(sym);
+        if is_global {
+            let _ = self.scope_mgr.define_global(sym);
+            self.known_globals.insert(fn_name.to_string());
+        } else {
+            let _ = self.scope_mgr.define(sym);
+        }
     }
 
     fn analyze_stmt(&mut self, stmt: &Stmt) {
@@ -234,6 +243,7 @@ impl<'a> SemanticAnalyzer<'a> {
             Stmt::Function {
                 name,
                 is_const,
+                is_global,
                 params,
                 return_type,
                 body,
@@ -246,7 +256,9 @@ impl<'a> SemanticAnalyzer<'a> {
                     self.read_variable(object);
                 } else if let Some(fn_name) = name {
                     let span = self.find_ident_span(fn_name);
-                    self.check_shadowing(fn_name, span);
+                    if !*is_global {
+                        self.check_shadowing(fn_name, span);
+                    }
 
                     let fn_type = self.build_function_type(params, body, ret_ty.clone());
                     let mut sym = Symbol::new(
@@ -259,7 +271,12 @@ impl<'a> SemanticAnalyzer<'a> {
                     sym.num_params = Some(params.iter().filter(|p| !p.variadic).count());
                     sym.min_params = Some(required_params(params, |t| self.parse_ty(t)));
                     sym.is_vararg = params.iter().any(|p| p.variadic);
-                    let _ = self.scope_mgr.define(sym);
+                    if *is_global {
+                        let _ = self.scope_mgr.define_global(sym);
+                        self.known_globals.insert(fn_name.clone());
+                    } else {
+                        let _ = self.scope_mgr.define(sym);
+                    }
                 }
 
                 // Analyze function body with its own scope
@@ -758,5 +775,27 @@ impl<'a> SemanticAnalyzer<'a> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_builtin_globals_sorted_and_recognized() {
+        assert!(
+            BUILTIN_GLOBALS.windows(2).all(|w| w[0] < w[1]),
+            "BUILTIN_GLOBALS must be strictly sorted for binary_search"
+        );
+        let analyzer = SemanticAnalyzer::new("");
+        for &name in BUILTIN_GLOBALS {
+            assert!(
+                analyzer.is_known_global(name),
+                "expected builtin global '{name}' to be recognized"
+            );
+        }
+        assert!(analyzer.is_known_global("__custom_internal"));
+        assert!(!analyzer.is_known_global("definitely_not_a_global"));
     }
 }

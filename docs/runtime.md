@@ -8,7 +8,7 @@ neyuki run <file> [args...]       run a .nyk script or .nykb bytecode file
 neyuki lint [--json] [--stdin] <file>
 neyuki compile <file> [out]       compile to bytecode (default: <file>b)
 neyuki repl                       interactive session
-neyuki test                       run every .nyk file in tests/
+neyuki test [filter|path...]      run .nyk test scripts (default: tests/)
 neyuki build [project]            build a standalone app executable
 neyuki pkg <command>              manage the project manifest and packages
 neyuki dap                        Debug Adapter Protocol server on stdio
@@ -19,6 +19,8 @@ neyuki help | --version
 ```
 
 Arguments after the script path reach the script through `os.args()`. A script that fails prints the error with a stack trace and exits with status 1; `os.exit(code)` chooses the status explicitly. When the main chunk returns while tasks from the [`task` library](reference/task.md) are still waiting, the script keeps running until none is left; if any task raised an error, it then exits with status 1. The REPL keeps running tasks while it waits for input, and leaves the ones still waiting when its input ends. A task that runs `ui.run` or polls with `ui.poll(timeout)` counts as waiting until its windows are closed, so the script stays alive for it, and the window is served whenever the main program calls `task.wait` or has finished (a main program that computes without waiting freezes the window; see [`task`](reference/task.md#windows-in-a-task)).
+
+`neyuki test` runs every `.nyk` file directly in `tests/` (subdirectories are not scanned). Arguments select a subset: an argument containing a path separator (such as `tests/json.nyk` or `./suite`) or naming a directory or `.nyk` file runs that target, while a bare name is matched as a case-sensitive substring against file names in `tests/`.
 
 ### Checking without running
 
@@ -49,6 +51,10 @@ The bytecode format changes between Neyuki versions. A `.nykb` written by anothe
 ### Debugging
 
 `neyuki dap` speaks the Debug Adapter Protocol on standard input and output, which the VS Code extension uses for breakpoints, stepping, the call stack and variables. Scripts can also inspect themselves with the [debug library](reference/debug.md) and time functions with [@neyuki/profile](reference/profile.md).
+
+### Tests
+
+A test file counts as failed when it raises an error. A file written with [@neyuki/test](reference/test.md) declares its tests with `describe` and `it`; they run once the main chunk returns, print a line each and a summary line, and raise an error when one fails. Snapshots are kept in a `__snapshots__/` folder next to each test file; set `NEYUKI_UPDATE_SNAPSHOTS=1` to replace the ones that changed.
 
 ### Editor support
 

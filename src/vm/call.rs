@@ -16,8 +16,13 @@ impl VM {
     /// Runs a module's top-level code and returns its value, leaving the
     /// frames and registers of whatever called `require` untouched.
     pub fn execute_module(&mut self, proto: Proto) -> Result<Value, String> {
+        self.execute_module_rc(Rc::new(proto))
+    }
+
+    /// Like `execute_module`, sharing an already-compiled `Rc<Proto>`.
+    pub fn execute_module_rc(&mut self, proto: Rc<Proto>) -> Result<Value, String> {
         let closure = Rc::new(VmClosure {
-            proto: Rc::new(proto),
+            proto,
             upvalues: Vec::new(),
         });
         let depth = self.frames.len();

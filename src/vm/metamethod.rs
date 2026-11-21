@@ -105,11 +105,11 @@ impl VM {
                 }
             }
             Value::String(k) => {
-                if let Some(slot) = tbl.fields.get_mut_by_strref(k) {
-                    *slot = val.clone();
+                if tbl.metatable.is_none() {
+                    tbl.fields.set_by_strref(k, val);
                     true
-                } else if tbl.metatable.is_none() {
-                    tbl.fields.insert(k.clone(), val.clone());
+                } else if let Some(slot) = tbl.fields.get_mut_by_strref(k) {
+                    *slot = val.clone();
                     true
                 } else {
                     false

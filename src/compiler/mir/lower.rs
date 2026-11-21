@@ -1120,12 +1120,13 @@ impl<'a> MirBuilder<'a> {
             ThirStmtKind::Function {
                 binding,
                 name,
+                is_global,
                 params,
                 return_type,
                 body,
                 ..
             } => {
-                let local_var = name.as_ref().map(|func_name| {
+                let local_var = name.as_ref().filter(|_| !*is_global).map(|func_name| {
                     if let Some(lv) = self.resolve_local(func_name) {
                         lv
                     } else {

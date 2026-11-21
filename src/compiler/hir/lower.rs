@@ -124,6 +124,7 @@ impl<'a> HirLowerer<'a> {
             Stmt::Function {
                 name,
                 is_const,
+                is_global,
                 params,
                 return_type,
                 body,
@@ -167,6 +168,7 @@ impl<'a> HirLowerer<'a> {
                     HirStmtKind::Function {
                         name: name.clone(),
                         is_const: *is_const,
+                        is_global: *is_global,
                         params: params.clone(),
                         return_type: return_type.clone(),
                         body: self.lower_block(body),

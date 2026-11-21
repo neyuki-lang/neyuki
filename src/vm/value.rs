@@ -162,6 +162,7 @@ pub enum Value {
     Buffer(Rc<RefCell<VmBuffer>>),
 }
 
+#[derive(Clone)]
 pub struct VmTable {
     pub array: Vec<Value>,
     pub fields: crate::vm::table::FieldMap,
@@ -411,6 +412,15 @@ impl Value {
     /// Builds an integer value from `i128`, storing it inline when it fits an `i64`.
     #[inline]
     pub fn from_i128(i: i128) -> Value {
+        if let Ok(small) = i64::try_from(i) {
+            Value::Int(small)
+        } else {
+            Value::BigInt(Rc::new(BigInt::from(i)))
+        }
+    }
+
+    #[inline]
+    pub fn from_u128(i: u128) -> Value {
         if let Ok(small) = i64::try_from(i) {
             Value::Int(small)
         } else {

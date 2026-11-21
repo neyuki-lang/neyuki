@@ -1,6 +1,6 @@
-# Neyuki Bytecode Version 4 Specification
+# Neyuki Bytecode Specification (Format 7)
 
-This document specifies the binary format, encoding scheme, constant pool structure, prototype hierarchy, and instruction set for Neyuki Bytecode Version 4 (`BYTECODE_VERSION = 4`).
+This document specifies the binary format, encoding scheme, constant pool structure, prototype hierarchy, and instruction set for Neyuki Bytecode Format 8 (`BYTECODE_VERSION = 8`, with loader backward compatibility for formats 6 and 7 via `MIN_SUPPORTED_BYTECODE_VERSION = 6`).
 
 ## 1. File Structure and Header
 
@@ -9,14 +9,14 @@ A compiled `.nykb` binary file begins with a 12-byte header:
 ```text
 +-----------------------+---------+------------------------+-------------------+
 | Magic Bytes (7 bytes) | Ver (1) | CRC-32 Checksum (4 LE) | Serialized Protos |
-| 'n' 'e' 'y' 'u' 'k'   |  0x04   | Little-Endian u32      | (Variable length) |
+| 'n' 'e' 'y' 'u' 'k'   |  0x07   | Little-Endian u32      | (Variable length) |
 | 'i' '!'               |         |                        |                   |
 +-----------------------+---------+------------------------+-------------------+
 0                       7         8                        12
 ```
 
 - **Magic**: `b"neyuki!"` (ASCII `0x6E 0x65 0x79 0x75 0x6B 0x69 0x21`).
-- **Version**: Single byte `0x04`. Bytecode loaders reject any file with a differing version byte.
+- **Version**: Single byte `0x07` (`0x06` is also accepted by the deserializer for format 6 `.nykb` files; any version outside `6..=7` is rejected).
 - **Checksum**: 32-bit unsigned integer (Little-Endian) computed using standard IEEE 802.3 CRC-32 (`0xEDB88320`) polynomial over all serialized proto payload bytes following the header.
 
 ---
@@ -166,13 +166,32 @@ All instructions are serialized as a 1-byte opcode tag followed by operand field
 | `0x33` | `Closure` | `dst: u8, proto_idx: u16` | Create closure from child prototype `proto_idx` |
 | `0x34` | `Vararg` | `dst: u8, count: u8` | Copy `count` vararg values into `R(dst)..` |
 
+### 4.7 Immediate Integer Instructions (Format 7+)
+Constant-operand ops `AddK`/`SubK`/`MulK` (tags `66..=68`, `dst, a, k:u16`) and `EqK`/`NeK`/`LtK`/`LeK`/`GtK`/`GeK` (tags `69..=74`, `a, k:u16, jump_if_false:i16`) were added in `BYTECODE_VERSION = 8`; `k` indexes the constant pool.
+
+Added in `BYTECODE_VERSION = 7` (wire tags `55..=65` / `0x37..=0x41`; format 6 files continue to load without these tags). All immediate operands preserve full dynamic/metamethod semantics by falling back to `Value::Int(imm)` for non-primitive or table operands.
+
+| Wire Tag | Mnemonic | Operands | Operational Semantics |
+|:---|:---|:---|:---|
+| `55` (`0x37`) | `AddI` | `dst: u8, a: u8, imm: i16` | `R(dst) = R(a) + imm` |
+| `56` (`0x38`) | `SubI` | `dst: u8, a: u8, imm: i16` | `R(dst) = R(a) - imm` |
+| `57` (`0x39`) | `MulI` | `dst: u8, a: u8, imm: i16` | `R(dst) = R(a) * imm` |
+| `58` (`0x3A`) | `ShlI` | `dst: u8, a: u8, imm: u8` | `R(dst) = R(a) << imm` (`imm <= 63`) |
+| `59` (`0x3B`) | `ShrI` | `dst: u8, a: u8, imm: u8` | `R(dst) = R(a) >> imm` (`imm <= 63`) |
+| `60` (`0x3C`) | `EqI` | `a: u8, imm: i16, jump: i16` | If `R(a) != imm` jump `ip += jump` |
+| `61` (`0x3D`) | `NeI` | `a: u8, imm: i16, jump: i16` | If `R(a) == imm` jump `ip += jump` |
+| `62` (`0x3E`) | `LtI` | `a: u8, imm: i16, jump: i16` | If `!(R(a) < imm)` jump `ip += jump` |
+| `63` (`0x3F`) | `LeI` | `a: u8, imm: i16, jump: i16` | If `!(R(a) <= imm)` jump `ip += jump` |
+| `64` (`0x40`) | `GtI` | `a: u8, imm: i16, jump: i16` | If `!(R(a) > imm)` jump `ip += jump` |
+| `65` (`0x41`) | `GeI` | `a: u8, imm: i16, jump: i16` | If `!(R(a) >= imm)` jump `ip += jump` |
+
 ---
 
 ## 5. Bytecode Verification
 
 Before execution, prototypes undergo linear verification (`verify_proto`):
 1. **Register Bounds**: Every register operand must be strictly less than `max_registers`.
-2. **Jump Offsets**: All jump instructions (`Jump`, `Test`, `Eq`...`Ge`, `ForPrep`, `ForLoop`, `TForLoop`) must resolve within the instruction boundaries of the enclosing prototype.
+2. **Jump Offsets**: All jump instructions (`Jump`, `Test`, `Eq`...`Ge`, `EqI`...`GeI`, `ForPrep`, `ForLoop`, `TForLoop`) must resolve within the instruction boundaries of the enclosing prototype.
 3. **Constant Indexes**: Every `k`, `name_k`, `key_k`, and `mod_k` must be strictly less than the length of `constants`.
 4. **Child Prototype References**: Every `Closure` instruction must reference a valid child prototype in `protos`.
 5. **Upvalue Indexes**: Every upvalue descriptor must point to a valid register in the parent or upvalue in the parent's upvalues array.

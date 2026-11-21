@@ -114,6 +114,7 @@ fn write_stmt(out: &mut String, stmt: &ThirStmt, depth: usize) {
         ThirStmtKind::Function {
             binding,
             name,
+            is_global: _,
             params,
             return_type,
             captures,

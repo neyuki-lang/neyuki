@@ -1,6 +1,6 @@
 //! Local peephole cleanups and trivial SSA Phi simplification on CFG.
 
-use std::collections::HashSet;
+use crate::vm::hash::FxHashSet as HashSet;
 
 use crate::compiler::ir::block::ControlFlowGraph;
 use crate::compiler::ir::inst::IrInst;
