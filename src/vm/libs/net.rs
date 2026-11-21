@@ -1941,7 +1941,7 @@ pub(crate) fn os_spawn(vm: &mut VM, args: &[Value]) -> Result<Vec<Value>, String
                 }
             }
             let (program, rest) = parts.split_first().ok_or("command must not be empty")?;
-            vm.permissions.check_run(program)?;
+            let program = vm.permissions.resolve_run_program(program)?;
             let mut command = Command::new(program);
             command.args(rest);
             command

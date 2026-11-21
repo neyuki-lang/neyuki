@@ -152,6 +152,33 @@ impl Permissions {
             })
     }
 
+    /// Checks that `program` may run and returns exactly what must be handed to
+    /// `Command::new`.
+    ///
+    /// Under `AllowAll` the string is returned unchanged (the child resolves it as
+    /// usual). Under an allow-list the program is resolved to an absolute path
+    /// *here*: a bare name is searched on the parent process `PATH` (honouring
+    /// `PATHEXT` on Windows) and a path spec is made absolute against the current
+    /// directory. Spawning that path means a `PATH` or `cwd` set for the child
+    /// cannot redirect the name that was checked to a different binary.
+    pub fn resolve_run_program(&self, program: &str) -> Result<PathBuf, String> {
+        self.check_run(program)?;
+        if !matches!(self.run, PermissionScope::AllowList(_)) {
+            return Ok(PathBuf::from(program));
+        }
+        let cwd = std::env::current_dir()
+            .map_err(|e| format!("cannot determine current directory: {}", e))?;
+        if is_path_spec(program) {
+            return Ok(cwd.join(program));
+        }
+        find_on_path(program, &cwd).ok_or_else(|| {
+            format!(
+                "program '{}' not found in PATH of the parent process",
+                program
+            )
+        })
+    }
+
     /// Checks whether connecting to a Unix domain socket at `path` is permitted.
     pub fn check_net_unix(&self, path: &str) -> Result<(), String> {
         check_unix_socket_scope(&self.net, path)
@@ -203,6 +230,37 @@ impl Permissions {
             })
     }
 
+    /// Checks that library or extension `path` may be loaded and returns exactly
+    /// what must be handed to the dynamic loader.
+    ///
+    /// Under `AllowAll` the string is returned unchanged (search-path loading and
+    /// the empty path, i.e. the host process itself, keep working). Under an
+    /// allow-list the empty path is refused (it exposes the whole process,
+    /// libc included), and the path is resolved here: it must name an existing
+    /// file inside the allow-list, and the resolved absolute path is returned so
+    /// `dlopen` cannot fall back to its own search path.
+    pub fn resolve_ffi_library(&self, path: &str) -> Result<PathBuf, String> {
+        match &self.ffi {
+            PermissionScope::AllowAll => Ok(PathBuf::from(path)),
+            PermissionScope::DenyAll => self.check_ffi(path).map(|_| PathBuf::new()),
+            PermissionScope::AllowList(_) => {
+                if path.is_empty() {
+                    return Err("permission denied: loading the host process itself (ffi.open(nil)) requires unrestricted --allow-ffi".to_string());
+                }
+                self.check_ffi(path)?;
+                let resolved = resolve_path(path);
+                if !resolved.is_file() {
+                    return Err(format!(
+                        "permission denied: FFI library '{}' is not an existing file; under a restricted --allow-ffi libraries must be given as a path to a file inside the allow-list (no search-path loading)",
+                        path
+                    ));
+                }
+                self.check_ffi(&resolved.to_string_lossy())?;
+                Ok(resolved)
+            }
+        }
+    }
+
     /// Checks whether in-process FFI memory helpers (`ffi.alloc`, `free`, `read`, `write`)
     /// are permitted. Any non-`DenyAll` FFI policy (`AllowAll` or an explicit library
     /// allow-list) permits these memory operations.
@@ -214,6 +272,66 @@ impl Permissions {
             }
         }
     }
+
+    /// Checks whether dereferencing raw foreign pointers (`ffi.readUnsafe`,
+    /// `ffi.writeUnsafe`, `ffi.readCStringUnsafe`) is permitted. These can touch
+    /// any address in the process (including the permission set itself), so they
+    /// require unrestricted `--allow-ffi`; an allow-list is not enough.
+    pub fn check_ffi_unsafe_memory(&self) -> Result<(), String> {
+        match &self.ffi {
+            PermissionScope::AllowAll => Ok(()),
+            PermissionScope::AllowList(_) => Err("permission denied: unchecked FFI memory access (readUnsafe, writeUnsafe, readCStringUnsafe) requires unrestricted --allow-ffi".to_string()),
+            PermissionScope::DenyAll => {
+                Err("permission denied: FFI memory operations, run with --allow-ffi".to_string())
+            }
+        }
+    }
+}
+
+fn is_executable_file(p: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(p) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+/// Searches the parent process `PATH` for `name`, returning an absolute path.
+fn find_on_path(name: &str, cwd: &Path) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    let mut names = vec![name.to_string()];
+    if cfg!(windows) {
+        let exts = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+        for ext in exts.split(';').filter(|e| !e.is_empty()) {
+            names.push(format!("{}{}", name, ext));
+        }
+    }
+    for dir in std::env::split_paths(&path) {
+        let dir = if dir.as_os_str().is_empty() {
+            cwd.to_path_buf()
+        } else if dir.is_absolute() {
+            dir
+        } else {
+            cwd.join(dir)
+        };
+        for n in &names {
+            let candidate = dir.join(n);
+            if is_executable_file(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 
 /// Normalizes a path lexically against `current_dir` without touching the filesystem.
@@ -557,5 +675,49 @@ mod tests {
         ]));
         assert!(net_perms.check_net_unix("/tmp/allowed.sock").is_ok());
         assert!(net_perms.check_net_unix("/tmp/other.sock").is_err());
+    }
+
+    #[test]
+    fn test_ffi_unsafe_memory_and_library_resolution() {
+        let list = Permissions::deny_all()
+            .with_ffi(PermissionScope::AllowList(vec!["/opt/lib/demo.so".into()]));
+        assert!(list.check_ffi_unsafe_memory().is_err());
+        assert!(list.check_ffi_memory().is_ok());
+        assert!(Permissions::allow_all().check_ffi_unsafe_memory().is_ok());
+        assert!(Permissions::deny_all().check_ffi_unsafe_memory().is_err());
+
+        let cwd = Permissions::deny_all().with_ffi(PermissionScope::AllowList(vec![".".into()]));
+        assert!(cwd.resolve_ffi_library("").is_err());
+        assert!(cwd.resolve_ffi_library("libc.so.6").is_err());
+        assert!(cwd.resolve_ffi_library("Cargo.toml").unwrap().is_absolute());
+        let all = Permissions::allow_all();
+        assert_eq!(
+            all.resolve_ffi_library("libc.so.6").unwrap(),
+            PathBuf::from("libc.so.6")
+        );
+        assert_eq!(all.resolve_ffi_library("").unwrap(), PathBuf::new());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_run_program() {
+        let perms = Permissions::deny_all().with_run(PermissionScope::AllowList(vec![
+            "sh".into(),
+            "./tools/x".into(),
+        ]));
+        let sh = perms.resolve_run_program("sh").unwrap();
+        assert!(sh.is_absolute() && sh.ends_with("sh"));
+        assert!(perms.resolve_run_program("ls").is_err());
+        assert!(
+            perms
+                .resolve_run_program("./tools/x")
+                .unwrap()
+                .is_absolute()
+        );
+        let all = Permissions::allow_all();
+        assert_eq!(
+            all.resolve_run_program("git").unwrap(),
+            PathBuf::from("git")
+        );
     }
 }
