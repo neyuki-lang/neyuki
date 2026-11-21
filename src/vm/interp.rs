@@ -971,7 +971,7 @@ impl VM {
                         if let Some(ic) = current_closure.proto.table_cache_get(cur_ip)
                             && ic.table_ptr == ptr
                             && ic.shape_version == shape
-                            && let Some(v) = tbl.fields.get_slot(ic.slot_idx)
+                            && let Some(v) = tbl.fields.get_slot_keyed(ic.slot_idx, s)
                         {
                             let val = match v {
                                 Value::Int(n) => Value::Int(*n),
@@ -1135,7 +1135,7 @@ impl VM {
                             if let Some(ic) = current_closure.proto.table_cache_get(cur_ip)
                                 && ic.table_ptr == ptr
                                 && ic.shape_version == shape
-                                && tbl.fields.set_slot(ic.slot_idx, v.clone())
+                                && tbl.fields.set_slot_keyed(ic.slot_idx, s, v.clone())
                             {
                                 continue;
                             }

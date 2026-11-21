@@ -629,6 +629,35 @@ impl FieldMap {
         }
     }
 
+    /// `get_slot`, but only if the slot still holds `key`. Inline caches key on
+    /// the table address and `shape_version`, and both can repeat (a freed
+    /// table's address is reused by a new table whose version also starts at 0),
+    /// so a cache hit must confirm the key before trusting the slot.
+    #[inline(always)]
+    pub fn get_slot_keyed(&self, idx: usize, key: &StrRef) -> Option<&Value> {
+        let entry = match &self.inner {
+            FieldStorage::Small(entries) => entries.get(idx),
+            FieldStorage::Hash(map) => map.entries.get(idx).and_then(|opt| opt.as_ref()),
+        }?;
+        entry_matches_strref(entry, key.0.hash, key).then_some(&entry.val)
+    }
+
+    /// `set_slot`, but only if the slot still holds `key` (see `get_slot_keyed`).
+    #[inline(always)]
+    pub fn set_slot_keyed(&mut self, idx: usize, key: &StrRef, val: Value) -> bool {
+        let entry = match &mut self.inner {
+            FieldStorage::Small(entries) => entries.get_mut(idx),
+            FieldStorage::Hash(map) => map.entries.get_mut(idx).and_then(|opt| opt.as_mut()),
+        };
+        match entry {
+            Some(e) if entry_matches_strref(e, key.0.hash, key) => {
+                e.val = val;
+                true
+            }
+            _ => false,
+        }
+    }
+
     #[inline(always)]
     pub fn set_slot(&mut self, idx: usize, val: Value) -> bool {
         let slot = match &mut self.inner {
@@ -910,6 +939,26 @@ impl FieldMap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keyed_slot_access_rejects_a_different_key_at_the_same_shape() {
+        // Two tables with the same shape_version but different key layouts, as
+        // when a freed table's address is reused: a cached slot index from one
+        // must not read or write the other's field.
+        let (a, b) = (StrRef::from("a"), StrRef::from("b"));
+        let mut first = FieldMap::new();
+        first.insert(a.clone(), Value::Int(1));
+        first.insert(b.clone(), Value::Int(2));
+        let mut second = FieldMap::new();
+        second.insert(b.clone(), Value::Int(20));
+        second.insert(a.clone(), Value::Int(10));
+        assert_eq!(first.shape_version(), second.shape_version());
+        let idx = first.find_index_by_strref(&a).unwrap();
+        assert!(matches!(first.get_slot_keyed(idx, &a), Some(Value::Int(1))));
+        assert!(second.get_slot_keyed(idx, &a).is_none());
+        assert!(!second.set_slot_keyed(idx, &a, Value::Int(99)));
+        assert!(matches!(second.get_slot(idx), Some(Value::Int(20))));
+    }
 
     #[test]
     fn test_table_key_conversions() {
