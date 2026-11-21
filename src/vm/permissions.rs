@@ -169,7 +169,8 @@ impl Permissions {
         let cwd = std::env::current_dir()
             .map_err(|e| format!("cannot determine current directory: {}", e))?;
         if is_path_spec(program) {
-            return Ok(cwd.join(program));
+            // The same resolution `check_run` compared against the allow-list.
+            return Ok(resolve_path(program));
         }
         find_on_path(program, &cwd).ok_or_else(|| {
             format!(
