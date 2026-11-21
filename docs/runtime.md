@@ -54,7 +54,7 @@ The bytecode format changes between Neyuki versions. A `.nykb` written by anothe
 
 ### Tests
 
-`neyuki test` runs every `.nyk` file in `tests/`, each in a fresh VM, and fails if any of them raises an error. A file written with [@neyuki/test](reference/test.md) declares its tests with `describe` and `it`; they run once the main chunk returns, print a line each and a summary line, and raise an error when one fails. Snapshots are kept in `tests/__snapshots__/`; set `NEYUKI_UPDATE_SNAPSHOTS=1` to replace the ones that changed.
+A test file counts as failed when it raises an error. A file written with [@neyuki/test](reference/test.md) declares its tests with `describe` and `it`; they run once the main chunk returns, print a line each and a summary line, and raise an error when one fails. Snapshots are kept in a `__snapshots__/` folder next to each test file; set `NEYUKI_UPDATE_SNAPSHOTS=1` to replace the ones that changed.
 
 ### Editor support
 
