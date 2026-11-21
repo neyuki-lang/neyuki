@@ -31,6 +31,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::c_void;
+use std::ptr::NonNull;
 use std::rc::Rc;
 
 use libloading::Library;
@@ -403,8 +404,13 @@ impl ExtState {
         }
     }
 
-    fn vm(&self) -> *mut VM {
-        self.frames.last().map_or(std::ptr::null_mut(), |f| f.vm)
+    /// The VM of the innermost active extension call. Never null: a frame
+    /// is only pushed from a live `&mut VM` (`FrameGuard::push`).
+    fn vm(&self) -> Result<NonNull<VM>, String> {
+        self.frames
+            .last()
+            .and_then(|f| NonNull::new(f.vm))
+            .ok_or_else(|| "Neyuki host API called outside an extension call".to_string())
     }
 }
 
@@ -584,7 +590,7 @@ unsafe extern "C" fn api_call(
             .iter()
             .map(|a| s.import(a))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok((s.vm(), f, args))
+        Ok((s.vm()?, f, args))
     });
     let (vm, f, args) = match prepared {
         Ok(p) => p,
@@ -593,7 +599,7 @@ unsafe extern "C" fn api_call(
     // SAFETY: `vm` is the VM of the innermost active extension call, set
     // from its `&mut VM` by `FrameGuard::push`; that caller does not touch
     // the VM until the extension function returns.
-    let result = unsafe { (*vm).call_function(f, &args) };
+    let result = unsafe { (*vm.as_ptr()).call_function(f, &args) };
     api_value(move |s| {
         let mut results = result?;
         match results.len() {
@@ -700,7 +706,8 @@ unsafe extern "C" fn api_check_permission(
     api_value(|s| {
         let target = unsafe { lossy(target, target_len) };
         // SAFETY: as in `api_call`; only shared access is needed.
-        let perms = &unsafe { &*s.vm() }.permissions;
+        let vm = s.vm()?;
+        let perms = &unsafe { vm.as_ref() }.permissions;
         match kind {
             EXT_PERM_READ => perms.check_read(&target),
             EXT_PERM_WRITE => perms.check_write(&target),
