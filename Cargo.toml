@@ -198,7 +198,7 @@ mimalloc = { version = "0.1", default-features = false, optional = true }
 [dev-dependencies]
 # The extension SDK, loaded in-process by src/vm/libs/ffi/sdk_tests.rs to
 # check it against the host side of the ABI.
-neyuki-ext = { path = "crates/neyuki-ext" }
+neyuki-ext = { version = "0.1", path = "crates/neyuki-ext" }
 
 [target.'cfg(windows)'.dependencies]
 schannel = ">=0.1.23, <0.1.28"
