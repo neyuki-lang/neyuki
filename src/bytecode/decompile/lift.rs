@@ -1087,13 +1087,26 @@ impl Lifter<'_> {
         if let Some(source) = self.copied_call(&vars)? {
             return Ok(source);
         }
-        let is_nil = |l: &Self, v: VarId| {
-            l.index_of(v).is_some_and(|i| {
+        // The state and control slots must hold nil: a pending nil, or a
+        // variable whose only value is a `LoadNil` and that only the loop
+        // reads.
+        let is_nil = |l: &Self, v: VarId| match l.index_of(v) {
+            Some(i) => {
                 l.pending[i].expr == Expr::Nil && matches!(l.pending[i].kind, Kind::Value(_))
-            })
+            }
+            None => {
+                let var = &l.cx.vars.list[v];
+                var.uses == [tpc]
+                    && matches!(var.defs.as_slice(), [d] if matches!(l.cx.proto.instructions[*d], Instruction::LoadNil { .. }))
+            }
         };
-        if !is_nil(self, vars[1]) || !is_nil(self, vars[2]) {
-            return Err(SHAPE.to_string());
+        for (slot, &v) in ["state", "control"].iter().zip(&vars[1..]) {
+            if !is_nil(self, v) {
+                return Err(format!(
+                    "a generic for loop's {} value is not nil, so the loop has no single source expression",
+                    slot
+                ));
+            }
         }
         for &v in &vars[1..] {
             if let Some(i) = self.index_of(v) {
