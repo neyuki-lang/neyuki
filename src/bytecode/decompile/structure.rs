@@ -20,6 +20,9 @@ use crate::bytecode::instruction::Instruction;
 struct Frame {
     header: usize,
     follow: Option<usize>,
+    /// Where `follow` jumps on at once, when it is nothing but a jump: a
+    /// jump there from the loop is a `break` too.
+    through: Option<usize>,
     /// How many stops were active when the loop began; those belong to
     /// the code around the loop.
     stops: usize,
@@ -61,7 +64,7 @@ impl Walker<'_> {
                     out.push(Stmt::Continue);
                     return Ok(());
                 }
-                if frame.follow == Some(b) {
+                if frame.follow == Some(b) || frame.through == Some(b) {
                     out.push(Stmt::Break);
                     return Ok(());
                 }
@@ -197,9 +200,23 @@ impl Walker<'_> {
     }
 
     fn enter(&mut self, header: usize, follow: Option<usize>) {
+        let flow = &self.cx.flow;
+        let through = follow.and_then(|f| {
+            let block = &flow.blocks[f];
+            let only_jump = block.end == block.start + 1
+                && matches!(
+                    self.cx.proto.instructions[block.start],
+                    Instruction::Jump { .. }
+                );
+            match block.exit {
+                Exit::Goto(to) if only_jump && to != header => Some(to),
+                _ => None,
+            }
+        });
         self.loops.push(Frame {
             header,
             follow,
+            through,
             stops: self.stops.len(),
         });
     }
