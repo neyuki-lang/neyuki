@@ -10,7 +10,7 @@
 //! the stores that fill a new table.
 
 use super::FnCx;
-use super::ast::{BinOp, Expr, Item, Stmt, Target, UnOp};
+use super::ast::{BinOp, Body, Expr, Func, Item, Stmt, Target, UnOp};
 use super::flow::Reg;
 use super::is_name;
 use super::vars::VarId;
@@ -1112,13 +1112,27 @@ impl Lifter<'_> {
                     && matches!(var.defs.as_slice(), [d] if matches!(l.cx.proto.instructions[*d], Instruction::LoadNil { .. }))
             }
         };
-        for (slot, &v) in ["state", "control"].iter().zip(&vars[1..]) {
-            if !is_nil(self, v) {
-                return Err(format!(
-                    "a generic for loop's {} value is not nil, so the loop has no single source expression",
-                    slot
-                ));
-            }
+        if !vars[1..].iter().all(|&v| is_nil(self, v)) {
+            // `for` takes one expression, so the three values the loop
+            // starts from go through a call that returns them unchanged:
+            // `(function(...) return ... end)(f, s, c)`.
+            let srcs: Vec<Src> = (0..3)
+                .map(|i| base.checked_add(i).map(Src::Reg).ok_or(SHAPE))
+                .collect::<Result<_, _>>()?;
+            let args = self
+                .take(tpc, &srcs, Rules::default())?
+                .into_iter()
+                .map(|(e, _)| e)
+                .collect();
+            self.flush_all()?;
+            let pass = Func {
+                params: Vec::new(),
+                vararg: true,
+                body: Body::Code(vec![Stmt::Return(vec![Expr::Vararg])]),
+                names: Vec::new(),
+                captures: Vec::new(),
+            };
+            return Ok(Expr::Call(Box::new(Expr::Function(Box::new(pass))), args));
         }
         for &v in &vars[1..] {
             if let Some(i) = self.index_of(v) {

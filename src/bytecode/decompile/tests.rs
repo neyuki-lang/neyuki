@@ -216,6 +216,40 @@ return `{greeting} {#quoted} {bits} {-(-3)} {2 ^ 10} {7 // 2} {1.5}`
     );
 }
 
+#[test]
+fn test_generic_for_sources() {
+    roundtrip(
+        r##"
+local sum = 0
+for v in { 1, 2, 3, extra = 4 } do
+    sum += v
+end
+local fields = { a = 1, b = 2 }
+local keys = 0
+for k in fields do
+    keys += 1
+end
+local function step(state, i)
+    i = i + 1
+    if i > #state then return nil end
+    return i, state[i]
+end
+local function each(t)
+    return step, t, 0
+end
+local seen = {}
+for i, v in each({ "p", "q" }) do
+    seen[i] = v
+end
+local ip = {}
+for i, v in ipairs({ "a", "b", nil, "d" }) do
+    ip[i] = v
+end
+return `{sum} {keys} {table.concat(seen, ",")} {#ip}`
+"##,
+    );
+}
+
 /// The repository's own self-checking tests still pass after a round trip
 /// through the decompiler.
 #[test]
