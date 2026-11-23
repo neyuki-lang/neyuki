@@ -517,11 +517,23 @@ impl Lifter<'_> {
         for &v in &vars {
             self.flush_for_write(v)?;
         }
+        // The source of the generic for this block feeds: its three results
+        // go to the loop's registers, directly or through one copy each.
+        let code = &self.cx.proto.instructions;
+        let feeds = |tpc: usize, i: usize, var: &super::vars::Var| match var.uses.as_slice() {
+            [u] if *u == tpc => true,
+            [u] => {
+                let block = self.cx.flow.block_of[pc];
+                matches!((code[*u], code[tpc]), (Instruction::Move { dst, .. }, Instruction::TForCall { base, .. })
+                    if usize::from(dst) == usize::from(base) + i && *u > pc && self.cx.flow.block_of[*u] == block)
+            }
+            _ => false,
+        };
         if let Some(tpc) = self.tfor
             && n == 3
-            && vars.iter().all(|&v| {
+            && vars.iter().enumerate().all(|(i, &v)| {
                 let var = &self.cx.vars.list[v];
-                var.uses == [tpc]
+                feeds(tpc, i, var)
                     && var.defs.len() == 1
                     && var.debug_name.is_none()
                     && !var.captured
