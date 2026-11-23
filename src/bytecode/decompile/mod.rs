@@ -38,18 +38,19 @@ use vars::{Vars, unique};
 use crate::bytecode::instruction::Instruction;
 use crate::bytecode::proto::{Constant, Proto};
 
-/// Words that cannot name a variable.
+/// Words that cannot name a variable. (`type` and `export` are keywords
+/// only at the start of a declaration, so they can.)
 const KEYWORDS: &[&str] = &[
-    "and", "break", "const", "continue", "defer", "do", "else", "elseif", "end", "export", "false",
-    "for", "function", "global", "goto", "if", "in", "local", "nil", "not", "or", "repeat",
-    "return", "then", "true", "type", "until", "while",
+    "and", "break", "const", "continue", "defer", "do", "else", "elseif", "end", "false", "for",
+    "function", "global", "if", "in", "local", "nil", "not", "or", "repeat", "return", "then",
+    "true", "until", "while",
 ];
 
 /// Globals the output itself may use.
 const USED_GLOBALS: &[&str] = &["_", "error", "math", "table"];
 
 /// Whether `s` can be written as a plain name.
-pub(super) fn is_name(s: &str) -> bool {
+fn is_name(s: &str) -> bool {
     let mut chars = s.chars();
     chars
         .next()
@@ -59,7 +60,7 @@ pub(super) fn is_name(s: &str) -> bool {
 }
 
 /// What decompiling one function needs to know.
-pub(super) struct FnCx<'a> {
+struct FnCx<'a> {
     proto: &'a Proto,
     flow: Flow,
     vars: Vars,
@@ -132,11 +133,7 @@ fn collect_globals(proto: &Proto, names: &mut HashSet<String>) {
 
 /// Decompiles one function. `upvalues` names its upvalues, and `taken` are
 /// the names it must not give its own variables.
-pub(super) fn decompile_function(
-    proto: &Proto,
-    upvalues: Vec<String>,
-    taken: &HashSet<String>,
-) -> Func {
+fn decompile_function(proto: &Proto, upvalues: Vec<String>, taken: &HashSet<String>) -> Func {
     match try_decompile(proto, upvalues, taken, false) {
         Ok(func) => func,
         Err(reason) => lost(proto, taken, reason),

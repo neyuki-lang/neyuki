@@ -661,8 +661,9 @@ fn liveness(
     let mut uses = vec![RegSet::default(); blocks.len()];
     let mut defs = vec![RegSet::default(); blocks.len()];
     for &b in rpo {
-        for pc in blocks[b].start..blocks[b].end {
-            let acc = access(&code[pc], proto, open.get(&pc).copied());
+        let block = &blocks[b];
+        for (pc, inst) in code.iter().enumerate().take(block.end).skip(block.start) {
+            let acc = access(inst, proto, open.get(&pc).copied());
             for &r in &acc.reads {
                 if !defs[b].contains(r) {
                     uses[b].insert(r);

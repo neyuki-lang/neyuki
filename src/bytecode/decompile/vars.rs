@@ -93,13 +93,14 @@ impl Vars {
                 cur[usize::from(r)] = Some(n);
             }
             if b == 0 {
-                for i in 0..usize::from(proto.num_params) {
+                let params = usize::from(proto.num_params);
+                for (i, slot) in cur.iter_mut().enumerate().take(params) {
                     let Ok(r) = Reg::try_from(i) else { break };
                     let n = add(&mut uf, r, Node::Param(i));
-                    if let Some(phi) = cur[i] {
+                    if let Some(phi) = *slot {
                         uf.union(n, phi);
                     }
-                    cur[i] = Some(n);
+                    *slot = Some(n);
                     param_nodes.push(n);
                 }
             }
@@ -229,20 +230,30 @@ impl Vars {
                 continue;
             }
             let (from, to) = (local.from_pc as usize, local.to_pc as usize);
+            // The register may be reused once the local is dead, so the
+            // name goes to the one variable that matches the local best: the
+            // one it starts with, then the one with most reads and writes
+            // inside its range.
+            let mut best: Option<((bool, usize), VarId)> = None;
             for &v in by_reg.get(&local.reg).into_iter().flatten() {
                 let var = &self.list[v];
-                let mut count = var
+                let count = var
                     .defs
                     .iter()
                     .filter(|&&d| from <= d + 1 && d < to)
                     .count()
                     + var.uses.iter().filter(|&&u| from <= u && u < to).count();
-                if var.param.is_some() && from == 0 {
-                    count += 100;
-                }
                 if count == 0 {
                     continue;
                 }
+                let starts =
+                    (var.param.is_some() && from == 0) || var.defs.iter().any(|&d| d + 1 == from);
+                let score = (starts, count);
+                if best.as_ref().is_none_or(|(s, _)| score > *s) {
+                    best = Some((score, v));
+                }
+            }
+            if let Some(((_, count), v)) = best {
                 match votes[v].iter_mut().find(|(name, _)| *name == local.name) {
                     Some(entry) => entry.1 += count,
                     None => votes[v].push((local.name.clone(), count)),

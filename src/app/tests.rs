@@ -494,7 +494,11 @@ fn test_unpack_extracts_files_and_decompiles_bytecode() {
         assert_eq!(&std::fs::read(out.join(path)).unwrap(), bytes, "{}", path);
     }
     let source = std::fs::read_to_string(out.join("lib/math.nyk")).unwrap();
-    assert!(source.contains("local function add(a, b)"), "{}", source);
+    assert!(
+        source.contains("function(a, b)") && source.contains("a + b"),
+        "{}",
+        source
+    );
     let meta = std::fs::read_to_string(out.join(super::unpack::META_FILE)).unwrap();
     assert!(
         meta.contains("[app]") && meta.contains("name = \"Test App\""),

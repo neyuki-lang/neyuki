@@ -452,10 +452,9 @@ fn polish(stmts: Vec<Stmt>) -> Vec<Stmt> {
                     && let Some(Stmt::If(_, t, e)) = body.first()
                     && e.is_empty()
                     && matches!(t.as_slice(), [Stmt::Break])
+                    && let Stmt::If(test, _, _) = body.remove(0)
                 {
-                    if let Stmt::If(test, _, _) = body.remove(0) {
-                        cond = negate(test);
-                    }
+                    cond = negate(test);
                 }
                 out.push(Stmt::While { cond, body });
             }

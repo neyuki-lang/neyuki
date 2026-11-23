@@ -127,20 +127,23 @@ pub(super) fn lift(cx: &FnCx, b: usize, tfor: Option<usize>) -> Result<Lifted, S
         tfor,
     };
     let code = &cx.proto.instructions;
-    for pc in block.start..block.end {
-        let inst = code[pc];
+    for (pc, inst) in code.iter().enumerate().take(block.end).skip(block.start) {
         if pc + 1 == block.end
-            && let Some(end) = l.terminator(pc, &inst)?
+            && let Some(end) = l.terminator(pc, inst)?
         {
             return Ok(Lifted { stmts: l.out, end });
         }
-        l.inst(pc, &inst)?;
+        l.inst(pc, inst)?;
     }
-    l.flush_all()?;
-    Ok(Lifted {
-        stmts: l.out,
-        end: End::None,
-    })
+    // A block can also run straight into the loop it starts.
+    let end = match l.tfor {
+        Some(tpc) => End::ForIn(l.for_source(tpc)?),
+        None => {
+            l.flush_all()?;
+            End::None
+        }
+    };
+    Ok(Lifted { stmts: l.out, end })
 }
 
 fn bin_op(inst: &Instruction) -> Option<BinOp> {
@@ -638,6 +641,19 @@ impl Lifter<'_> {
                 self.define(pc, dst, value, false)
             }
             I::Move { dst, src } => {
+                // A copy of a held-back value into another temporary keeps
+                // the value's place among the side effects.
+                let from = self.cx.vars.read(pc, src)?;
+                let to = self.cx.vars.write(pc, dst)?;
+                if from != to
+                    && self.foldable(to, pc)
+                    && !self.pending.iter().any(|p| p.touches(to))
+                    && let Some(idx) = self.index_of(from)
+                    && self.pending[idx].foldable
+                {
+                    self.pending[idx].kind = Kind::Value(to);
+                    return Ok(());
+                }
                 let (value, effect) = self.take(pc, &[Src::Reg(src)], none)?.remove(0);
                 self.define(pc, dst, value, effect)
             }
@@ -1068,6 +1084,9 @@ impl Lifter<'_> {
             let p = self.pending.remove(idx);
             return self.finish_source(p.expr, p.seq, p.effect);
         }
+        if let Some(source) = self.copied_call(&vars)? {
+            return Ok(source);
+        }
         let is_nil = |l: &Self, v: VarId| {
             l.index_of(v).is_some_and(|i| {
                 l.pending[i].expr == Expr::Nil && matches!(l.pending[i].kind, Kind::Value(_))
@@ -1098,6 +1117,41 @@ impl Lifter<'_> {
                 Ok(Expr::Var(vars[0]))
             }
         }
+    }
+
+    /// The call of `a, b, c = f()` just before, when the three loop
+    /// registers are copies of `a`, `b` and `c` and nothing else reads them.
+    fn copied_call(&mut self, vars: &[VarId]) -> Result<Option<Expr>, String> {
+        let mut copies = Vec::with_capacity(vars.len());
+        for &v in vars {
+            match self
+                .index_of(v)
+                .map(|i| (&self.pending[i].kind, &self.pending[i].expr))
+            {
+                Some((Kind::Value(_), Expr::Var(x))) => copies.push(*x),
+                _ => return Ok(None),
+            }
+        }
+        let targets: Vec<Target> = copies.iter().map(|x| Target::Var(*x)).collect();
+        let fits = matches!(self.out.last(), Some(Stmt::Assign(t, vals)) if *t == targets && vals.len() == 1)
+            && copies.iter().all(|&x| {
+                let var = &self.cx.vars.list[x];
+                var.uses.len() == 1 && var.debug_name.is_none() && !var.captured
+            })
+            && !self.pending.iter().any(|p| p.effect);
+        if !fits {
+            return Ok(None);
+        }
+        for &v in vars {
+            if let Some(i) = self.index_of(v) {
+                self.pending.remove(i);
+            }
+        }
+        let Some(Stmt::Assign(_, mut vals)) = self.out.pop() else {
+            return Ok(None);
+        };
+        self.flush_all()?;
+        Ok(vals.pop())
     }
 
     fn finish_source(&mut self, expr: Expr, seq: u64, effect: bool) -> Result<Expr, String> {
