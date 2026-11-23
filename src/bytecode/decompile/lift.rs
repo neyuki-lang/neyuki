@@ -1145,12 +1145,33 @@ impl Lifter<'_> {
                 _ => return Ok(None),
             }
         }
+        let only_copied = copies.iter().all(|&x| {
+            let var = &self.cx.vars.list[x];
+            var.uses.len() == 1 && var.debug_name.is_none() && !var.captured
+        });
+        if !only_copied {
+            return Ok(None);
+        }
+        // The call may still be held back, or already written out.
+        let held = |l: &Self| {
+            l.pending
+                .iter()
+                .position(|p| matches!(&p.kind, Kind::Multi(vs) if *vs == copies))
+        };
+        if held(self).is_some() {
+            for &v in vars {
+                if let Some(i) = self.index_of(v) {
+                    self.pending.remove(i);
+                }
+            }
+            let Some(idx) = held(self) else {
+                return Ok(None);
+            };
+            let p = self.pending.remove(idx);
+            return self.finish_source(p.expr, p.seq, p.effect).map(Some);
+        }
         let targets: Vec<Target> = copies.iter().map(|x| Target::Var(*x)).collect();
         let fits = matches!(self.out.last(), Some(Stmt::Assign(t, vals)) if *t == targets && vals.len() == 1)
-            && copies.iter().all(|&x| {
-                let var = &self.cx.vars.list[x];
-                var.uses.len() == 1 && var.debug_name.is_none() && !var.captured
-            })
             && !self.pending.iter().any(|p| p.effect);
         if !fits {
             return Ok(None);

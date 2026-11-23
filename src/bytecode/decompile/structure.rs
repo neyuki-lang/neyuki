@@ -93,8 +93,12 @@ impl Walker<'_> {
     fn block(&mut self, b: usize, out: &mut Vec<Stmt>) -> Result<Option<usize>, String> {
         let flow = &self.cx.flow;
         let exit = flow.blocks[b].exit;
+        // Only an edge from outside the loop enters it; the body's own jump
+        // back to the header is the next iteration.
         let tfor = match exit {
-            Exit::Goto(to) => self.tfor_call(to),
+            Exit::Goto(to) if flow.header_loop[to].is_some_and(|l| !flow.in_loop(l, b)) => {
+                self.tfor_call(to)
+            }
             _ => None,
         };
         let lifted = lift(self.cx, b, tfor)?;
