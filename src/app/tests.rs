@@ -720,6 +720,7 @@ fn test_shell_launcher() {
         std::fs::set_permissions(bin.join("neyuki"), std::fs::Permissions::from_mode(0o755))
             .unwrap();
     }
+    std::fs::write(dir.join("app/demo.nykpak"), b"").unwrap();
     let path = format!("{}:/usr/bin:/bin", bin.display());
     let found = Command::new("/bin/sh")
         .arg(&launcher)
@@ -728,10 +729,18 @@ fn test_shell_launcher() {
         .output()
         .unwrap();
     assert!(found.status.success());
-    let app_dir = std::fs::canonicalize(dir.join("app")).unwrap();
+    let stdout = String::from_utf8_lossy(&found.stdout);
+    let args: Vec<&str> = stdout.split('|').collect();
+    assert_eq!(args.len(), 6, "{}", stdout);
+    assert_eq!((args[0], args[1]), ("run", "--"));
+    assert_eq!(&args[3..], ["a b", "-c", ""]);
+    // `pwd` may print the directory through a symlink (macOS's temp
+    // directory is under `/var`, a link to `/private/var`).
     assert_eq!(
-        String::from_utf8_lossy(&found.stdout),
-        format!("run|--|{}/demo.nykpak|a b|-c|", app_dir.display())
+        std::fs::canonicalize(args[2]).unwrap(),
+        std::fs::canonicalize(dir.join("app/demo.nykpak")).unwrap(),
+        "{}",
+        stdout
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
