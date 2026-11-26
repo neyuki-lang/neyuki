@@ -550,8 +550,11 @@ fn test_build_bundles_only_the_runtimes_native_libraries() {
     }
     std::fs::write(package.join("neyuki.toml"), manifest).unwrap();
 
+    // Each build gets its own output: on macOS the first one is a `.app`
+    // directory, which a later single-file build could not overwrite.
     let bundled = |runtime: PathBuf| -> Vec<String> {
-        let out = dir.join(if cfg!(windows) { "out.exe" } else { "out" });
+        let stem = runtime.file_stem().unwrap().to_string_lossy().into_owned();
+        let out = dir.join(format!("out-{}{}", stem, std::env::consts::EXE_SUFFIX));
         let report = build(&BuildOptions {
             project: Some(project.clone()),
             out: Some(out),
