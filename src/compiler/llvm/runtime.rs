@@ -30,6 +30,11 @@ pub fn emit_runtime_prelude(out: &mut String, opt_note: &str) {
 declare i32 @printf(ptr, ...)
 declare i32 @dprintf(i32, ptr, ...)
 declare i32 @fflush(ptr)
+declare i32 @snprintf(ptr, i64, ptr, ...)
+declare i32 @strcmp(ptr, ptr)
+declare i64 @strlen(ptr)
+declare ptr @malloc(i64)
+declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)
 declare void @exit(i32) noreturn
 declare double @llvm.fabs.f64(double)
 declare double @llvm.floor.f64(double)
@@ -91,8 +96,12 @@ define internal %NykVal @__nyk_import_get(ptr %mod, ptr %field) {
   ret %NykVal zeroinitializer
 }
 
+; Tables are stubs here, but each one gets its own allocation so that two
+; tables are not equal.
 define internal %NykVal @__nyk_table_new(i32 %arr, i32 %map) {
-  %s0 = insertvalue %NykVal { i8 5, i64 0 }, i64 0, 1
+  %p = call ptr @malloc(i64 16)
+  %addr = ptrtoint ptr %p to i64
+  %s0 = insertvalue %NykVal { i8 5, i64 0 }, i64 %addr, 1
   ret %NykVal %s0
 }
 
@@ -108,8 +117,62 @@ define internal void @__nyk_table_append(%NykVal %t, %NykVal %v) {
   ret void
 }
 
+; A value as a NUL-terminated string, for `..`: numbers are formatted like
+; `print` does, a table is "table" and a function "function". Results are
+; malloc'd and never freed (this fallback has no collector).
+define internal ptr @__nyk_tostr(%NykVal %v) {
+  %tag = extractvalue %NykVal %v, 0
+  %raw = extractvalue %NykVal %v, 1
+  switch i8 %tag, label %s_fn [
+    i8 0, label %s_nil
+    i8 1, label %s_bool
+    i8 2, label %s_int
+    i8 3, label %s_float
+    i8 4, label %s_str
+    i8 5, label %s_table
+  ]
+s_nil:
+  ret ptr @.fmt_nil
+s_bool:
+  %b = icmp ne i64 %raw, 0
+  %bs = select i1 %b, ptr @.fmt_true, ptr @.fmt_false
+  ret ptr %bs
+s_int:
+  %ibuf = call ptr @malloc(i64 24)
+  call i32 (ptr, i64, ptr, ...) @snprintf(ptr %ibuf, i64 24, ptr @.fmt_int, i64 %raw)
+  ret ptr %ibuf
+s_float:
+  %f = bitcast i64 %raw to double
+  %fbuf = call ptr @malloc(i64 32)
+  call i32 (ptr, i64, ptr, ...) @snprintf(ptr %fbuf, i64 32, ptr @.fmt_float, double %f)
+  ret ptr %fbuf
+s_str:
+  %p = inttoptr i64 %raw to ptr
+  ret ptr %p
+s_table:
+  ret ptr @.str_table
+s_fn:
+  ret ptr @.str_function
+}
+
+@.str_table = private unnamed_addr constant [6 x i8] c"table\00"
+@.str_function = private unnamed_addr constant [9 x i8] c"function\00"
+
 define internal %NykVal @__nyk_concat(%NykVal %a, %NykVal %b) {
-  ret %NykVal %a
+  %sa = call ptr @__nyk_tostr(%NykVal %a)
+  %sb = call ptr @__nyk_tostr(%NykVal %b)
+  %la = call i64 @strlen(ptr %sa)
+  %lb = call i64 @strlen(ptr %sb)
+  %len = add i64 %la, %lb
+  %size = add i64 %len, 1
+  %buf = call ptr @malloc(i64 %size)
+  call void @llvm.memcpy.p0.p0.i64(ptr %buf, ptr %sa, i64 %la, i1 false)
+  %tail = getelementptr inbounds i8, ptr %buf, i64 %la
+  call void @llvm.memcpy.p0.p0.i64(ptr %tail, ptr %sb, i64 %lb, i1 false)
+  %end = getelementptr inbounds i8, ptr %buf, i64 %len
+  store i8 0, ptr %end
+  %r = call %NykVal @__nyk_mk_str(ptr %buf)
+  ret %NykVal %r
 }
 
 define internal %NykVal @__nyk_len(%NykVal %v) {
@@ -585,7 +648,36 @@ define internal %NykVal @__nyk_bitnot(%NykVal %a) alwaysinline {
   ret %NykVal %ri
 }
 
-define internal %NykVal @__nyk_eq(%NykVal %a, %NykVal %b) alwaysinline {
+; Strings are NUL-terminated byte strings and compare by content (with libc
+; `strcmp`, after a pointer check), so a string built at run time equals a
+; literal with the same bytes. Tables and functions compare by identity.
+define internal i1 @__nyk_str_eq(ptr %a, ptr %b) alwaysinline {
+  %same = icmp eq ptr %a, %b
+  br i1 %same, label %yes, label %cmp
+cmp:
+  %c = call i32 @strcmp(ptr %a, ptr %b)
+  %eq = icmp eq i32 %c, 0
+  ret i1 %eq
+yes:
+  ret i1 true
+}
+
+; An integer equals a float only when the float holds exactly that integer,
+; as in the VM (so 2^53 + 1 ~= 2^53 as a float).
+define internal i1 @__nyk_int_eq_float(i64 %i, double %f) alwaysinline {
+  %ge_min = fcmp oge double %f, 0xC3E0000000000000
+  %lt_max = fcmp olt double %f, 0x43E0000000000000
+  %in_range = and i1 %ge_min, %lt_max
+  %fi = call i64 @llvm.fptosi.sat.i64.f64(double %f)
+  %back = sitofp i64 %fi to double
+  %integral = fcmp oeq double %back, %f
+  %same = icmp eq i64 %fi, %i
+  %r0 = and i1 %in_range, %integral
+  %r = and i1 %r0, %same
+  ret i1 %r
+}
+
+define internal i1 @__nyk_eq_i1(%NykVal %a, %NykVal %b) alwaysinline {
   %ta = extractvalue %NykVal %a, 0
   %tb = extractvalue %NykVal %b, 0
   %va = extractvalue %NykVal %a, 1
@@ -593,60 +685,111 @@ define internal %NykVal @__nyk_eq(%NykVal %a, %NykVal %b) alwaysinline {
   %same_tag = icmp eq i8 %ta, %tb
   br i1 %same_tag, label %same, label %diff
 same:
+  switch i8 %ta, label %bits [
+    i8 3, label %flt
+    i8 4, label %str
+  ]
+bits:
   %eq = icmp eq i64 %va, %vb
+  ret i1 %eq
+flt:
+  ; fcmp oeq: NaN ~= NaN and 0.0 == -0.0.
+  %fa = bitcast i64 %va to double
+  %fb = bitcast i64 %vb to double
+  %feq = fcmp oeq double %fa, %fb
+  ret i1 %feq
+str:
+  %pa = inttoptr i64 %va to ptr
+  %pb = inttoptr i64 %vb to ptr
+  %seq = call i1 @__nyk_str_eq(ptr %pa, ptr %pb)
+  ret i1 %seq
+diff:
+  %a_int = icmp eq i8 %ta, 2
+  %b_flt = icmp eq i8 %tb, 3
+  %int_flt = and i1 %a_int, %b_flt
+  br i1 %int_flt, label %if, label %diff2
+if:
+  %fb2 = bitcast i64 %vb to double
+  %ifeq = call i1 @__nyk_int_eq_float(i64 %va, double %fb2)
+  ret i1 %ifeq
+diff2:
+  %a_flt = icmp eq i8 %ta, 3
+  %b_int = icmp eq i8 %tb, 2
+  %flt_int = and i1 %a_flt, %b_int
+  br i1 %flt_int, label %fi, label %ne
+fi:
+  %fa2 = bitcast i64 %va to double
+  %fieq = call i1 @__nyk_int_eq_float(i64 %vb, double %fa2)
+  ret i1 %fieq
+ne:
+  ret i1 false
+}
+
+define internal %NykVal @__nyk_eq(%NykVal %a, %NykVal %b) alwaysinline {
+  %eq = call i1 @__nyk_eq_i1(%NykVal %a, %NykVal %b)
   %rb = call %NykVal @__nyk_mk_bool(i1 %eq)
   ret %NykVal %rb
-diff:
-  %rf = call %NykVal @__nyk_mk_bool(i1 false)
-  ret %NykVal %rf
 }
 
 define internal %NykVal @__nyk_ne(%NykVal %a, %NykVal %b) alwaysinline {
-  %eq = call %NykVal @__nyk_eq(%NykVal %a, %NykVal %b)
-  %res = call %NykVal @__nyk_not(%NykVal %eq)
-  ret %NykVal %res
+  %eq = call i1 @__nyk_eq_i1(%NykVal %a, %NykVal %b)
+  %ne = xor i1 %eq, true
+  %rb = call %NykVal @__nyk_mk_bool(i1 %ne)
+  ret %NykVal %rb
+}
+
+; Ordering: two integers compare as integers, two strings byte by byte
+; (`strcmp`), other numbers as floats; any other pair is an error, as in the
+; VM. `%strict` picks `<` (true) or `<=` (false).
+define internal i1 @__nyk_order(%NykVal %a, %NykVal %b, i1 %strict) alwaysinline {
+  %ta = extractvalue %NykVal %a, 0
+  %tb = extractvalue %NykVal %b, 0
+  %ai = icmp eq i8 %ta, 2
+  %bi = icmp eq i8 %tb, 2
+  %both_int = and i1 %ai, %bi
+  br i1 %both_int, label %int_path, label %not_int
+int_path:
+  %va = extractvalue %NykVal %a, 1
+  %vb = extractvalue %NykVal %b, 1
+  %ilt = icmp slt i64 %va, %vb
+  %ile = icmp sle i64 %va, %vb
+  %icmp = select i1 %strict, i1 %ilt, i1 %ile
+  ret i1 %icmp
+not_int:
+  %as = icmp eq i8 %ta, 4
+  %bs = icmp eq i8 %tb, 4
+  %both_str = and i1 %as, %bs
+  br i1 %both_str, label %str_path, label %num_path
+str_path:
+  %ra = extractvalue %NykVal %a, 1
+  %rb = extractvalue %NykVal %b, 1
+  %pa = inttoptr i64 %ra to ptr
+  %pb = inttoptr i64 %rb to ptr
+  %c = call i32 @strcmp(ptr %pa, ptr %pb)
+  %slt = icmp slt i32 %c, 0
+  %sle = icmp sle i32 %c, 0
+  %scmp = select i1 %strict, i1 %slt, i1 %sle
+  ret i1 %scmp
+num_path:
+  ; __nyk_as_f64 raises "expected number" for anything but a number.
+  %fa = call double @__nyk_as_f64(%NykVal %a)
+  %fb = call double @__nyk_as_f64(%NykVal %b)
+  %flt = fcmp olt double %fa, %fb
+  %fle = fcmp ole double %fa, %fb
+  %fcmp = select i1 %strict, i1 %flt, i1 %fle
+  ret i1 %fcmp
 }
 
 define internal %NykVal @__nyk_lt(%NykVal %a, %NykVal %b) alwaysinline {
-  %ta = extractvalue %NykVal %a, 0
-  %tb = extractvalue %NykVal %b, 0
-  %ai = icmp eq i8 %ta, 2
-  %bi = icmp eq i8 %tb, 2
-  %both_int = and i1 %ai, %bi
-  br i1 %both_int, label %int_path, label %flt_path
-int_path:
-  %va = extractvalue %NykVal %a, 1
-  %vb = extractvalue %NykVal %b, 1
-  %cmp = icmp slt i64 %va, %vb
-  %rb = call %NykVal @__nyk_mk_bool(i1 %cmp)
+  %r = call i1 @__nyk_order(%NykVal %a, %NykVal %b, i1 true)
+  %rb = call %NykVal @__nyk_mk_bool(i1 %r)
   ret %NykVal %rb
-flt_path:
-  %fa = call double @__nyk_as_f64(%NykVal %a)
-  %fb = call double @__nyk_as_f64(%NykVal %b)
-  %fcmp = fcmp olt double %fa, %fb
-  %rf = call %NykVal @__nyk_mk_bool(i1 %fcmp)
-  ret %NykVal %rf
 }
 
 define internal %NykVal @__nyk_le(%NykVal %a, %NykVal %b) alwaysinline {
-  %ta = extractvalue %NykVal %a, 0
-  %tb = extractvalue %NykVal %b, 0
-  %ai = icmp eq i8 %ta, 2
-  %bi = icmp eq i8 %tb, 2
-  %both_int = and i1 %ai, %bi
-  br i1 %both_int, label %int_path, label %flt_path
-int_path:
-  %va = extractvalue %NykVal %a, 1
-  %vb = extractvalue %NykVal %b, 1
-  %cmp = icmp sle i64 %va, %vb
-  %rb = call %NykVal @__nyk_mk_bool(i1 %cmp)
+  %r = call i1 @__nyk_order(%NykVal %a, %NykVal %b, i1 false)
+  %rb = call %NykVal @__nyk_mk_bool(i1 %r)
   ret %NykVal %rb
-flt_path:
-  %fa = call double @__nyk_as_f64(%NykVal %a)
-  %fb = call double @__nyk_as_f64(%NykVal %b)
-  %fcmp = fcmp ole double %fa, %fb
-  %rf = call %NykVal @__nyk_mk_bool(i1 %fcmp)
-  ret %NykVal %rf
 }
 
 define internal %NykVal @__nyk_gt(%NykVal %a, %NykVal %b) alwaysinline {

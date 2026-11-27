@@ -367,3 +367,70 @@ fn every_test_and_example_emits_valid_ir() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn numbers_compare_by_value() {
+    check_case(
+        "number_eq",
+        "\
+local function div(a, b) return a / b end
+local nan = div(0, 0)
+local one = 1
+local onef = div(2, 2)
+local big = 9007199254740993
+local bigf = 9007199254740992.0
+print(one == 1.0, 1 == 1.0, one == onef, one ~= onef, one == 1.5)
+print(nan == nan, nan ~= nan, 0.0 == -0.0, big == bigf, big - 1 == bigf)
+print(1 < 1.5, 2 <= 2.0, 2.5 > 2, one >= onef)
+",
+        Expect::SameAsVm,
+    );
+}
+
+#[test]
+fn strings_compare_by_content() {
+    check_case(
+        "string_eq",
+        "\
+local function id(x) return x end
+local n = id(1)
+local a = \"x\" .. n
+local b = \"x\" .. \"1\"
+local c = id(\"x1\")
+print(a == b, a == c, a == \"x1\", a ~= b, a == \"x2\", a, b)
+print(\"a\" < \"b\", \"b\" <= \"a\", \"ab\" < \"abc\", \"B\" < \"a\", \"\" < \"a\", a <= b, a < b)
+print(\"1\" == 1, true == 1, nil == false)
+",
+        Expect::SameAsVm,
+    );
+}
+
+#[test]
+fn tables_and_functions_compare_by_identity() {
+    check_case(
+        "identity_eq",
+        "\
+local t = {}
+local u = {}
+local function f() end
+local function g() end
+local h = f
+print(t == t, t == u, t ~= u, f == h, f == g)
+",
+        Expect::SameAsVm,
+    );
+}
+
+#[test]
+fn ordering_mixed_types_is_an_error() {
+    check_case(
+        "string_lt_number",
+        "local function lt(a, b) return a < b end\nlocal r = lt(\"a\", 1)\nprint(r)\n",
+        Expect::Error("expected number"),
+    );
+    check_case(
+        "table_lt_table",
+        "local function le(a, b) return a <= b end\nlocal r = le({}, {})\nprint(r)\n",
+        Expect::Error("expected number"),
+    );
+}
