@@ -2040,12 +2040,16 @@ mod tests {
 
     #[test]
     fn test_forward_relays_raw_bytes_and_close_frees_the_port() {
-        // An echo server standing in for the target.
+        // An echo server standing in for the target, counting the
+        // connections the forward relays to it.
         let echo = TcpListener::bind("127.0.0.1:0").unwrap();
         let echo_port = echo.local_addr().unwrap().port();
+        let relayed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let relayed_by_echo = Arc::clone(&relayed);
         std::thread::spawn(move || {
             for stream in echo.incoming() {
                 let Ok(mut stream) = stream else { break };
+                relayed_by_echo.fetch_add(1, Ordering::SeqCst);
                 let mut data = Vec::new();
                 let _ = stream.read_to_end(&mut data);
                 let _ = stream.write_all(&data);
@@ -2082,17 +2086,25 @@ mod tests {
 
         let closed = builtin_unforward(&mut VM::new(), &[integer(id)]).unwrap();
         assert_eq!(closed[0].as_bool(), Some(true));
-        // Nothing listens on the port any more. (Binding it again is not a
-        // reliable check: the freed ephemeral port can at once become the
-        // local port of another test's outgoing connection, which blocks a
-        // new listener there.)
-        let refused = TcpStream::connect(("127.0.0.1", port))
-            .err()
-            .map(|err| err.kind());
+        // The forward no longer accepts: a connection to its port is either
+        // refused or reaches something else, never the target. (Expecting a
+        // refusal, or binding the port again, is not reliable: tests run in
+        // parallel, and the freed ephemeral port can at once be given to
+        // another test's listener or outgoing connection.)
+        let before = relayed.load(Ordering::SeqCst);
+        if let Ok(mut probe) = TcpStream::connect(("127.0.0.1", port)) {
+            // Were the forward still running, it would relay this connection
+            // to the echo server, which counts it before the probe sees EOF.
+            probe
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let _ = probe.shutdown(Shutdown::Write);
+            let _ = probe.read_to_end(&mut Vec::new());
+        }
         assert_eq!(
-            refused,
-            Some(std::io::ErrorKind::ConnectionRefused),
-            "closing should release the port"
+            relayed.load(Ordering::SeqCst),
+            before,
+            "a closed forward should not relay connections"
         );
         let again = builtin_unforward(&mut VM::new(), &[integer(id)]).unwrap();
         assert_eq!(again[0].as_bool(), Some(false));
