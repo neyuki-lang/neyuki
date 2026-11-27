@@ -56,7 +56,8 @@ The bytecode format changes between Neyuki versions. A `.nykb` written by anothe
 - Integers are 64-bit and wrap on overflow where the VM switches to a bignum: `9223372036854775807 + 1`, `(-9223372036854775807 - 1) // -1` (which gives `-9223372036854775808`) and `1 << 64` (which gives `0`). A shift by 64 or more bits gives `0`, or `-1` for `>>` of a negative number, as in the VM; a negative count shifts the other way for `<<` and `>>` and gives `0` for `<<<` and `>>>`.
 - `//` and `%` round toward negative infinity, so `-5 // 3` is `-2` and `-5 % 3` is `1` (the result of `%` has the sign of the divisor), for integers and floats alike. A zero divisor is an error for both; `/` follows IEEE 754 and gives an infinity or NaN.
 - A runtime error prints `runtime error: <message>` to standard error, without the source location and stack trace, and exits with status 1.
-- Floats print with `printf("%g")`, so `1/3` shows as `0.333333`.
+- Floats print and concatenate with `printf("%g")`, so `1/3` shows as `0.333333`.
+- Strings end at their first zero byte, for `==`, `<` and `..` as well.
 
 ### Building apps
 
