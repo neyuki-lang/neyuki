@@ -99,7 +99,6 @@ impl NykVal {
 
 unsafe extern "C" {
     fn fflush(stream: *mut c_void) -> c_int;
-    fn snprintf(buf: *mut c_char, size: usize, fmt: *const c_char, ...) -> c_int;
 }
 
 /// Raises a runtime error: prints `runtime error: <msg>` to stderr and exits
@@ -308,12 +307,56 @@ fn to_text(val: NykVal) -> Vec<u8> {
     }
 }
 
+/// `f` as C's `printf("%g")` writes it: 6 significant digits, trailing
+/// zeros dropped, and exponent notation (`1e+06`) when the exponent is
+/// below -4 or at least 6. Written out here rather than calling the C
+/// library's `snprintf`, which the Windows UCRT only has as an inline
+/// function, so there is no symbol to link.
 fn format_g(f: f64) -> Vec<u8> {
-    let mut buf = [0u8; 32];
-    // SAFETY: `buf` holds `buf.len()` bytes and the format takes one double.
-    let n = unsafe { snprintf(buf.as_mut_ptr().cast(), buf.len(), c"%g".as_ptr(), f) };
-    let n = usize::try_from(n).unwrap_or(0).min(buf.len() - 1);
-    buf[..n].to_vec()
+    const PRECISION: i32 = 6;
+    if f.is_nan() {
+        let sign = if f.is_sign_negative() { "-" } else { "" };
+        return format!("{}nan", sign).into_bytes();
+    }
+    if f.is_infinite() {
+        return if f < 0.0 {
+            b"-inf".to_vec()
+        } else {
+            b"inf".to_vec()
+        };
+    }
+    if f == 0.0 {
+        return if f.is_sign_negative() {
+            b"-0".to_vec()
+        } else {
+            b"0".to_vec()
+        };
+    }
+    // The exponent of the value rounded to PRECISION digits decides the form.
+    let sci = format!("{:.*e}", (PRECISION - 1) as usize, f);
+    let (mantissa, exp) = sci.split_once('e').unwrap_or((&sci, "0"));
+    let exp: i32 = exp.parse().unwrap_or(0);
+    let text = if !(-4..PRECISION).contains(&exp) {
+        format!(
+            "{}e{}{:02}",
+            trim_fraction(mantissa),
+            if exp < 0 { '-' } else { '+' },
+            exp.unsigned_abs()
+        )
+    } else {
+        let decimals = (PRECISION - 1 - exp).max(0) as usize;
+        trim_fraction(&format!("{:.*}", decimals, f)).to_string()
+    };
+    text.into_bytes()
+}
+
+/// `digits` without trailing zeros after the decimal point (nor the point).
+fn trim_fraction(digits: &str) -> &str {
+    if digits.contains('.') {
+        digits.trim_end_matches('0').trim_end_matches('.')
+    } else {
+        digits
+    }
 }
 
 /// `a .. b`.
@@ -465,6 +508,31 @@ mod tests {
             );
         }
         out
+    }
+
+    #[test]
+    fn format_g_matches_printf() {
+        let cases: &[(f64, &str)] = &[
+            (1.5, "1.5"),
+            (2.0, "2"),
+            (-0.5, "-0.5"),
+            (1.0 / 3.0, "0.333333"),
+            (100000.0, "100000"),
+            (123456.7, "123457"),
+            (999999.5, "1e+06"),
+            (1e6, "1e+06"),
+            (1234567.0, "1.23457e+06"),
+            (0.0001, "0.0001"),
+            (0.00001, "1e-05"),
+            (1.5e-10, "1.5e-10"),
+            (1e300, "1e+300"),
+            (-0.0, "-0"),
+            (f64::INFINITY, "inf"),
+            (f64::NEG_INFINITY, "-inf"),
+        ];
+        for &(f, want) in cases {
+            assert_eq!(String::from_utf8(format_g(f)).unwrap(), want, "{}", f);
+        }
     }
 
     #[test]
