@@ -52,6 +52,14 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+      # tests/llvm_parity.rs runs the LLVM backend's output with `opt` and
+      # `lli`; elsewhere it skips when they are missing.
+      - name: Install LLVM tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm
+          echo "NEYUKI_REQUIRE_LLVM=1" >> "$GITHUB_ENV"
       - name: Build
         run: cargo build --verbose
       - name: Run tests

@@ -3,6 +3,19 @@
 
 use std::fmt::Write;
 
+use crate::compiler::llvm::types::format_llvm_cstring;
+
+/// Runtime error messages the inlined helpers raise through `__nyk_error`,
+/// as `(symbol, message)`. The texts are the register VM's (src/vm/ops.rs).
+const ERROR_MESSAGES: &[(&str, &str)] = &[
+    ("@.err_number", "expected number"),
+    ("@.err_integer", "expected integer"),
+    ("@.err_float_to_int", "cannot convert float to integer"),
+    ("@.err_div_zero", "division by zero"),
+    ("@.err_mod_zero", "modulo by zero"),
+    ("@.err_unary_minus", "unary minus expects a number"),
+];
+
 /// Emits the `%NykVal` ABI definition, libc `printf` helper definitions for
 /// scalar/string operations, and external hook declarations for dynamic objects.
 pub fn emit_runtime_prelude(out: &mut String, opt_note: &str) {
@@ -15,9 +28,41 @@ pub fn emit_runtime_prelude(out: &mut String, opt_note: &str) {
         r#"%NykVal = type { i8, i64 }
 
 declare i32 @printf(ptr, ...)
-declare void @abort()
+declare i32 @dprintf(i32, ptr, ...)
+declare i32 @fflush(ptr)
+declare void @exit(i32) noreturn
+declare double @llvm.fabs.f64(double)
+declare double @llvm.floor.f64(double)
+declare double @llvm.pow.f64(double, double)
+declare i64 @llvm.fptosi.sat.i64.f64(double)
 
+"#,
+    );
+    for (sym, msg) in ERROR_MESSAGES {
+        let (escaped, len) = format_llvm_cstring(msg);
+        let _ = writeln!(
+            out,
+            "{} = private unnamed_addr constant [{} x i8] {}",
+            sym, len, escaped
+        );
+    }
+    out.push_str(
+        r#"
 ; Built-in fallback runtime implementations (self-contained for lli/clang)
+
+; Raises a runtime error: prints `msg` to stderr and exits with status 1,
+; as the VM does. `exit` rather than `abort` flushes what `print` buffered,
+; and does not look like a crash of `lli` itself (which reports SIGABRT as
+; an LLVM bug with a stack dump).
+@.fmt_error = private unnamed_addr constant [19 x i8] c"runtime error: %s\0A\00"
+
+define internal void @__nyk_error(ptr %msg) noreturn cold {
+  call i32 @fflush(ptr null)
+  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.fmt_error, ptr %msg)
+  call void @exit(i32 1)
+  unreachable
+}
+
 @__nyk_upvals = internal global [256 x %NykVal] zeroinitializer
 
 define internal %NykVal @__nyk_global_get(ptr %name) {
@@ -144,17 +189,54 @@ ret_true:
   ret i1 true
 }
 
+; Arithmetic follows the register VM (src/vm/ops.rs) on 64-bit integers:
+; `//` and `%` round toward negative infinity, a zero divisor is an error,
+; and shifts by 64 or more bits are defined. Where the VM would widen an
+; integer to a bignum this backend wraps instead.
+
 define internal double @__nyk_as_f64(%NykVal %v) alwaysinline {
   %tag = extractvalue %NykVal %v, 0
   %raw = extractvalue %NykVal %v, 1
-  %is_float = icmp eq i8 %tag, 3
-  br i1 %is_float, label %as_flt, label %as_int
+  switch i8 %tag, label %bad [
+    i8 2, label %as_int
+    i8 3, label %as_flt
+  ]
 as_flt:
   %f = bitcast i64 %raw to double
   ret double %f
 as_int:
   %fi = sitofp i64 %raw to double
   ret double %fi
+bad:
+  call void @__nyk_error(ptr @.err_number)
+  unreachable
+}
+
+; The integer operand of a bitwise operator: floats are truncated toward zero
+; (saturating at the i64 range), like the VM; anything else is an error.
+define internal i64 @__nyk_as_i64(%NykVal %v) alwaysinline {
+  %tag = extractvalue %NykVal %v, 0
+  %raw = extractvalue %NykVal %v, 1
+  switch i8 %tag, label %bad [
+    i8 2, label %as_int
+    i8 3, label %as_flt
+  ]
+as_int:
+  ret i64 %raw
+as_flt:
+  %f = bitcast i64 %raw to double
+  %fabs = call double @llvm.fabs.f64(double %f)
+  %finite = fcmp one double %fabs, 0x7FF0000000000000
+  br i1 %finite, label %conv, label %not_finite
+conv:
+  %i = call i64 @llvm.fptosi.sat.i64.f64(double %f)
+  ret i64 %i
+not_finite:
+  call void @__nyk_error(ptr @.err_float_to_int)
+  unreachable
+bad:
+  call void @__nyk_error(ptr @.err_integer)
+  unreachable
 }
 
 define internal %NykVal @__nyk_add(%NykVal %a, %NykVal %b) alwaysinline {
@@ -220,6 +302,8 @@ flt_path:
   ret %NykVal %rf
 }
 
+; `/` is always floating point and follows IEEE 754: dividing by zero gives
+; an infinity or NaN, not an error.
 define internal %NykVal @__nyk_div(%NykVal %a, %NykVal %b) alwaysinline {
   %fa = call double @__nyk_as_f64(%NykVal %a)
   %fb = call double @__nyk_as_f64(%NykVal %b)
@@ -228,66 +312,240 @@ define internal %NykVal @__nyk_div(%NykVal %a, %NykVal %b) alwaysinline {
   ret %NykVal %rf
 }
 
+; Floor division: the quotient rounded toward negative infinity.
 define internal %NykVal @__nyk_idiv(%NykVal %a, %NykVal %b) alwaysinline {
+  %ta = extractvalue %NykVal %a, 0
+  %tb = extractvalue %NykVal %b, 0
+  %ai = icmp eq i8 %ta, 2
+  %bi = icmp eq i8 %tb, 2
+  %both_int = and i1 %ai, %bi
+  br i1 %both_int, label %int_path, label %flt_path
+int_path:
   %va = extractvalue %NykVal %a, 1
   %vb = extractvalue %NykVal %b, 1
+  %is_zero = icmp eq i64 %vb, 0
+  br i1 %is_zero, label %by_zero, label %nonzero
+nonzero:
+  ; sdiv is undefined for INT64_MIN / -1, so `a // -1` negates instead
+  ; (wrapping INT64_MIN to itself).
+  %is_m1 = icmp eq i64 %vb, -1
+  br i1 %is_m1, label %by_m1, label %int_div
+by_m1:
+  %neg = sub i64 0, %va
+  %rn = call %NykVal @__nyk_mk_int(i64 %neg)
+  ret %NykVal %rn
+int_div:
   %q = sdiv i64 %va, %vb
-  %ri = call %NykVal @__nyk_mk_int(i64 %q)
+  %r = srem i64 %va, %vb
+  ; sdiv truncates; step down when the remainder and divisor differ in sign.
+  %r_nz = icmp ne i64 %r, 0
+  %signs = xor i64 %r, %vb
+  %signs_differ = icmp slt i64 %signs, 0
+  %adjust = and i1 %r_nz, %signs_differ
+  %adjust64 = zext i1 %adjust to i64
+  %fq = sub i64 %q, %adjust64
+  %ri = call %NykVal @__nyk_mk_int(i64 %fq)
   ret %NykVal %ri
+flt_path:
+  %fa = call double @__nyk_as_f64(%NykVal %a)
+  %fb = call double @__nyk_as_f64(%NykVal %b)
+  %f_zero = fcmp oeq double %fb, 0.0
+  br i1 %f_zero, label %by_zero, label %flt_div
+flt_div:
+  %fq0 = fdiv double %fa, %fb
+  %ffq = call double @llvm.floor.f64(double %fq0)
+  %rf = call %NykVal @__nyk_mk_float(double %ffq)
+  ret %NykVal %rf
+by_zero:
+  call void @__nyk_error(ptr @.err_div_zero)
+  unreachable
 }
 
+; Floor modulo: a % b == a - (a // b) * b, so the result has the sign of b.
 define internal %NykVal @__nyk_mod(%NykVal %a, %NykVal %b) alwaysinline {
+  %ta = extractvalue %NykVal %a, 0
+  %tb = extractvalue %NykVal %b, 0
+  %ai = icmp eq i8 %ta, 2
+  %bi = icmp eq i8 %tb, 2
+  %both_int = and i1 %ai, %bi
+  br i1 %both_int, label %int_path, label %flt_path
+int_path:
   %va = extractvalue %NykVal %a, 1
   %vb = extractvalue %NykVal %b, 1
+  %is_zero = icmp eq i64 %vb, 0
+  br i1 %is_zero, label %by_zero, label %nonzero
+nonzero:
+  ; srem is undefined for INT64_MIN % -1; anything % -1 is 0.
+  %is_m1 = icmp eq i64 %vb, -1
+  br i1 %is_m1, label %by_m1, label %int_mod
+by_m1:
+  ret %NykVal { i8 2, i64 0 }
+int_mod:
   %r = srem i64 %va, %vb
-  %ri = call %NykVal @__nyk_mk_int(i64 %r)
+  %r_nz = icmp ne i64 %r, 0
+  %signs = xor i64 %r, %vb
+  %signs_differ = icmp slt i64 %signs, 0
+  %adjust = and i1 %r_nz, %signs_differ
+  %rb = add i64 %r, %vb
+  %fr = select i1 %adjust, i64 %rb, i64 %r
+  %ri = call %NykVal @__nyk_mk_int(i64 %fr)
   ret %NykVal %ri
+flt_path:
+  %fa = call double @__nyk_as_f64(%NykVal %a)
+  %fb = call double @__nyk_as_f64(%NykVal %b)
+  %f_zero = fcmp oeq double %fb, 0.0
+  br i1 %f_zero, label %by_zero, label %flt_mod
+flt_mod:
+  %fq0 = fdiv double %fa, %fb
+  %ffq = call double @llvm.floor.f64(double %fq0)
+  %prod = fmul double %ffq, %fb
+  %fr0 = fsub double %fa, %prod
+  %rf = call %NykVal @__nyk_mk_float(double %fr0)
+  ret %NykVal %rf
+by_zero:
+  call void @__nyk_error(ptr @.err_mod_zero)
+  unreachable
+}
+
+; base ^ exp for a non-negative integer exponent, by squaring (wrapping).
+define internal i64 @__nyk_ipow(i64 %base, i64 %exp) {
+entry:
+  br label %loop
+loop:
+  %acc = phi i64 [ 1, %entry ], [ %acc2, %step ]
+  %b = phi i64 [ %base, %entry ], [ %b2, %step ]
+  %e = phi i64 [ %exp, %entry ], [ %e2, %step ]
+  %done = icmp eq i64 %e, 0
+  br i1 %done, label %exit, label %step
+step:
+  %bit = and i64 %e, 1
+  %odd = icmp ne i64 %bit, 0
+  %m = mul i64 %acc, %b
+  %acc2 = select i1 %odd, i64 %m, i64 %acc
+  %b2 = mul i64 %b, %b
+  %e2 = lshr i64 %e, 1
+  br label %loop
+exit:
+  ret i64 %acc
+}
+
+; An integer raised to a non-negative integer stays an integer; everything
+; else is a float power.
+define internal %NykVal @__nyk_pow(%NykVal %a, %NykVal %b) alwaysinline {
+  %ta = extractvalue %NykVal %a, 0
+  %tb = extractvalue %NykVal %b, 0
+  %ai = icmp eq i8 %ta, 2
+  %bi = icmp eq i8 %tb, 2
+  %both_int = and i1 %ai, %bi
+  br i1 %both_int, label %int_path, label %flt_path
+int_path:
+  %va = extractvalue %NykVal %a, 1
+  %vb = extractvalue %NykVal %b, 1
+  %exp_ok = icmp sge i64 %vb, 0
+  br i1 %exp_ok, label %int_pow, label %flt_path
+int_pow:
+  %p = call i64 @__nyk_ipow(i64 %va, i64 %vb)
+  %ri = call %NykVal @__nyk_mk_int(i64 %p)
+  ret %NykVal %ri
+flt_path:
+  %fa = call double @__nyk_as_f64(%NykVal %a)
+  %fb = call double @__nyk_as_f64(%NykVal %b)
+  %fp = call double @llvm.pow.f64(double %fa, double %fb)
+  %rf = call %NykVal @__nyk_mk_float(double %fp)
+  ret %NykVal %rf
 }
 
 define internal %NykVal @__nyk_bitand(%NykVal %a, %NykVal %b) alwaysinline {
-  %va = extractvalue %NykVal %a, 1
-  %vb = extractvalue %NykVal %b, 1
+  %va = call i64 @__nyk_as_i64(%NykVal %a)
+  %vb = call i64 @__nyk_as_i64(%NykVal %b)
   %res = and i64 %va, %vb
   %ri = call %NykVal @__nyk_mk_int(i64 %res)
   ret %NykVal %ri
 }
 
 define internal %NykVal @__nyk_bitor(%NykVal %a, %NykVal %b) alwaysinline {
-  %va = extractvalue %NykVal %a, 1
-  %vb = extractvalue %NykVal %b, 1
+  %va = call i64 @__nyk_as_i64(%NykVal %a)
+  %vb = call i64 @__nyk_as_i64(%NykVal %b)
   %res = or i64 %va, %vb
   %ri = call %NykVal @__nyk_mk_int(i64 %res)
   ret %NykVal %ri
 }
 
 define internal %NykVal @__nyk_bitxor(%NykVal %a, %NykVal %b) alwaysinline {
-  %va = extractvalue %NykVal %a, 1
-  %vb = extractvalue %NykVal %b, 1
+  %va = call i64 @__nyk_as_i64(%NykVal %a)
+  %vb = call i64 @__nyk_as_i64(%NykVal %b)
   %res = xor i64 %va, %vb
   %ri = call %NykVal @__nyk_mk_int(i64 %res)
   ret %NykVal %ri
 }
 
+; LLVM shifts by >= 64 bits are poison. These count-checked forms give 0
+; (or the sign for an arithmetic right shift) instead; a negative count, as
+; an unsigned number, is >= 64 too.
+define internal i64 @__nyk_shl_i64(i64 %a, i64 %n) alwaysinline {
+  %big = icmp uge i64 %n, 64
+  %m = and i64 %n, 63
+  %s = shl i64 %a, %m
+  %r = select i1 %big, i64 0, i64 %s
+  ret i64 %r
+}
+
+define internal i64 @__nyk_ashr_i64(i64 %a, i64 %n) alwaysinline {
+  %big = icmp uge i64 %n, 64
+  %m = and i64 %n, 63
+  %s = ashr i64 %a, %m
+  %sign = ashr i64 %a, 63
+  %r = select i1 %big, i64 %sign, i64 %s
+  ret i64 %r
+}
+
+define internal i64 @__nyk_lshr_i64(i64 %a, i64 %n) alwaysinline {
+  %big = icmp uge i64 %n, 64
+  %m = and i64 %n, 63
+  %s = lshr i64 %a, %m
+  %r = select i1 %big, i64 0, i64 %s
+  ret i64 %r
+}
+
+; `<<` and `>>` shift the other way for a negative count, as in the VM.
 define internal %NykVal @__nyk_shl(%NykVal %a, %NykVal %b) alwaysinline {
-  %va = extractvalue %NykVal %a, 1
-  %vb = extractvalue %NykVal %b, 1
-  %res = shl i64 %va, %vb
+  %va = call i64 @__nyk_as_i64(%NykVal %a)
+  %vb = call i64 @__nyk_as_i64(%NykVal %b)
+  %is_neg = icmp slt i64 %vb, 0
+  %nb = sub i64 0, %vb
+  %left = call i64 @__nyk_shl_i64(i64 %va, i64 %vb)
+  %right = call i64 @__nyk_ashr_i64(i64 %va, i64 %nb)
+  %res = select i1 %is_neg, i64 %right, i64 %left
   %ri = call %NykVal @__nyk_mk_int(i64 %res)
   ret %NykVal %ri
 }
 
 define internal %NykVal @__nyk_shr(%NykVal %a, %NykVal %b) alwaysinline {
-  %va = extractvalue %NykVal %a, 1
-  %vb = extractvalue %NykVal %b, 1
-  %res = ashr i64 %va, %vb
+  %va = call i64 @__nyk_as_i64(%NykVal %a)
+  %vb = call i64 @__nyk_as_i64(%NykVal %b)
+  %is_neg = icmp slt i64 %vb, 0
+  %nb = sub i64 0, %vb
+  %right = call i64 @__nyk_ashr_i64(i64 %va, i64 %vb)
+  %left = call i64 @__nyk_shl_i64(i64 %va, i64 %nb)
+  %res = select i1 %is_neg, i64 %left, i64 %right
+  %ri = call %NykVal @__nyk_mk_int(i64 %res)
+  ret %NykVal %ri
+}
+
+; `<<<` and `>>>` are logical shifts on the 64-bit word: any count outside
+; 0..63, negative included, gives 0.
+define internal %NykVal @__nyk_lshl(%NykVal %a, %NykVal %b) alwaysinline {
+  %va = call i64 @__nyk_as_i64(%NykVal %a)
+  %vb = call i64 @__nyk_as_i64(%NykVal %b)
+  %res = call i64 @__nyk_shl_i64(i64 %va, i64 %vb)
   %ri = call %NykVal @__nyk_mk_int(i64 %res)
   ret %NykVal %ri
 }
 
 define internal %NykVal @__nyk_lshr(%NykVal %a, %NykVal %b) alwaysinline {
-  %va = extractvalue %NykVal %a, 1
-  %vb = extractvalue %NykVal %b, 1
-  %res = lshr i64 %va, %vb
+  %va = call i64 @__nyk_as_i64(%NykVal %a)
+  %vb = call i64 @__nyk_as_i64(%NykVal %b)
+  %res = call i64 @__nyk_lshr_i64(i64 %va, i64 %vb)
   %ri = call %NykVal @__nyk_mk_int(i64 %res)
   ret %NykVal %ri
 }
@@ -295,8 +553,10 @@ define internal %NykVal @__nyk_lshr(%NykVal %a, %NykVal %b) alwaysinline {
 define internal %NykVal @__nyk_neg(%NykVal %a) alwaysinline {
   %ta = extractvalue %NykVal %a, 0
   %va = extractvalue %NykVal %a, 1
-  %is_flt = icmp eq i8 %ta, 3
-  br i1 %is_flt, label %flt, label %intp
+  switch i8 %ta, label %bad [
+    i8 2, label %intp
+    i8 3, label %flt
+  ]
 flt:
   %fa = bitcast i64 %va to double
   %fneg = fneg double %fa
@@ -306,6 +566,9 @@ intp:
   %ineg = sub i64 0, %va
   %ri = call %NykVal @__nyk_mk_int(i64 %ineg)
   ret %NykVal %ri
+bad:
+  call void @__nyk_error(ptr @.err_unary_minus)
+  unreachable
 }
 
 define internal %NykVal @__nyk_not(%NykVal %a) alwaysinline {
@@ -316,7 +579,7 @@ define internal %NykVal @__nyk_not(%NykVal %a) alwaysinline {
 }
 
 define internal %NykVal @__nyk_bitnot(%NykVal %a) alwaysinline {
-  %va = extractvalue %NykVal %a, 1
+  %va = call i64 @__nyk_as_i64(%NykVal %a)
   %res = xor i64 %va, -1
   %ri = call %NykVal @__nyk_mk_int(i64 %res)
   ret %NykVal %ri
