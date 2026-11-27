@@ -58,6 +58,7 @@ The bytecode format changes between Neyuki versions. A `.nykb` written by anothe
 - A runtime error prints `runtime error: <message>` to standard error, without the source location and stack trace, and exits with status 1.
 - Floats print and concatenate with `printf("%g")`, so `1/3` shows as `0.333333`.
 - Strings end at their first zero byte, for `==`, `<` and `..` as well.
+- Functions return one value, so a call as the last argument (`print(f())`), in `return f()` or at the end of a table constructor passes on its first result only, and `nil` when it returns nothing.
 
 ### Building apps
 

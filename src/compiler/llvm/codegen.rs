@@ -84,6 +84,11 @@ pub struct FunctionEmitter<'a> {
     self_name: Option<String>,
     self_llvm_sym: String,
     upvalue_names: Vec<String>,
+    /// `alloca`s that belong in the entry block, spliced in by `emit_body`
+    /// so that every stack slot is allocated once per call, where mem2reg
+    /// and SROA expect it, rather than at the instruction that needs it.
+    entry_allocas: String,
+    next_label: usize,
 }
 
 impl<'a> FunctionEmitter<'a> {
@@ -97,6 +102,195 @@ impl<'a> FunctionEmitter<'a> {
             self_name: None,
             self_llvm_sym: String::new(),
             upvalue_names: Vec::new(),
+            entry_allocas: String::new(),
+            next_label: 0,
+        }
+    }
+
+    /// A fresh label suffix for the blocks one call site emits.
+    fn label_id(&mut self) -> usize {
+        let id = self.next_label;
+        self.next_label += 1;
+        id
+    }
+
+    /// Allocates `ty` in the entry block and returns the pointer register.
+    fn entry_alloca(&mut self, ty: &str) -> String {
+        let p = self.tmp();
+        let _ = writeln!(self.entry_allocas, "  {} = alloca {}", p, ty);
+        p
+    }
+
+    /// Calls `callee` with `args`, returning the register holding its first
+    /// result. A function value (tag 6) is called directly through its
+    /// pointer, the `print` builtin (tag 7) prints inline, and anything
+    /// else goes to `__nyk_call_dyn` with the arguments in a
+    /// `[N x %NykVal]` array, for the runtime to call natives, tables with
+    /// `__call` and so on.
+    fn emit_call(&mut self, callee: &str, args: &[String]) -> String {
+        let id = self.label_id();
+        let lbl_direct = format!("call_dir_{}", id);
+        let lbl_dyn = format!("call_dyn_{}", id);
+        let lbl_prt = format!("call_prt_{}", id);
+        let lbl_ext = format!("call_ext_{}", id);
+        let lbl_join = format!("call_join_{}", id);
+
+        let tag = self.tmp();
+        let _ = writeln!(self.out, "  {} = extractvalue %NykVal {}, 0", tag, callee);
+        let is_fn = self.tmp();
+        let _ = writeln!(self.out, "  {} = icmp eq i8 {}, 6", is_fn, tag);
+        let _ = writeln!(
+            self.out,
+            "  br i1 {}, label %{}, label %{}",
+            is_fn, lbl_direct, lbl_dyn
+        );
+
+        // Direct function-pointer invocation path
+        let _ = writeln!(self.out, "{}:", lbl_direct);
+        let raw_ptr = self.tmp();
+        let _ = writeln!(
+            self.out,
+            "  {} = extractvalue %NykVal {}, 1",
+            raw_ptr, callee
+        );
+        let fn_ptr = self.tmp();
+        let _ = writeln!(self.out, "  {} = inttoptr i64 {} to ptr", fn_ptr, raw_ptr);
+        let arg_list: Vec<String> = args.iter().map(|a| format!("%NykVal {}", a)).collect();
+        let direct_res = self.tmp();
+        let _ = writeln!(
+            self.out,
+            "  {} = call %NykVal {}({})",
+            direct_res,
+            fn_ptr,
+            arg_list.join(", ")
+        );
+        let _ = writeln!(self.out, "  br label %{}", lbl_join);
+
+        // Dynamic fallback path: prints if tag == 7, else __nyk_call_dyn
+        let _ = writeln!(self.out, "{}:", lbl_dyn);
+        let is_prt = self.tmp();
+        let _ = writeln!(self.out, "  {} = icmp eq i8 {}, 7", is_prt, tag);
+        let _ = writeln!(
+            self.out,
+            "  br i1 {}, label %{}, label %{}",
+            is_prt, lbl_prt, lbl_ext
+        );
+
+        let _ = writeln!(self.out, "{}:", lbl_prt);
+        self.emit_print(args);
+        let prt_res = self.tmp();
+        let _ = writeln!(self.out, "  {} = call %NykVal @__nyk_mk_nil()", prt_res);
+        let _ = writeln!(self.out, "  br label %{}", lbl_join);
+
+        let _ = writeln!(self.out, "{}:", lbl_ext);
+        let argv = self.emit_argv(args);
+        let dyn_res = self.tmp();
+        let _ = writeln!(
+            self.out,
+            "  {} = call %NykVal @__nyk_call_dyn(%NykVal {}, i32 {}, ptr {})",
+            dyn_res,
+            callee,
+            args.len(),
+            argv
+        );
+        let _ = writeln!(self.out, "  br label %{}", lbl_join);
+
+        let _ = writeln!(self.out, "{}:", lbl_join);
+        let merged = self.tmp();
+        let _ = writeln!(
+            self.out,
+            "  {} = phi %NykVal [ {}, %{} ], [ {}, %{} ], [ {}, %{} ]",
+            merged, direct_res, lbl_direct, prt_res, lbl_prt, dyn_res, lbl_ext
+        );
+        merged
+    }
+
+    /// Stores `args` into a `[N x %NykVal]` array allocated in the entry
+    /// block and returns a pointer to it (`null` when there are none).
+    fn emit_argv(&mut self, args: &[String]) -> String {
+        if args.is_empty() {
+            return "null".to_string();
+        }
+        let ty = format!("[{} x %NykVal]", args.len());
+        let argv = self.entry_alloca(&ty);
+        for (i, a) in args.iter().enumerate() {
+            let slot = self.tmp();
+            let _ = writeln!(
+                self.out,
+                "  {} = getelementptr inbounds {}, ptr {}, i64 0, i64 {}",
+                slot, ty, argv, i
+            );
+            let _ = writeln!(self.out, "  store %NykVal {}, ptr {}", a, slot);
+        }
+        argv
+    }
+
+    fn emit_print(&mut self, args: &[String]) {
+        for (i, a) in args.iter().enumerate() {
+            if i > 0 {
+                self.out.push_str("  call void @__nyk_print_sp()\n");
+            }
+            let _ = writeln!(self.out, "  call void @__nyk_print_one(%NykVal {})", a);
+        }
+        self.out.push_str("  call void @__nyk_print_nl()\n");
+    }
+
+    /// The first value a spread source produces. Functions return one value
+    /// in this backend, so a trailing call or `...` contributes just that.
+    fn eval_spread_first(&mut self, source: &MirSpreadSource) -> String {
+        match source {
+            MirSpreadSource::Call {
+                callee,
+                args,
+                trailing,
+            } => {
+                let (callee, args) = self.eval_call_parts(callee, args, trailing.as_deref());
+                self.emit_call(&callee, &args)
+            }
+            MirSpreadSource::Vararg => {
+                let res = self.tmp();
+                let _ = writeln!(self.out, "  {} = call %NykVal @__nyk_vararg()", res);
+                res
+            }
+        }
+    }
+
+    /// Evaluates a callee and its arguments in order, the first value of a
+    /// `trailing` spread source last.
+    fn eval_call_parts(
+        &mut self,
+        callee: &Operand,
+        args: &[Operand],
+        trailing: Option<&MirSpreadSource>,
+    ) -> (String, Vec<String>) {
+        let c_val = self.eval_operand(callee);
+        let mut arg_vals: Vec<String> = args.iter().map(|a| self.eval_operand(a)).collect();
+        if let Some(src) = trailing {
+            arg_vals.push(self.eval_spread_first(src));
+        }
+        (c_val, arg_vals)
+    }
+
+    /// Stores a call's result in `dsts`: its value in the first, nil in the
+    /// rest.
+    fn store_call_results(&mut self, dsts: &[LocalId], res: &str) {
+        if let Some(first) = dsts.first() {
+            let _ = writeln!(
+                self.out,
+                "  store %NykVal {}, ptr {}",
+                res,
+                Self::slot(*first)
+            );
+        }
+        for extra in dsts.iter().skip(1) {
+            let nil = self.tmp();
+            let _ = writeln!(self.out, "  {} = call %NykVal @__nyk_mk_nil()", nil);
+            let _ = writeln!(
+                self.out,
+                "  store %NykVal {}, ptr {}",
+                nil,
+                Self::slot(*extra)
+            );
         }
     }
 
@@ -468,6 +662,7 @@ impl<'a> FunctionEmitter<'a> {
             params_sig.join(", ")
         );
         self.out.push_str("entry:\n");
+        let entry_pos = self.out.len();
 
         // Allocate stack slots for all MIR locals so mem2reg/O1 can promote them cleanly.
         for decl in &body.locals {
@@ -511,7 +706,6 @@ impl<'a> FunctionEmitter<'a> {
             self.out.push_str("  ret %NykVal zeroinitializer\n");
         }
 
-        let mut bb_counter = 0usize;
         for bb in &body.blocks {
             let _ = writeln!(self.out, "{}:", Self::bb_name(bb.id));
             for stmt in &bb.statements {
@@ -603,129 +797,17 @@ impl<'a> FunctionEmitter<'a> {
                     target,
                     ..
                 } => {
-                    let is_print = self.is_print_operand(callee);
-                    let arg_vals: Vec<String> = args.iter().map(|a| self.eval_operand(a)).collect();
-                    if is_print {
-                        for (i, a) in arg_vals.iter().enumerate() {
-                            if i > 0 {
-                                self.out.push_str("  call void @__nyk_print_sp()\n");
-                            }
-                            let _ =
-                                writeln!(self.out, "  call void @__nyk_print_one(%NykVal {})", a);
-                        }
-                        self.out.push_str("  call void @__nyk_print_nl()\n");
-                        for d in dsts {
-                            let nil = self.tmp();
-                            let _ = writeln!(self.out, "  {} = call %NykVal @__nyk_mk_nil()", nil);
-                            let _ = writeln!(
-                                self.out,
-                                "  store %NykVal {}, ptr {}",
-                                nil,
-                                Self::slot(*d)
-                            );
-                        }
+                    if self.is_print_operand(callee) {
+                        let arg_vals: Vec<String> =
+                            args.iter().map(|a| self.eval_operand(a)).collect();
+                        self.emit_print(&arg_vals);
+                        let nil = self.tmp();
+                        let _ = writeln!(self.out, "  {} = call %NykVal @__nyk_mk_nil()", nil);
+                        self.store_call_results(dsts, &nil);
                     } else {
-                        let c_val = self.eval_operand(callee);
-                        let tag = self.tmp();
-                        let _ = writeln!(self.out, "  {} = extractvalue %NykVal {}, 0", tag, c_val);
-                        let is_fn = self.tmp();
-                        let _ = writeln!(self.out, "  {} = icmp eq i8 {}, 6", is_fn, tag);
-                        let lbl_direct = format!("call_dir_{}", bb_counter);
-                        let lbl_dyn = format!("call_dyn_{}", bb_counter);
-                        let lbl_join = format!("call_join_{}", bb_counter);
-                        bb_counter += 1;
-
-                        let _ = writeln!(
-                            self.out,
-                            "  br i1 {}, label %{}, label %{}",
-                            is_fn, lbl_direct, lbl_dyn
-                        );
-
-                        // Direct function-pointer invocation path
-                        let _ = writeln!(self.out, "{}:", lbl_direct);
-                        let raw_ptr = self.tmp();
-                        let _ = writeln!(
-                            self.out,
-                            "  {} = extractvalue %NykVal {}, 1",
-                            raw_ptr, c_val
-                        );
-                        let fn_ptr = self.tmp();
-                        let _ =
-                            writeln!(self.out, "  {} = inttoptr i64 {} to ptr", fn_ptr, raw_ptr);
-                        let arg_list: Vec<String> =
-                            arg_vals.iter().map(|a| format!("%NykVal {}", a)).collect();
-                        let direct_res = self.tmp();
-                        let _ = writeln!(
-                            self.out,
-                            "  {} = call %NykVal {}({})",
-                            direct_res,
-                            fn_ptr,
-                            arg_list.join(", ")
-                        );
-                        let _ = writeln!(self.out, "  br label %{}", lbl_join);
-
-                        // Dynamic fallback path (prints if tag==7, else external __nyk_call_dyn)
-                        let _ = writeln!(self.out, "{}:", lbl_dyn);
-                        let is_prt = self.tmp();
-                        let _ = writeln!(self.out, "  {} = icmp eq i8 {}, 7", is_prt, tag);
-                        let lbl_prt = format!("call_prt_{}", bb_counter);
-                        let lbl_ext = format!("call_ext_{}", bb_counter);
-                        bb_counter += 1;
-                        let _ = writeln!(
-                            self.out,
-                            "  br i1 {}, label %{}, label %{}",
-                            is_prt, lbl_prt, lbl_ext
-                        );
-
-                        let _ = writeln!(self.out, "{}:", lbl_prt);
-                        for (i, a) in arg_vals.iter().enumerate() {
-                            if i > 0 {
-                                self.out.push_str("  call void @__nyk_print_sp()\n");
-                            }
-                            let _ =
-                                writeln!(self.out, "  call void @__nyk_print_one(%NykVal {})", a);
-                        }
-                        self.out.push_str("  call void @__nyk_print_nl()\n");
-                        let prt_res = self.tmp();
-                        let _ = writeln!(self.out, "  {} = call %NykVal @__nyk_mk_nil()", prt_res);
-                        let _ = writeln!(self.out, "  br label %{}", lbl_join);
-
-                        let _ = writeln!(self.out, "{}:", lbl_ext);
-                        let dyn_res = self.tmp();
-                        let _ = writeln!(
-                            self.out,
-                            "  {} = call %NykVal @__nyk_call_dyn(%NykVal {}, i32 {}, ptr null)",
-                            dyn_res,
-                            c_val,
-                            arg_vals.len()
-                        );
-                        let _ = writeln!(self.out, "  br label %{}", lbl_join);
-
-                        let _ = writeln!(self.out, "{}:", lbl_join);
-                        let merged = self.tmp();
-                        let _ = writeln!(
-                            self.out,
-                            "  {} = phi %NykVal [ {}, %{} ], [ {}, %{} ], [ {}, %{} ]",
-                            merged, direct_res, lbl_direct, prt_res, lbl_prt, dyn_res, lbl_ext
-                        );
-                        if let Some(first_dst) = dsts.first() {
-                            let _ = writeln!(
-                                self.out,
-                                "  store %NykVal {}, ptr {}",
-                                merged,
-                                Self::slot(*first_dst)
-                            );
-                        }
-                        for extra_dst in dsts.iter().skip(1) {
-                            let nil = self.tmp();
-                            let _ = writeln!(self.out, "  {} = call %NykVal @__nyk_mk_nil()", nil);
-                            let _ = writeln!(
-                                self.out,
-                                "  store %NykVal {}, ptr {}",
-                                nil,
-                                Self::slot(*extra_dst)
-                            );
-                        }
+                        let (c_val, arg_vals) = self.eval_call_parts(callee, args, None);
+                        let res = self.emit_call(&c_val, &arg_vals);
+                        self.store_call_results(dsts, &res);
                     }
                     let _ = writeln!(self.out, "  br label %{}", Self::bb_name(*target));
                 }
@@ -737,50 +819,32 @@ impl<'a> FunctionEmitter<'a> {
                     target,
                     ..
                 } => {
-                    let c_val = self.eval_operand(callee);
-                    let _ = trailing;
-                    let _ = fixed_args;
-                    let dyn_res = self.tmp();
-                    let _ = writeln!(
-                        self.out,
-                        "  {} = call %NykVal @__nyk_call_dyn(%NykVal {}, i32 {}, ptr null)",
-                        dyn_res,
-                        c_val,
-                        fixed_args.len()
-                    );
-                    if let Some(first_dst) = dsts.first() {
-                        let _ = writeln!(
-                            self.out,
-                            "  store %NykVal {}, ptr {}",
-                            dyn_res,
-                            Self::slot(*first_dst)
-                        );
-                    }
+                    let (c_val, arg_vals) =
+                        self.eval_call_parts(callee, fixed_args, Some(trailing));
+                    let res = self.emit_call(&c_val, &arg_vals);
+                    self.store_call_results(dsts, &res);
                     let _ = writeln!(self.out, "  br label %{}", Self::bb_name(*target));
                 }
-                TerminatorKind::SpreadList { target, .. } => {
+                TerminatorKind::SpreadList {
+                    table,
+                    source,
+                    target,
+                } => {
+                    let v = self.eval_spread_first(source);
+                    let t = self.eval_place(&Place::local(*table));
+                    let _ = writeln!(
+                        self.out,
+                        "  call void @__nyk_table_append(%NykVal {}, %NykVal {})",
+                        t, v
+                    );
                     let _ = writeln!(self.out, "  br label %{}", Self::bb_name(*target));
                 }
                 TerminatorKind::SpreadReturn { values, source } => {
-                    // Functions here return one value, so the first one wins.
-                    let ret_val = match (values.first(), source) {
-                        (Some(first), _) => self.eval_operand(first),
-                        (None, MirSpreadSource::Call { callee, .. }) => {
-                            let c_val = self.eval_operand(callee);
-                            let res = self.tmp();
-                            let _ = writeln!(
-                                self.out,
-                                "  {} = call %NykVal @__nyk_call_dyn(%NykVal {}, i32 0, ptr null)",
-                                res, c_val
-                            );
-                            res
-                        }
-                        (None, MirSpreadSource::Vararg) => {
-                            let res = self.tmp();
-                            let _ = writeln!(self.out, "  {} = call %NykVal @__nyk_vararg()", res);
-                            res
-                        }
-                    };
+                    // Functions here return one value, so the first one wins,
+                    // but the source still runs for its side effects.
+                    let vals: Vec<String> = values.iter().map(|v| self.eval_operand(v)).collect();
+                    let from_source = self.eval_spread_first(source);
+                    let ret_val = vals.into_iter().next().unwrap_or(from_source);
                     let _ = writeln!(self.out, "  ret %NykVal {}", ret_val);
                 }
                 TerminatorKind::ForPrep {
@@ -888,26 +952,24 @@ impl<'a> FunctionEmitter<'a> {
                 }
                 TerminatorKind::TForStep {
                     base,
+                    state,
+                    ctrl,
                     vars,
                     body_bb,
                     exit_bb,
-                    ..
                 } => {
+                    // vars = base(state, ctrl); stop on nil, else ctrl = vars[0].
                     let iter_fn = self.eval_place(&Place::local(*base));
-                    let first = self.tmp();
+                    let st = self.eval_place(&Place::local(*state));
+                    let ct = self.eval_place(&Place::local(*ctrl));
+                    let first = self.emit_call(&iter_fn, &[st, ct]);
+                    self.store_call_results(vars, &first);
                     let _ = writeln!(
                         self.out,
-                        "  {} = call %NykVal @__nyk_call_dyn(%NykVal {}, i32 2, ptr null)",
-                        first, iter_fn
+                        "  store %NykVal {}, ptr {}",
+                        first,
+                        Self::slot(*ctrl)
                     );
-                    if let Some(v0) = vars.first() {
-                        let _ = writeln!(
-                            self.out,
-                            "  store %NykVal {}, ptr {}",
-                            first,
-                            Self::slot(*v0)
-                        );
-                    }
                     let tag = self.tmp();
                     let _ = writeln!(self.out, "  {} = extractvalue %NykVal {}, 0", tag, first);
                     let is_nil = self.tmp();
@@ -935,6 +997,7 @@ impl<'a> FunctionEmitter<'a> {
         }
 
         self.out.push_str("}\n");
+        self.out.insert_str(entry_pos, &self.entry_allocas);
 
         let mut combined = child_defs;
         combined.push_str(&self.out);
