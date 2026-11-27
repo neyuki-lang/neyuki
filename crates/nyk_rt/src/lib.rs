@@ -4,8 +4,9 @@
 //!
 //! The generated code keeps arithmetic, comparisons and `print` inline and
 //! calls the functions here for everything that needs the heap or global
-//! state. Globals, closures, strings built by `..`, `#` and the `select`
-//! builtin work; tables, module imports and varargs are stubs for now.
+//! state. Globals, closures, tables, strings built by `..`, `#`, varargs,
+//! multiple return values, the `select` builtin and `require` of the modules
+//! the program was built with work; `import_get` is a stub for now.
 //!
 //! # ABI
 //!
@@ -22,6 +23,20 @@
 //! - argument lists are pointers to arrays of [`NykVal`] in memory, whose
 //!   layout matches the IR's under the module's `target datalayout`.
 //!
+//! # Calls and multiple values
+//!
+//! Every function the compiler generates has the signature
+//! `i32 f(env: *const *mut NykVal, args: *const NykVal, argc: u32)`: its
+//! arguments are `argc` values at `args` (it reads a missing parameter as
+//! nil, ignores the surplus and reads `...` from the end of the named
+//! parameters on), and it returns the number of results `n`. The results
+//! themselves are in the *return area*, which holds the `n` values at
+//! [`__nyk_ret_buf`]`(n)`: the callee reserves room and stores them as its
+//! last act, and the caller reads them before it makes another call. There
+//! is one area per thread, which only ever grows. The runtime follows the
+//! same convention, so [`__nyk_call_dyn`] returns a count too, and a builtin
+//! such as `select` can return any number of values.
+//!
 //! # Closures
 //!
 //! A function value (tag 6) points to a closure object: an array of
@@ -31,12 +46,24 @@
 //! code calls through word 0 and reads and writes the cells of its own
 //! locals; closures and cells, like strings, are never freed yet.
 //!
+//! # Tables
+//!
+//! A table (tag 5) points to a leaked [`Table`]: a growable array part for
+//! keys `1..=n` and a hash map for every other key, split and trimmed like
+//! the VM's so `#t`, nil keys, NaN keys and `t[1.0]` behave the same. Its
+//! address is its identity, so `==` stays pointer equality, and its
+//! elements are plain [`NykVal`]s, so it holds strings, functions and other
+//! tables alike. Tables are never freed yet, like strings and closures.
+//! Not supported: metatables, frozen tables, and indexing a string (reads
+//! nil).
+//!
 //! `src/compiler/llvm/runtime.rs` in the `neyuki` crate declares the same
 //! signatures.
 
+use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_int, c_void};
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 pub const TAG_NIL: u8 = 0;
@@ -246,7 +273,7 @@ pub unsafe extern "C" fn __nyk_upval_set(env: *const *mut NykVal, idx: u32, tag:
     unsafe { *__nyk_upval_cell(env, idx) = NykVal::new(tag, raw) }
 }
 
-// ---- modules and tables (stubs) ------------------------------------------------
+// ---- modules (stub) --------------------------------------------------------------
 
 /// # Safety
 ///
@@ -261,48 +288,363 @@ pub unsafe extern "C" fn __nyk_import_get(
     unsafe { put(out, NykVal::NIL) }
 }
 
-/// A new (stub) table. Each one gets its own identity, so two tables are
-/// not equal.
+// ---- require -----------------------------------------------------------------------
+
+/// The code of a module's chunk: a generated function (see "Calls and
+/// multiple values"), called with the module's closure object as `env`.
+type ModuleChunk = unsafe extern "C" fn(*const c_void, *const NykVal, u32) -> u32;
+
+/// Where a module is in its life, like the VM's `modules` map: absent until
+/// `require` runs it.
+#[derive(Clone, Copy)]
+enum ModuleState {
+    /// Running. A `require` of it from itself (through other modules) gets
+    /// this table instead of running it again.
+    Loading(NykVal),
+    Done(NykVal),
+}
+
+#[derive(Default)]
+struct Modules {
+    /// The closure object of each module, by every name `require` may use
+    /// for it (see [`__nyk_module`]).
+    by_name: HashMap<Vec<u8>, usize>,
+    /// Loading or loaded modules, by closure object.
+    state: HashMap<usize, ModuleState>,
+}
+
+thread_local! {
+    static MODULES: RefCell<Modules> = RefCell::new(Modules::default());
+}
+
+/// Registers the module whose chunk is the generated function in the
+/// closure object `closure`, to be loaded by `require(name)`. The compiler
+/// calls it once per name, before the entry script runs, for every module
+/// the project names with a constant string.
+///
+/// # Safety
+///
+/// `name` must be a NUL-terminated string, and `closure` a closure object
+/// that lives for the rest of the program, whose code is a generated
+/// function.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __nyk_module(name: *const c_char, closure: *const c_void) {
+    // SAFETY: guaranteed by the caller.
+    let name = unsafe { CStr::from_ptr(name) }.to_bytes().to_vec();
+    MODULES.with_borrow_mut(|modules| {
+        modules.by_name.insert(name, closure as usize);
+    });
+}
+
+/// `require(name)`: the value a module returns. The first `require` runs
+/// the module's chunk, and every later one returns the same value, whatever
+/// the spelling (the compiler registered each spelling of a module under
+/// the same chunk). While a module runs, a `require` of it returns an empty
+/// table instead, as in the VM. A module that does not return a value is
+/// nil.
+///
+/// `MODULES` is not borrowed while the chunk runs, and the runtime holds no
+/// table reference across the call (see `table_mut`), so the chunk may call
+/// `require` and the table functions freely.
+fn native_require(args: &[NykVal]) -> Cow<'_, [NykVal]> {
+    let Some(name) = args.first() else {
+        fail("require expects a module path");
+    };
+    if name.tag != TAG_STRING {
+        fail("require expects string argument");
+    }
+    // SAFETY: string values come from the program.
+    let name_bytes = unsafe { name.str_bytes() };
+    let found = MODULES.with_borrow(|modules| {
+        let closure = modules.by_name.get(name_bytes).copied()?;
+        Some((closure, modules.state.get(&closure).copied()))
+    });
+    let Some((closure, state)) = found else {
+        fail(&format!(
+            "cannot find module '{}': it is not compiled into this executable (a native build \
+             has the modules that require() names with a constant string, but no \
+             standard library modules or native packages yet)",
+            String::from_utf8_lossy(name_bytes)
+        ));
+    };
+    match state {
+        Some(ModuleState::Done(val)) => return Cow::Owned(vec![val]),
+        Some(ModuleState::Loading(pending)) => return Cow::Owned(vec![pending]),
+        None => {}
+    }
+    let mut pending = NykVal::NIL;
+    // SAFETY: a valid out-pointer.
+    unsafe { __nyk_table_new(&mut pending, 0, 0) };
+    MODULES.with_borrow_mut(|modules| {
+        modules.state.insert(closure, ModuleState::Loading(pending));
+    });
+    // SAFETY: word 0 of a closure object is its code, a generated function.
+    let code = unsafe { *(closure as *const *const c_void) };
+    // SAFETY: a generated function has the signature of `ModuleChunk`.
+    let chunk: ModuleChunk = unsafe { std::mem::transmute(code) };
+    // SAFETY: the closure object is the chunk's `env`, and it takes no
+    // arguments.
+    let n = unsafe { chunk(closure as *const c_void, std::ptr::null(), 0) };
+    let val = if n == 0 {
+        NykVal::NIL
+    } else {
+        // SAFETY: the chunk's `n` results are in the return area.
+        unsafe { *__nyk_ret_buf(0) }
+    };
+    MODULES.with_borrow_mut(|modules| {
+        modules.state.insert(closure, ModuleState::Done(val));
+    });
+    Cow::Owned(vec![val])
+}
+
+// ---- tables ------------------------------------------------------------------------
+
+/// A key of the hash part. Strings compare by content (they are leaked, so
+/// the slice lives forever), numbers by value after [`normalize_key`], and
+/// everything else by identity.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Key {
+    Bool(bool),
+    Int(i64),
+    /// The bits of a float that is not an integer.
+    Float(u64),
+    Str(&'static [u8]),
+    /// A table, function or builtin: its tag and its pointer or index.
+    Ref(u8, i64),
+}
+
+impl Key {
+    /// The key of a value that [`normalize_key`] accepted.
+    fn of(val: NykVal) -> Key {
+        match val.tag {
+            TAG_BOOL => Key::Bool(val.raw != 0),
+            TAG_INT => Key::Int(val.raw),
+            TAG_FLOAT => Key::Float(val.raw as u64),
+            // SAFETY: string values come from the program.
+            TAG_STRING => Key::Str(unsafe { val.str_bytes() }),
+            tag => Key::Ref(tag, val.raw),
+        }
+    }
+}
+
+/// The key `key` stands for, or why it is not one. As in the VM, a float
+/// with an integer value is the same key as that integer (`t[1.0]` is
+/// `t[1]`, and `-0.0` is `0`), and nil and NaN are not keys.
+fn normalize_key(key: NykVal) -> Result<NykVal, &'static str> {
+    match key.tag {
+        TAG_NIL => Err("table index is nil"),
+        TAG_FLOAT => {
+            let f = f64::from_bits(key.raw as u64);
+            if f.is_nan() {
+                Err("table index is NaN")
+            } else if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+                Ok(NykVal::int(f as i64))
+            } else {
+                // `0.0` and `-0.0` were integers above, so the bits are unique.
+                Ok(key)
+            }
+        }
+        _ => Ok(key),
+    }
+}
+
+/// A table, laid out like the VM's: an array part holding keys `1..=len`
+/// and a hash part for every other key. `#t` is the length of the array
+/// part, so it matches the VM, `nil` holes included.
+///
+/// A table lives in a leaked allocation and its [`NykVal`] (tag
+/// [`TAG_TABLE`]) holds the address, which never changes: two values are
+/// the same table exactly when their `raw` is equal. The table can hold any
+/// [`NykVal`], including tables and functions. Nothing is freed yet. Generated
+/// code is single-threaded, so there is no locking.
+#[derive(Default)]
+struct Table {
+    array: Vec<NykVal>,
+    /// `(key as the script gave it, value)`, never holding a nil value.
+    hash: HashMap<Key, (NykVal, NykVal)>,
+}
+
+impl Table {
+    fn get(&self, key: NykVal) -> NykVal {
+        let Ok(key) = normalize_key(key) else {
+            return NykVal::NIL;
+        };
+        if key.tag == TAG_INT
+            && let Some(slot) = array_slot(key.raw, self.array.len())
+        {
+            return self.array[slot];
+        }
+        self.hash
+            .get(&Key::of(key))
+            .map_or(NykVal::NIL, |&(_, val)| val)
+    }
+
+    /// Assigns `t[key] = val`; assigning nil removes the entry.
+    fn set(&mut self, key: NykVal, val: NykVal) -> Result<(), &'static str> {
+        let key = normalize_key(key)?;
+        if key.tag == TAG_INT && key.raw >= 1 {
+            let len = self.array.len();
+            if let Some(slot) = array_slot(key.raw, len) {
+                self.array[slot] = val;
+                if slot + 1 == len {
+                    self.trim();
+                }
+                return Ok(());
+            }
+            if key.raw as u64 == len as u64 + 1 {
+                if val.tag == TAG_NIL {
+                    self.hash.remove(&Key::of(key));
+                } else {
+                    self.array.push(val);
+                    self.absorb();
+                }
+                return Ok(());
+            }
+        }
+        if val.tag == TAG_NIL {
+            self.hash.remove(&Key::of(key));
+        } else {
+            self.hash.insert(Key::of(key), (key, val));
+        }
+        Ok(())
+    }
+
+    /// Drops trailing nils off the array part, so `#t` shrinks with
+    /// `t[#t] = nil`.
+    fn trim(&mut self) {
+        while self.array.last().is_some_and(|v| v.tag == TAG_NIL) {
+            self.array.pop();
+        }
+    }
+
+    /// Moves the integer keys that now continue the array part into it.
+    fn absorb(&mut self) {
+        while !self.hash.is_empty() {
+            let next = Key::Int(self.array.len() as i64 + 1);
+            match self.hash.remove(&next) {
+                Some((_, val)) => self.array.push(val),
+                None => break,
+            }
+        }
+    }
+}
+
+/// The index in an array part of `len` elements of key `key`, if it has one.
+fn array_slot(key: i64, len: usize) -> Option<usize> {
+    (key >= 1 && (key as u64) <= len as u64).then(|| key as usize - 1)
+}
+
+/// The table a value is, or the VM's error for something else: reading
+/// (`write` false) or setting a field of it.
+///
+/// # Safety
+///
+/// A table value must point to a table of this runtime, as every one the
+/// generated code holds does, and the result must not outlive the next
+/// call into the runtime that touches the same table.
+unsafe fn table_mut<'a>(val: NykVal, write: bool) -> Result<&'a mut Table, String> {
+    if val.tag == TAG_TABLE {
+        // SAFETY: guaranteed by the caller.
+        Ok(unsafe { &mut *(val.raw as usize as *mut Table) })
+    } else if write {
+        Err(format!(
+            "attempted to set a field on a {} value",
+            val.type_name()
+        ))
+    } else {
+        Err(format!("attempted to index a {} value", val.type_name()))
+    }
+}
+
+/// A new, empty table with room for `array_cap` array elements and
+/// `fields_cap` other keys.
 ///
 /// # Safety
 ///
 /// `out` must be valid for writing.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __nyk_table_new(out: *mut NykVal, _array_cap: u32, _fields_cap: u32) {
-    static NEXT_ID: AtomicI64 = AtomicI64::new(1);
-    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+pub unsafe extern "C" fn __nyk_table_new(out: *mut NykVal, array_cap: u32, fields_cap: u32) {
+    let table = Box::new(Table {
+        array: Vec::with_capacity(array_cap as usize),
+        hash: HashMap::with_capacity(fields_cap as usize),
+    });
+    let ptr = Box::into_raw(table);
     // SAFETY: guaranteed by the caller.
-    unsafe { put(out, NykVal::new(TAG_TABLE, id)) }
+    unsafe { put(out, NykVal::new(TAG_TABLE, ptr as usize as i64)) }
 }
 
+/// `t[k]`. A missing key, a nil key and a NaN key read as nil; indexing
+/// anything but a table is an error, except a string, which reads nil
+/// (the VM looks it up in the string library, which this runtime lacks).
+///
 /// # Safety
 ///
-/// `out` must be valid for writing.
+/// `out` must be valid for writing, and a table operand a table of this
+/// runtime.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __nyk_table_get(
     out: *mut NykVal,
-    _t_tag: u8,
-    _t_raw: i64,
-    _k_tag: u8,
-    _k_raw: i64,
+    t_tag: u8,
+    t_raw: i64,
+    k_tag: u8,
+    k_raw: i64,
+) {
+    let base = NykVal::new(t_tag, t_raw);
+    let val = if base.tag == TAG_STRING {
+        NykVal::NIL
+    } else {
+        // SAFETY: guaranteed by the caller.
+        match unsafe { table_mut(base, false) } {
+            Ok(table) => table.get(NykVal::new(k_tag, k_raw)),
+            Err(msg) => fail(&msg),
+        }
+    };
+    // SAFETY: guaranteed by the caller.
+    unsafe { put(out, val) }
+}
+
+/// `t[k] = v`; nil removes the entry. A nil or NaN key is an error.
+///
+/// # Safety
+///
+/// A table operand must be a table of this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __nyk_table_set(
+    t_tag: u8,
+    t_raw: i64,
+    k_tag: u8,
+    k_raw: i64,
+    v_tag: u8,
+    v_raw: i64,
 ) {
     // SAFETY: guaranteed by the caller.
-    unsafe { put(out, NykVal::NIL) }
+    let result = unsafe { table_mut(NykVal::new(t_tag, t_raw), true) }.and_then(|table| {
+        table
+            .set(NykVal::new(k_tag, k_raw), NykVal::new(v_tag, v_raw))
+            .map_err(String::from)
+    });
+    if let Err(msg) = result {
+        fail(&msg);
+    }
 }
 
+/// Pushes `v` on the array part of `t`, as table constructors do for their
+/// positional items (a nil is kept, so `#{1, nil}` is 2, as in the VM).
+///
+/// # Safety
+///
+/// A table operand must be a table of this runtime.
 #[unsafe(no_mangle)]
-pub extern "C" fn __nyk_table_set(
-    _t_tag: u8,
-    _t_raw: i64,
-    _k_tag: u8,
-    _k_raw: i64,
-    _v_tag: u8,
-    _v_raw: i64,
-) {
+pub unsafe extern "C" fn __nyk_table_append(t_tag: u8, t_raw: i64, v_tag: u8, v_raw: i64) {
+    if t_tag != TAG_TABLE {
+        fail("cannot append to non-table");
+    }
+    // SAFETY: guaranteed by the caller.
+    match unsafe { table_mut(NykVal::new(t_tag, t_raw), true) } {
+        Ok(table) => table.array.push(NykVal::new(v_tag, v_raw)),
+        Err(msg) => fail(&msg),
+    }
 }
-
-#[unsafe(no_mangle)]
-pub extern "C" fn __nyk_table_append(_t_tag: u8, _t_raw: i64, _v_tag: u8, _v_raw: i64) {}
 
 // ---- strings -----------------------------------------------------------------
 
@@ -400,7 +742,8 @@ pub unsafe extern "C" fn __nyk_concat(
     unsafe { put(out, NykVal::string(&text)) }
 }
 
-/// `#v`: the byte length of a string; 0 for a (stub) table.
+/// `#v`: the byte length of a string, or the length of the array part of a
+/// table.
 ///
 /// # Safety
 ///
@@ -412,7 +755,8 @@ pub unsafe extern "C" fn __nyk_len(out: *mut NykVal, tag: u8, raw: i64) {
     let len = match tag {
         // SAFETY: guaranteed by the caller.
         TAG_STRING => unsafe { val.str_bytes() }.len() as i64,
-        TAG_TABLE => 0,
+        // SAFETY: guaranteed by the caller.
+        TAG_TABLE => unsafe { table_mut(val, false) }.map_or(0, |t| t.array.len() as i64),
         _ => fail("len expects string, table or buffer"),
     };
     // SAFETY: guaranteed by the caller.
@@ -445,53 +789,81 @@ pub unsafe extern "C" fn __nyk_closure(
     unsafe { put(out, NykVal::new(TAG_FN, ptr as usize as i64)) }
 }
 
-/// A builtin of this runtime: its arguments in, its first result out.
-type Native = fn(&[NykVal]) -> NykVal;
+/// A builtin of this runtime: its arguments in, all its results out.
+type Native = for<'a> fn(&'a [NykVal]) -> Cow<'a, [NykVal]>;
 
 /// The builtins this runtime provides, as `(global name, function)`.
-static NATIVES: &[(&str, Native)] = &[("select", native_select)];
+static NATIVES: &[(&str, Native)] = &[("select", native_select), ("require", native_require)];
 
-/// `select(n, ...)`: the `n`th of the remaining arguments (counting from
-/// the end when negative), or `select("#", ...)`: how many there are. Only
-/// the first result is returned, like every call in this backend.
-fn native_select(args: &[NykVal]) -> NykVal {
+/// `select(n, ...)`: the remaining arguments from the `n`th on (counting
+/// from the end when negative), or `select("#", ...)`: how many there are.
+fn native_select(args: &[NykVal]) -> Cow<'_, [NykVal]> {
+    const BAD_INDEX: &str = "select expects '#' or an index within range";
     let Some((selector, rest)) = args.split_first() else {
-        fail("select expects '#' or an index within range");
+        fail(BAD_INDEX);
     };
     // SAFETY: string values come from the program.
     if selector.tag == TAG_STRING && unsafe { selector.str_bytes() } == b"#" {
-        return NykVal::int(rest.len() as i64);
+        return Cow::Owned(vec![NykVal::int(rest.len() as i64)]);
     }
-    let n = match selector.tag {
-        TAG_INT => selector.raw,
-        TAG_FLOAT => f64::from_bits(selector.raw as u64) as i64,
-        _ => fail("select expects '#' or an index within range"),
-    };
-    let len = rest.len() as i64;
-    let idx = if n > 0 {
-        n - 1
-    } else if n < 0 && -n <= len {
-        len + n
+    // Like the VM, only an integer selects (not a float with an integer
+    // value).
+    if selector.tag != TAG_INT {
+        fail(BAD_INDEX);
+    }
+    let n = selector.raw;
+    if n > 0 {
+        Cow::Borrowed(
+            rest.get(usize::try_from(n - 1).unwrap_or(usize::MAX)..)
+                .unwrap_or(&[]),
+        )
+    } else if n < 0 && n.unsigned_abs() <= rest.len() as u64 {
+        Cow::Borrowed(&rest[rest.len() - n.unsigned_abs() as usize..])
     } else {
-        fail("select expects '#' or an index within range");
-    };
-    rest.get(idx as usize).copied().unwrap_or(NykVal::NIL)
+        fail(BAD_INDEX)
+    }
+}
+
+thread_local! {
+    /// The return area: where a function leaves its results (see "Calls and
+    /// multiple values" above). It holds at least as many values as the
+    /// largest request so far; only the first `n` of a call that returned
+    /// `n` results mean anything.
+    static RETURN_AREA: RefCell<Vec<NykVal>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The return area, with room for at least `n` values. A later call may
+/// move it, but what it holds stays. `__nyk_ret_buf(0)` is where the results
+/// of the call that just returned are.
+#[unsafe(no_mangle)]
+pub extern "C" fn __nyk_ret_buf(n: u32) -> *mut NykVal {
+    RETURN_AREA.with_borrow_mut(|area| {
+        if area.len() < n as usize {
+            area.resize(n as usize, NykVal::NIL);
+        }
+        area.as_mut_ptr()
+    })
+}
+
+/// Leaves `vals` in the return area and returns how many there are.
+fn set_results(vals: &[NykVal]) -> u32 {
+    let area = __nyk_ret_buf(vals.len() as u32);
+    // SAFETY: the area holds at least `vals.len()` values, and `vals` is not
+    // in it (the generated code passes arguments from its own stack, and
+    // natives return their own values or a slice of the arguments).
+    unsafe { std::ptr::copy(vals.as_ptr(), area, vals.len()) };
+    vals.len() as u32
 }
 
 /// Calls a value that is not a function of the generated code: a builtin
-/// of this runtime. Anything else is an error.
+/// of this runtime. Anything else is an error. Returns the number of
+/// results, which are in the return area.
 ///
 /// # Safety
 ///
-/// `out` must be valid for writing and `argv` must point to `argc` values.
+/// `argv` must point to `argc` values, or `argc` must be 0.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __nyk_call_dyn(
-    out: *mut NykVal,
-    tag: u8,
-    raw: i64,
-    argc: u32,
-    argv: *const NykVal,
-) {
+pub unsafe extern "C" fn __nyk_call_dyn(tag: u8, raw: i64, argc: u32, argv: *const NykVal) -> u32 {
     let callee = NykVal::new(tag, raw);
     let native = match tag {
         TAG_NATIVE => usize::try_from(raw).ok().and_then(|idx| NATIVES.get(idx)),
@@ -504,43 +876,31 @@ pub unsafe extern "C" fn __nyk_call_dyn(
         ));
     };
     // SAFETY: guaranteed by the caller.
-    let result = native(unsafe { args(argc, argv) });
-    // SAFETY: guaranteed by the caller.
-    unsafe { put(out, result) }
-}
-
-/// `...`, which is always empty for now.
-///
-/// # Safety
-///
-/// `out` must be valid for writing.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __nyk_vararg(out: *mut NykVal) {
-    // SAFETY: guaranteed by the caller.
-    unsafe { put(out, NykVal::NIL) }
+    let results = native(unsafe { args(argc, argv) });
+    set_results(&results)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn call(name: &str, args: &[NykVal]) -> NykVal {
+    /// Calls the builtin `name` and returns all its results.
+    fn call_all(name: &str, args: &[NykVal]) -> Vec<NykVal> {
         let cname = std::ffi::CString::new(name).unwrap();
         let mut callee = NykVal::NIL;
-        let mut out = NykVal::NIL;
-        // SAFETY: valid out-pointers, a NUL-terminated name and `args.len()`
-        // values at `args`.
+        // SAFETY: a valid out-pointer, a NUL-terminated name and
+        // `args.len()` values at `args`; the results are the first `n` of
+        // the return area.
         unsafe {
             __nyk_global_get(&mut callee, cname.as_ptr());
-            __nyk_call_dyn(
-                &mut out,
-                callee.tag,
-                callee.raw,
-                args.len() as u32,
-                args.as_ptr(),
-            );
+            let n = __nyk_call_dyn(callee.tag, callee.raw, args.len() as u32, args.as_ptr());
+            std::slice::from_raw_parts(__nyk_ret_buf(0), n as usize).to_vec()
         }
-        out
+    }
+
+    /// The first result of the builtin `name`, nil if it returns none.
+    fn call(name: &str, args: &[NykVal]) -> NykVal {
+        call_all(name, args).first().copied().unwrap_or(NykVal::NIL)
     }
 
     #[test]
@@ -568,6 +928,31 @@ mod tests {
         }
     }
 
+    static CHUNK_RUNS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+    /// A module chunk like the generated ones: returns the number of runs.
+    unsafe extern "C" fn counting_chunk(_env: *const c_void, _args: *const NykVal, _n: u32) -> u32 {
+        let runs = CHUNK_RUNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        set_results(&[NykVal::int(i64::from(runs))])
+    }
+
+    #[test]
+    fn require_runs_a_module_once_whatever_its_name() {
+        // The closure object of a module: its code in word 0.
+        let object: &'static [*const c_void; 1] =
+            Box::leak(Box::new([counting_chunk as *const c_void]));
+        let object = object.as_ptr() as *const c_void;
+        for name in [c"dir/mod", c"./dir/mod.nyk"] {
+            // SAFETY: NUL-terminated names and a closure object that lives
+            // forever, whose code has the generated functions' signature.
+            unsafe { __nyk_module(name.as_ptr(), object) };
+        }
+        let first = call("require", &[NykVal::string(b"dir/mod")]);
+        let second = call("require", &[NykVal::string(b"./dir/mod.nyk")]);
+        assert_eq!((first, second), (NykVal::int(1), NykVal::int(1)));
+        assert_eq!(CHUNK_RUNS.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
     #[test]
     fn nyk_val_matches_the_ir_layout() {
         // `{ i8, i64 }`: the tag at offset 0, the payload 8-aligned.
@@ -593,6 +978,56 @@ mod tests {
         assert_eq!(call("select", &c), NykVal::int(2));
         let d = [NykVal::int(5), NykVal::int(1)];
         assert_eq!(call("select", &d), NykVal::NIL);
+    }
+
+    #[test]
+    fn select_returns_every_value_from_its_index_on() {
+        let (x, y, z) = (NykVal::int(10), NykVal::int(20), NykVal::int(30));
+        assert_eq!(call_all("select", &[NykVal::int(2), x, y, z]), [y, z]);
+        assert_eq!(call_all("select", &[NykVal::int(1), x, y, z]), [x, y, z]);
+        assert_eq!(call_all("select", &[NykVal::int(-2), x, y, z]), [y, z]);
+        assert_eq!(call_all("select", &[NykVal::int(-3), x, y, z]), [x, y, z]);
+        // Past the end there is nothing, which is not an error.
+        assert_eq!(call_all("select", &[NykVal::int(4), x, y, z]), []);
+        assert_eq!(call_all("select", &[NykVal::int(2)]), []);
+        assert_eq!(
+            call_all("select", &[NykVal::string(b"#"), x, NykVal::NIL]),
+            [NykVal::int(2)]
+        );
+        assert_eq!(
+            call_all("select", &[NykVal::string(b"#")]),
+            [NykVal::int(0)]
+        );
+    }
+
+    #[test]
+    fn the_return_area_grows_and_keeps_its_values() {
+        let first = __nyk_ret_buf(2);
+        // SAFETY: the area holds at least 2 values.
+        unsafe {
+            first.write(NykVal::int(1));
+            first.add(1).write(NykVal::int(2));
+        }
+        // Asking for less never shrinks it, and asking for more keeps what
+        // it holds, wherever it ends up.
+        assert!(!__nyk_ret_buf(0).is_null());
+        let grown = __nyk_ret_buf(1000);
+        // SAFETY: the area holds at least 1000 values.
+        unsafe {
+            assert_eq!(*grown, NykVal::int(1));
+            assert_eq!(*grown.add(1), NykVal::int(2));
+            assert_eq!(*grown.add(999), NykVal::NIL);
+        }
+    }
+
+    #[test]
+    fn set_results_copies_the_values_into_the_area() {
+        let vals = [NykVal::int(7), NykVal::NIL, NykVal::int(9)];
+        assert_eq!(set_results(&vals), 3);
+        // SAFETY: the area holds at least 3 values.
+        let got = unsafe { std::slice::from_raw_parts(__nyk_ret_buf(0), 3) };
+        assert_eq!(got, vals);
+        assert_eq!(set_results(&[]), 0);
     }
 
     #[test]
@@ -640,5 +1075,137 @@ mod closure_tests {
         }
         assert_ne!(a, b);
         assert_eq!(got, NykVal::int(7));
+    }
+}
+
+#[cfg(test)]
+mod table_tests {
+    use super::*;
+
+    fn new_table() -> NykVal {
+        let mut t = NykVal::NIL;
+        // SAFETY: a valid out-pointer.
+        unsafe { __nyk_table_new(&mut t, 0, 0) };
+        t
+    }
+
+    fn get(t: NykVal, k: NykVal) -> NykVal {
+        let mut out = NykVal::NIL;
+        // SAFETY: a valid out-pointer and a table of this runtime.
+        unsafe { __nyk_table_get(&mut out, t.tag, t.raw, k.tag, k.raw) };
+        out
+    }
+
+    fn set(t: NykVal, k: NykVal, v: NykVal) {
+        // SAFETY: a table of this runtime.
+        unsafe { __nyk_table_set(t.tag, t.raw, k.tag, k.raw, v.tag, v.raw) }
+    }
+
+    fn append(t: NykVal, v: NykVal) {
+        // SAFETY: a table of this runtime.
+        unsafe { __nyk_table_append(t.tag, t.raw, v.tag, v.raw) }
+    }
+
+    fn len(t: NykVal) -> i64 {
+        let mut out = NykVal::NIL;
+        // SAFETY: a valid out-pointer and a table of this runtime.
+        unsafe { __nyk_len(&mut out, t.tag, t.raw) };
+        out.raw
+    }
+
+    fn float(f: f64) -> NykVal {
+        NykVal::new(TAG_FLOAT, f.to_bits() as i64)
+    }
+
+    #[test]
+    fn tables_have_their_own_identity() {
+        let (a, b) = (new_table(), new_table());
+        assert_eq!(a.tag, TAG_TABLE);
+        assert_ne!(a, b);
+        assert_eq!(a, a);
+    }
+
+    #[test]
+    fn array_and_hash_parts_round_trip() {
+        let t = new_table();
+        append(t, NykVal::int(10));
+        append(t, NykVal::int(20));
+        set(t, NykVal::string(b"name"), NykVal::int(7));
+        set(t, NykVal::int(100), NykVal::int(8));
+        assert_eq!(len(t), 2);
+        assert_eq!(get(t, NykVal::int(2)), NykVal::int(20));
+        assert_eq!(get(t, NykVal::string(b"name")), NykVal::int(7));
+        assert_eq!(get(t, NykVal::int(100)), NykVal::int(8));
+        assert_eq!(get(t, NykVal::int(3)), NykVal::NIL);
+        assert_eq!(get(t, NykVal::string(b"missing")), NykVal::NIL);
+        // Overwrite, then remove.
+        set(t, NykVal::string(b"name"), NykVal::int(9));
+        assert_eq!(get(t, NykVal::string(b"name")), NykVal::int(9));
+        set(t, NykVal::string(b"name"), NykVal::NIL);
+        assert_eq!(get(t, NykVal::string(b"name")), NykVal::NIL);
+    }
+
+    #[test]
+    fn length_follows_the_array_part_like_the_vm() {
+        let t = new_table();
+        set(t, NykVal::int(1), NykVal::int(1));
+        set(t, NykVal::int(3), NykVal::int(3));
+        assert_eq!(len(t), 1);
+        // Key 2 closes the gap: 3 moves from the hash into the array.
+        set(t, NykVal::int(2), NykVal::int(2));
+        assert_eq!(len(t), 3);
+        set(t, NykVal::int(3), NykVal::NIL);
+        assert_eq!(len(t), 2);
+        // A hole in the middle keeps the length.
+        set(t, NykVal::int(1), NykVal::NIL);
+        assert_eq!(len(t), 2);
+        set(t, NykVal::int(2), NykVal::NIL);
+        assert_eq!(len(t), 0);
+        // Constructors keep nils.
+        let u = new_table();
+        append(u, NykVal::int(1));
+        append(u, NykVal::NIL);
+        assert_eq!(len(u), 2);
+    }
+
+    #[test]
+    fn floats_with_integer_values_are_integer_keys() {
+        let t = new_table();
+        set(t, float(1.0), NykVal::int(5));
+        assert_eq!(get(t, NykVal::int(1)), NykVal::int(5));
+        assert_eq!(len(t), 1);
+        set(t, float(2.5), NykVal::int(6));
+        assert_eq!(get(t, float(2.5)), NykVal::int(6));
+        set(t, float(-0.0), NykVal::int(7));
+        assert_eq!(get(t, NykVal::int(0)), NykVal::int(7));
+        assert_eq!(get(t, float(f64::NAN)), NykVal::NIL);
+        assert_eq!(get(t, NykVal::NIL), NykVal::NIL);
+    }
+
+    #[test]
+    fn keys_and_values_can_be_tables_and_strings() {
+        let (t, k, v) = (new_table(), new_table(), new_table());
+        set(t, k, v);
+        assert_eq!(get(t, k), v);
+        assert_eq!(get(t, new_table()), NykVal::NIL);
+        // Strings compare by content, not address.
+        set(t, NykVal::string(b"a"), k);
+        assert_eq!(get(t, NykVal::string(b"a")), k);
+        set(t, NykVal::new(TAG_BOOL, 1), NykVal::int(1));
+        assert_eq!(get(t, NykVal::new(TAG_BOOL, 1)), NykVal::int(1));
+        assert_eq!(get(t, NykVal::new(TAG_BOOL, 0)), NykVal::NIL);
+    }
+
+    #[test]
+    fn invalid_keys_are_rejected() {
+        let mut t = Table::default();
+        assert_eq!(
+            t.set(NykVal::NIL, NykVal::int(1)),
+            Err("table index is nil")
+        );
+        assert_eq!(
+            t.set(float(f64::NAN), NykVal::int(1)),
+            Err("table index is NaN")
+        );
     }
 }

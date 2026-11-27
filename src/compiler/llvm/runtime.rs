@@ -21,6 +21,36 @@
 //! - an argument list is a `ptr` to a `[N x %NykVal]` array in memory, laid
 //!   out per the module's `target datalayout` (`#[repr(C)]` in Rust).
 //!
+//! # Calls and multiple values
+//!
+//! Every function the compiler generates has the same signature,
+//! `i32 @f(ptr %env, ptr %args, i32 %argc)`, so that a direct call, a call
+//! through `__nyk_call_dyn` and a call made by the runtime look alike
+//! whatever the number of arguments or results:
+//!
+//! - the arguments are `%argc` values in the `[N x %NykVal]` array at
+//!   `%args` (null when there are none). The callee reads its `k`th
+//!   parameter as nil when `k >= %argc`, ignores the surplus, and reads `...`
+//!   as the values from `%args[nparams]` on. The array belongs to the caller
+//!   and outlives the call;
+//! - the function returns the number of results `n`, and the results are in
+//!   the runtime's *return area*: `n` values at the pointer
+//!   `__nyk_ret_buf(n)` gives (`__nyk_ret_buf(0)` is the current one). A
+//!   callee reserves room for its results and stores them as its last act,
+//!   and the caller reads them before it calls anything that returns results
+//!   itself or that grows the area, padding with nil or dropping the extra
+//!   as its context wants. A call that is the last in an argument list or
+//!   table constructor, or in a `return`, keeps all its results: they are
+//!   copied into the new list straight away. The generated code also copies
+//!   the arguments of such a call to the stack (with `llvm.stacksave`, as
+//!   their number is not known at compile time);
+//! - `__nyk_call_dyn(tag, raw, argc, argv)` follows the same convention for
+//!   anything that is not a generated function: it returns the number of
+//!   results, which are in the return area.
+//!
+//! A function that returns without values (a bare `return`, or the end of the
+//! function) returns one nil, as the VM's bytecode does.
+//!
 //! # Closures
 //!
 //! A function value (tag 6) points to a closure object, an array of
@@ -77,8 +107,9 @@ declare void @__nyk_table_append(i8 zeroext, i64, i8 zeroext, i64)
 declare void @__nyk_concat(ptr, i8 zeroext, i64, i8 zeroext, i64)
 declare void @__nyk_len(ptr, i8 zeroext, i64)
 declare void @__nyk_closure(ptr, ptr, i32, ptr)
-declare void @__nyk_call_dyn(ptr, i8 zeroext, i64, i32, ptr)
-declare void @__nyk_vararg(ptr)
+declare ptr @__nyk_ret_buf(i32)
+declare i32 @__nyk_call_dyn(i8 zeroext, i64, i32, ptr)
+declare void @__nyk_module(ptr, ptr)
 
 "#;
 
@@ -145,7 +176,9 @@ define internal void @__nyk_import_get(ptr %out, ptr %mod, ptr %field) {
   ret void
 }
 
-; Tables are stubs here, but each one gets its own allocation so that two
+; Tables are stubs here: a hash table is not worth writing in IR, so real
+; tables exist only with libnyk_rt (--runtime=extern). Reads give nil and
+; writes do nothing, but each table gets its own allocation so that two
 ; tables are not equal.
 define internal void @__nyk_table_new(ptr %out, i32 %arr, i32 %map) {
   %p = call ptr @malloc(i64 16)
@@ -263,14 +296,42 @@ define internal void @__nyk_closure(ptr %out, ptr %fn_ptr, i32 %ncaps, ptr %caps
   ret void
 }
 
-define internal void @__nyk_call_dyn(ptr %out, i8 zeroext %tag, i64 %raw, i32 %argc, ptr %argv) {
-  store %NykVal zeroinitializer, ptr %out
+; Calling something that is not a generated function: no builtins here, so
+; it does nothing and returns no results.
+define internal i32 @__nyk_call_dyn(i8 zeroext %tag, i64 %raw, i32 %argc, ptr %argv) {
+  ret i32 0
+}
+
+; Modules are registered for `require` by libnyk_rt only; a program of
+; several modules needs --runtime=extern.
+define internal void @__nyk_module(ptr %name, ptr %closure) {
   ret void
 }
 
-define internal void @__nyk_vararg(ptr %out) {
-  store %NykVal zeroinitializer, ptr %out
-  ret void
+; The return area (see "Calls and multiple values"): room for at least `n`
+; values, growing and keeping what it holds.
+@__nyk_ret_area = internal global ptr null
+@__nyk_ret_cap = internal global i64 0
+
+define internal ptr @__nyk_ret_buf(i32 %n) {
+  %need = zext i32 %n to i64
+  %cap = load i64, ptr @__nyk_ret_cap
+  %grow = icmp ugt i64 %need, %cap
+  br i1 %grow, label %grow_bb, label %done
+grow_bb:
+  %big = icmp ugt i64 %need, 16
+  %newcap = select i1 %big, i64 %need, i64 16
+  %old = load ptr, ptr @__nyk_ret_area
+  %val_end = getelementptr %NykVal, ptr null, i64 1
+  %val_size = ptrtoint ptr %val_end to i64
+  %bytes = mul i64 %newcap, %val_size
+  %new = call ptr @realloc(ptr %old, i64 %bytes)
+  store ptr %new, ptr @__nyk_ret_area
+  store i64 %newcap, ptr @__nyk_ret_cap
+  br label %done
+done:
+  %p = load ptr, ptr @__nyk_ret_area
+  ret ptr %p
 }
 
 "#;
@@ -288,7 +349,11 @@ declare i32 @snprintf(ptr, i64, ptr, ...)
 declare i32 @strcmp(ptr, ptr)
 declare i64 @strlen(ptr)
 declare ptr @malloc(i64)
+declare ptr @realloc(ptr, i64)
 declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)
+declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1)
+declare ptr @llvm.stacksave.p0()
+declare void @llvm.stackrestore.p0(ptr)
 declare void @exit(i32) noreturn
 declare double @llvm.fabs.f64(double)
 declare double @llvm.floor.f64(double)
@@ -947,6 +1012,70 @@ p_float:
 p_str:
   %p = inttoptr i64 %raw to ptr
   call i32 (ptr, ...) @printf(ptr @.fmt_str, ptr %p)
+  ret void
+}
+
+; `print(...)` of the `argc` values at `argv`, for a call whose number of
+; arguments is not known at compile time.
+define internal void @__nyk_print_list(ptr %argv, i32 %argc) {
+entry:
+  br label %loop
+loop:
+  %i = phi i32 [ 0, %entry ], [ %next, %show ]
+  %more = icmp ult i32 %i, %argc
+  br i1 %more, label %body, label %done
+body:
+  %first = icmp eq i32 %i, 0
+  br i1 %first, label %show, label %sep
+sep:
+  call void @__nyk_print_sp()
+  br label %show
+show:
+  %iz = zext i32 %i to i64
+  %slot = getelementptr %NykVal, ptr %argv, i64 %iz
+  %v = load %NykVal, ptr %slot
+  call void @__nyk_print_one(%NykVal %v)
+  %next = add i32 %i, 1
+  br label %loop
+done:
+  call void @__nyk_print_nl()
+  ret void
+}
+
+@__nyk_nilval = private constant %NykVal zeroinitializer
+
+; Element `i` of the `n` values at `p`, nil past the end (`p` may be null
+; when `n` is 0).
+define internal %NykVal @__nyk_list_get(ptr %p, i32 %n, i32 %i) alwaysinline {
+  %has = icmp ult i32 %i, %n
+  %iz = zext i32 %i to i64
+  %slot = getelementptr %NykVal, ptr %p, i64 %iz
+  %src = select i1 %has, ptr %slot, ptr @__nyk_nilval
+  %v = load %NykVal, ptr %src
+  ret %NykVal %v
+}
+
+; Appends the `n` values at `p` to the table `t`, as a table constructor
+; does with a trailing call or `...`.
+define internal void @__nyk_append_list(%NykVal %t, ptr %p, i32 %n) {
+entry:
+  %tt = extractvalue %NykVal %t, 0
+  %tr = extractvalue %NykVal %t, 1
+  br label %loop
+loop:
+  %i = phi i32 [ 0, %entry ], [ %next, %body ]
+  %more = icmp ult i32 %i, %n
+  br i1 %more, label %body, label %done
+body:
+  %iz = zext i32 %i to i64
+  %slot = getelementptr %NykVal, ptr %p, i64 %iz
+  %v = load %NykVal, ptr %slot
+  %vt = extractvalue %NykVal %v, 0
+  %vr = extractvalue %NykVal %v, 1
+  call void @__nyk_table_append(i8 zeroext %tt, i64 %tr, i8 zeroext %vt, i64 %vr)
+  %next = add i32 %i, 1
+  br label %loop
+done:
   ret void
 }
 

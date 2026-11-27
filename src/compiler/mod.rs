@@ -365,13 +365,12 @@ pub fn dump_mir_source_with_options(source: &str, options: Options) -> Result<St
 }
 
 /// Parses, checks (when `options.check`), and compiles `source` through
-/// `AST -> HIR -> THIR -> MIR -> LLVM IR`, returning textual `.ll` output.
-pub fn compile_source_to_llvm_ir(
+/// `AST -> HIR -> THIR -> MIR`, ready for the LLVM backend.
+pub fn compile_source_to_mir(
     source: &str,
     chunk: &str,
     options: Options,
-    llvm_options: &llvm::LlvmOptions,
-) -> Result<String, String> {
+) -> Result<mir::MirProgram, String> {
     let parsed = parse_or_render_syntax_errors(source, chunk)?;
     if options.check {
         check(
@@ -391,6 +390,18 @@ pub fn compile_source_to_llvm_ir(
     let thir_module = thir::lower_hir_to_thir(&hir_module);
     let mut mir_program = mir::lower_thir_to_mir(&thir_module, options.keep_locals);
     mir::optimize_mir(&mut mir_program, options.opt_level);
+    Ok(mir_program)
+}
+
+/// Compiles `source` through `AST -> HIR -> THIR -> MIR -> LLVM IR`,
+/// returning textual `.ll` output.
+pub fn compile_source_to_llvm_ir(
+    source: &str,
+    chunk: &str,
+    options: Options,
+    llvm_options: &llvm::LlvmOptions,
+) -> Result<String, String> {
+    let mir_program = compile_source_to_mir(source, chunk, options)?;
     Ok(llvm::emit_llvm_ir_with(
         &mir_program,
         options.opt_level,

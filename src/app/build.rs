@@ -40,7 +40,7 @@ Options:
                         write <name>.nykpak and launchers that run it on an
                         installed Neyuki with globally installed packages
 
-neyuki build --native <file> compiles a single script to a native
+neyuki build --native [file|project] compiles a script or project to a native
 executable through LLVM instead (see `neyuki build --native --help`).";
 
 /// What to build. Relative paths are taken from the working directory,

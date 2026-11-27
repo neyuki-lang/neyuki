@@ -2,7 +2,7 @@
 
 use crate::compiler::OptLevel;
 use crate::compiler::llvm::codegen::{
-    FunctionEmitter, LlvmModuleCollector, emit_string_constants, emit_user_globals,
+    FunctionEmitter, LlvmModuleCollector, emit_string_constants, emit_user_globals, main_symbol,
 };
 use crate::compiler::llvm::runtime::{RuntimeMode, emit_runtime_prelude};
 use crate::compiler::llvm::target::TargetSpec;
@@ -28,12 +28,53 @@ pub fn emit_llvm_ir_with(
     opt_level: OptLevel,
     options: &LlvmOptions,
 ) -> String {
+    let entry = ModuleUnit {
+        program,
+        names: &[],
+    };
+    emit_llvm_modules(&[entry], opt_level, options)
+}
+
+/// One module of a program that is emitted as a single LLVM module.
+pub struct ModuleUnit<'a> {
+    pub program: &'a MirProgram,
+    /// The strings `require` names this module by. The entry script has
+    /// none: nothing requires it.
+    pub names: &'a [String],
+}
+
+/// Emits textual LLVM IR (`.ll`) for a program of several modules: the
+/// first of `units` is the entry script, which `main` runs, and the others
+/// are the modules it (transitively) `require`s. They share one LLVM module,
+/// with a symbol prefix per module, and `main` registers each of them with
+/// the runtime under its `names` (see `__nyk_module`) for `require`.
+pub fn emit_llvm_modules(
+    units: &[ModuleUnit],
+    opt_level: OptLevel,
+    options: &LlvmOptions,
+) -> String {
     let mut collector = LlvmModuleCollector::new();
-    collector.collect_program(program);
+    for (module, unit) in units.iter().enumerate() {
+        collector.collect_program(unit.program, module);
+    }
 
     let mut fn_ir = String::new();
-    let emitter = FunctionEmitter::new(&mut collector, 0);
-    fn_ir.push_str(&emitter.emit_body(&program.main, "nyk_main"));
+    for (module, unit) in units.iter().enumerate() {
+        let emitter = FunctionEmitter::new(&mut collector, module, 0);
+        fn_ir.push_str(&emitter.emit_body(&unit.program.main, &main_symbol(module)));
+    }
+
+    let mut registrations = String::new();
+    for (module, unit) in units.iter().enumerate().skip(1) {
+        for name in unit.names {
+            let (sym, _) = collector.intern_string(name);
+            registrations.push_str(&format!(
+                "  call void @__nyk_module(ptr {}, ptr @{}.closure)\n",
+                sym,
+                main_symbol(module)
+            ));
+        }
+    }
 
     let opt_note = match opt_level {
         OptLevel::O0 => "-O0",
@@ -56,14 +97,9 @@ pub fn emit_llvm_ir_with(
     out.push_str(&emit_string_constants(&collector.string_literals));
     out.push_str(&emit_user_globals(&collector.user_globals));
     out.push_str(&fn_ir);
-    out.push_str(
-        r#"
-define i32 @main() {
-entry:
-  %res = call %NykVal @nyk_main(ptr @nyk_main.closure)
-  ret i32 0
-}
-"#,
-    );
+    out.push_str(&format!(
+        "\ndefine i32 @main() {{\nentry:\n{}  %res = call i32 @nyk_main(ptr @nyk_main.closure, ptr null, i32 0)\n  ret i32 0\n}}\n",
+        registrations
+    ));
     out
 }
