@@ -2,26 +2,47 @@
 //! file contents, appended to a copy of the runtime executable.
 //!
 //! ```text
-//! payload  b"NYKPAK\0\x01"
+//! payload  b"NYKPAK\0\x02"
 //!          u32 count, then count × (str key, str value)   app metadata
-//!          u32 count, then count × (str path, u64 size)   files, in order
-//!          the file contents, back to back
+//!          u32 count, then count ×                        files, in order
+//!              (str path, u8 method, u64 stored, u64 size)
+//!          the stored file contents, back to back
 //! trailer  u64 payload size, b"NYKAPP\0\x01"              executables only
 //! ```
 //!
 //! Integers are little-endian and a `str` is a `u32` byte length followed by
-//! UTF-8. The trailer sits at the very end of the executable, so the runtime
-//! finds the payload by reading the last 16 bytes of its own file. Nothing
-//! but the index is read at startup; file contents are read when asked for.
+//! UTF-8. `method` is 0 for a file stored as it is and 1 for raw deflate;
+//! `stored` is the length in the payload and `size` the length once read.
+//! [`pack`] deflates a file only when that makes it noticeably smaller, so
+//! PNGs, fonts and other already compressed assets stay stored. Version 1
+//! payloads (`b"NYKPAK\0\x01"`, an index of `(str path, u64 size)` and every
+//! file stored) are still read, so older `.nykpak` files keep running.
+//!
+//! The trailer sits at the very end of the executable, so the runtime finds
+//! the payload by reading the last 16 bytes of its own file. Nothing but the
+//! index is read at startup; file contents are read when asked for.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
-use std::io::{self, BufReader, Read, Seek, SeekFrom};
+use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use flate2::Compression;
+use flate2::read::DeflateDecoder;
+use flate2::write::DeflateEncoder;
+
 /// Starts the payload; the last byte is the format version.
-pub const PAYLOAD_MAGIC: &[u8; 8] = b"NYKPAK\0\x01";
+pub const PAYLOAD_MAGIC: &[u8; 8] = b"NYKPAK\0\x02";
+/// Starts a version 1 payload, which stores every file as it is.
+pub const PAYLOAD_MAGIC_V1: &[u8; 8] = b"NYKPAK\0\x01";
+
+/// How a file's contents are stored in the payload.
+const STORED: u8 = 0;
+const DEFLATE: u8 = 1;
+/// Deflate cannot expand data by more than about 1032:1, so a larger claim
+/// is a damaged index (and is refused before anything is allocated).
+const MAX_DEFLATE_RATIO: u64 = 1032;
 /// Ends an executable that carries a payload.
 pub const TRAILER_MAGIC: &[u8; 8] = b"NYKAPP\0\x01";
 /// Payload size plus magic.
@@ -75,14 +96,37 @@ enum Source {
     },
 }
 
+/// Where a file sits in the payload and how to read it.
+#[derive(Clone, Copy, Debug)]
+struct FileEntry {
+    /// Offset of the stored bytes from the first file's contents.
+    offset: u64,
+    /// Length of the stored bytes.
+    stored: u64,
+    /// Length once read (decompressed).
+    size: u64,
+    method: u8,
+}
+
 /// A parsed bundle: metadata, the file index and where to read contents.
 #[derive(Debug)]
 pub struct Bundle {
     meta: BTreeMap<String, String>,
-    /// Normalized path to (offset from the first file, size).
-    files: BTreeMap<String, (u64, u64)>,
+    /// Normalized path to where its contents are.
+    files: BTreeMap<String, FileEntry>,
     dirs: BTreeSet<String>,
     source: Source,
+}
+
+/// `data` deflated, when that saves at least 1/16 of its size; `None` means
+/// `pack` stores it as it is.
+fn deflate(data: &[u8]) -> Result<Option<Vec<u8>>, String> {
+    let mut encoder = DeflateEncoder::new(Vec::new(), Compression::best());
+    let deflated = encoder
+        .write_all(data)
+        .and_then(|()| encoder.finish())
+        .map_err(|err| format!("cannot compress bundle file: {}", err))?;
+    Ok((deflated.len() < data.len() - data.len() / 16).then_some(deflated))
 }
 
 /// Builds a payload. Paths must already be normalized and unique.
@@ -106,13 +150,23 @@ pub fn pack(
         write_str(&mut out, key)?;
         write_str(&mut out, value)?;
     }
+    let deflated = files
+        .iter()
+        .map(|(_, data)| deflate(data))
+        .collect::<Result<Vec<_>, _>>()?;
     write_count(&mut out, files.len())?;
-    for (path, data) in files {
+    for ((path, data), deflated) in files.iter().zip(&deflated) {
         write_str(&mut out, path)?;
+        let (method, stored) = match deflated {
+            Some(bytes) => (DEFLATE, bytes.len()),
+            None => (STORED, data.len()),
+        };
+        out.push(method);
+        out.extend_from_slice(&(stored as u64).to_le_bytes());
         out.extend_from_slice(&(data.len() as u64).to_le_bytes());
     }
-    for (_, data) in files {
-        out.extend_from_slice(data);
+    for ((_, data), deflated) in files.iter().zip(&deflated) {
+        out.extend_from_slice(deflated.as_deref().unwrap_or(data));
     }
     Ok(out)
 }
@@ -191,6 +245,10 @@ impl<R: Read> IndexReader<R> {
         Ok(buf)
     }
 
+    fn u8(&mut self) -> Result<u8, String> {
+        Ok(self.bytes(1)?[0])
+    }
+
     fn u32(&mut self) -> Result<u32, String> {
         let bytes = self.bytes(4)?;
         Ok(u32::from_le_bytes(bytes.try_into().unwrap_or_default()))
@@ -218,9 +276,9 @@ impl<R: Read> IndexReader<R> {
     }
 }
 
-/// A parsed index: metadata, path to (offset, size), and where the contents
-/// start in the payload.
-type Index = (BTreeMap<String, String>, BTreeMap<String, (u64, u64)>, u64);
+/// A parsed index: metadata, path to where its contents are, and where the
+/// contents start in the payload.
+type Index = (BTreeMap<String, String>, BTreeMap<String, FileEntry>, u64);
 
 /// Reads the payload index from `reader`, which holds `payload_len` bytes.
 fn read_index<R: Read>(reader: R, payload_len: u64) -> Result<Index, String> {
@@ -229,9 +287,14 @@ fn read_index<R: Read>(reader: R, payload_len: u64) -> Result<Index, String> {
         consumed: 0,
         limit: payload_len,
     };
-    if input.bytes(PAYLOAD_MAGIC.len())? != PAYLOAD_MAGIC {
+    let magic = input.bytes(PAYLOAD_MAGIC.len())?;
+    let v1 = if magic == PAYLOAD_MAGIC {
+        false
+    } else if magic == PAYLOAD_MAGIC_V1 {
+        true
+    } else {
         return Err("not a Neyuki bundle (or one from another Neyuki version)".to_string());
-    }
+    };
     let mut meta = BTreeMap::new();
     for _ in 0..input.count()? {
         let key = input.string()?;
@@ -239,30 +302,72 @@ fn read_index<R: Read>(reader: R, payload_len: u64) -> Result<Index, String> {
         meta.insert(key, value);
     }
     let file_count = input.count()?;
-    let mut sizes = Vec::with_capacity(file_count.min(1024) as usize);
+    let mut entries = Vec::with_capacity(file_count.min(1024) as usize);
     for _ in 0..file_count {
         let path = input.string()?;
-        let size = input.u64()?;
-        sizes.push((path, size));
+        let (method, stored, size) = if v1 {
+            let size = input.u64()?;
+            (STORED, size, size)
+        } else {
+            (input.u8()?, input.u64()?, input.u64()?)
+        };
+        entries.push((path, method, stored, size));
     }
 
     let base = input.consumed;
     let mut files = BTreeMap::new();
     let mut offset = 0u64;
-    for (path, size) in sizes {
+    for (path, method, stored, size) in entries {
         if normalize(&path).as_deref() != Some(path.as_str()) {
             return Err(format!("bundle holds an invalid path: '{}'", path));
         }
+        let plausible = match method {
+            STORED => size == stored,
+            DEFLATE => size <= stored.saturating_mul(MAX_DEFLATE_RATIO),
+            _ => false,
+        };
+        if !plausible {
+            return Err(format!("bundle index is damaged at '{}'", path));
+        }
         let end = offset
-            .checked_add(size)
+            .checked_add(stored)
             .filter(|end| base.checked_add(*end).is_some_and(|e| e <= payload_len))
             .ok_or_else(|| "bundle contents are truncated".to_string())?;
-        if files.insert(path.clone(), (offset, size)).is_some() {
+        let entry = FileEntry {
+            offset,
+            stored,
+            size,
+            method,
+        };
+        if files.insert(path.clone(), entry).is_some() {
             return Err(format!("bundle holds '{}' twice", path));
         }
         offset = end;
     }
     Ok((meta, files, base))
+}
+
+/// Turns a file's stored bytes back into its contents, checking that they
+/// come to exactly the size the index gives.
+fn decode(entry: FileEntry, stored: Vec<u8>) -> io::Result<Vec<u8>> {
+    if entry.method == STORED {
+        return Ok(stored);
+    }
+    let size = usize::try_from(entry.size).map_err(io::Error::other)?;
+    // A damaged index can still claim up to MAX_DEFLATE_RATIO × stored, so
+    // the buffer only grows that far if the stream really inflates to it.
+    let mut out = Vec::with_capacity(size.min(stored.len().saturating_mul(8)));
+    // One byte past the size, so a stream that inflates further is caught.
+    DeflateDecoder::new(&stored[..])
+        .take(entry.size + 1)
+        .read_to_end(&mut out)?;
+    if out.len() != size {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "bundled file is damaged",
+        ));
+    }
+    Ok(out)
 }
 
 impl Bundle {
@@ -327,7 +432,7 @@ impl Bundle {
 
     fn new(
         meta: BTreeMap<String, String>,
-        files: BTreeMap<String, (u64, u64)>,
+        files: BTreeMap<String, FileEntry>,
         source: Source,
     ) -> Self {
         let mut dirs = BTreeSet::new();
@@ -364,8 +469,8 @@ impl Bundle {
     /// What `path` names in the bundle, if anything.
     pub fn entry(&self, path: &str) -> Option<Entry> {
         let path = normalize(path)?;
-        if let Some(&(_, size)) = self.files.get(&path) {
-            Some(Entry::File { size })
+        if let Some(file) = self.files.get(&path) {
+            Some(Entry::File { size: file.size })
         } else if self.dirs.contains(&path) {
             Some(Entry::Dir)
         } else {
@@ -375,17 +480,21 @@ impl Bundle {
 
     /// The contents of a bundled file, or `None` when it is not bundled.
     pub fn read(&self, path: &str) -> Option<io::Result<Vec<u8>>> {
-        let &(offset, size) = self.files.get(&normalize(path)?)?;
-        Some(match &self.source {
-            Source::Memory(bytes) => Ok(bytes[offset as usize..(offset + size) as usize].to_vec()),
+        let entry = *self.files.get(&normalize(path)?)?;
+        let FileEntry { offset, stored, .. } = entry;
+        let stored = match &self.source {
+            Source::Memory(bytes) => {
+                Ok(bytes[offset as usize..(offset + stored) as usize].to_vec())
+            }
             Source::File { path, base } => (|| {
                 let mut file = File::open(path)?;
                 file.seek(SeekFrom::Start(base + offset))?;
-                let mut buf = vec![0; usize::try_from(size).map_err(io::Error::other)?];
+                let mut buf = vec![0; usize::try_from(stored).map_err(io::Error::other)?];
                 file.read_exact(&mut buf)?;
                 Ok(buf)
             })(),
-        })
+        };
+        Some(stored.and_then(|stored| decode(entry, stored)))
     }
 
     /// The names directly inside a bundled directory, sorted, or `None` when
