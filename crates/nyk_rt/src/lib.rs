@@ -4,8 +4,8 @@
 //!
 //! The generated code keeps arithmetic, comparisons and `print` inline and
 //! calls the functions here for everything that needs the heap or global
-//! state. Globals, closures, strings built by `..`, `#` and the `select`
-//! builtin work; tables, module imports and varargs are stubs for now.
+//! state. Globals, closures, tables, strings built by `..`, `#` and the
+//! `select` builtin work; module imports and varargs are stubs for now.
 //!
 //! # ABI
 //!
@@ -31,12 +31,22 @@
 //! code calls through word 0 and reads and writes the cells of its own
 //! locals; closures and cells, like strings, are never freed yet.
 //!
+//! # Tables
+//!
+//! A table (tag 5) points to a leaked [`Table`]: a growable array part for
+//! keys `1..=n` and a hash map for every other key, split and trimmed like
+//! the VM's so `#t`, nil keys, NaN keys and `t[1.0]` behave the same. Its
+//! address is its identity, so `==` stays pointer equality, and its
+//! elements are plain [`NykVal`]s, so it holds strings, functions and other
+//! tables alike. Tables are never freed yet, like strings and closures.
+//! Not supported: metatables, frozen tables, and indexing a string (reads
+//! nil).
+//!
 //! `src/compiler/llvm/runtime.rs` in the `neyuki` crate declares the same
 //! signatures.
 
 use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_int, c_void};
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 pub const TAG_NIL: u8 = 0;
@@ -246,7 +256,7 @@ pub unsafe extern "C" fn __nyk_upval_set(env: *const *mut NykVal, idx: u32, tag:
     unsafe { *__nyk_upval_cell(env, idx) = NykVal::new(tag, raw) }
 }
 
-// ---- modules and tables (stubs) ------------------------------------------------
+// ---- modules (stub) --------------------------------------------------------------
 
 /// # Safety
 ///
@@ -261,48 +271,254 @@ pub unsafe extern "C" fn __nyk_import_get(
     unsafe { put(out, NykVal::NIL) }
 }
 
-/// A new (stub) table. Each one gets its own identity, so two tables are
-/// not equal.
+// ---- tables ------------------------------------------------------------------------
+
+/// A key of the hash part. Strings compare by content (they are leaked, so
+/// the slice lives forever), numbers by value after [`normalize_key`], and
+/// everything else by identity.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Key {
+    Bool(bool),
+    Int(i64),
+    /// The bits of a float that is not an integer.
+    Float(u64),
+    Str(&'static [u8]),
+    /// A table, function or builtin: its tag and its pointer or index.
+    Ref(u8, i64),
+}
+
+impl Key {
+    /// The key of a value that [`normalize_key`] accepted.
+    fn of(val: NykVal) -> Key {
+        match val.tag {
+            TAG_BOOL => Key::Bool(val.raw != 0),
+            TAG_INT => Key::Int(val.raw),
+            TAG_FLOAT => Key::Float(val.raw as u64),
+            // SAFETY: string values come from the program.
+            TAG_STRING => Key::Str(unsafe { val.str_bytes() }),
+            tag => Key::Ref(tag, val.raw),
+        }
+    }
+}
+
+/// The key `key` stands for, or why it is not one. As in the VM, a float
+/// with an integer value is the same key as that integer (`t[1.0]` is
+/// `t[1]`, and `-0.0` is `0`), and nil and NaN are not keys.
+fn normalize_key(key: NykVal) -> Result<NykVal, &'static str> {
+    match key.tag {
+        TAG_NIL => Err("table index is nil"),
+        TAG_FLOAT => {
+            let f = f64::from_bits(key.raw as u64);
+            if f.is_nan() {
+                Err("table index is NaN")
+            } else if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+                Ok(NykVal::int(f as i64))
+            } else {
+                // `0.0` and `-0.0` were integers above, so the bits are unique.
+                Ok(key)
+            }
+        }
+        _ => Ok(key),
+    }
+}
+
+/// A table, laid out like the VM's: an array part holding keys `1..=len`
+/// and a hash part for every other key. `#t` is the length of the array
+/// part, so it matches the VM, `nil` holes included.
+///
+/// A table lives in a leaked allocation and its [`NykVal`] (tag
+/// [`TAG_TABLE`]) holds the address, which never changes: two values are
+/// the same table exactly when their `raw` is equal. The table can hold any
+/// [`NykVal`], including tables and functions. Nothing is freed yet. Generated
+/// code is single-threaded, so there is no locking.
+#[derive(Default)]
+struct Table {
+    array: Vec<NykVal>,
+    /// `(key as the script gave it, value)`, never holding a nil value.
+    hash: HashMap<Key, (NykVal, NykVal)>,
+}
+
+impl Table {
+    fn get(&self, key: NykVal) -> NykVal {
+        let Ok(key) = normalize_key(key) else {
+            return NykVal::NIL;
+        };
+        if key.tag == TAG_INT
+            && let Some(slot) = array_slot(key.raw, self.array.len())
+        {
+            return self.array[slot];
+        }
+        self.hash
+            .get(&Key::of(key))
+            .map_or(NykVal::NIL, |&(_, val)| val)
+    }
+
+    /// Assigns `t[key] = val`; assigning nil removes the entry.
+    fn set(&mut self, key: NykVal, val: NykVal) -> Result<(), &'static str> {
+        let key = normalize_key(key)?;
+        if key.tag == TAG_INT && key.raw >= 1 {
+            let len = self.array.len();
+            if let Some(slot) = array_slot(key.raw, len) {
+                self.array[slot] = val;
+                if slot + 1 == len {
+                    self.trim();
+                }
+                return Ok(());
+            }
+            if key.raw as u64 == len as u64 + 1 {
+                if val.tag == TAG_NIL {
+                    self.hash.remove(&Key::of(key));
+                } else {
+                    self.array.push(val);
+                    self.absorb();
+                }
+                return Ok(());
+            }
+        }
+        if val.tag == TAG_NIL {
+            self.hash.remove(&Key::of(key));
+        } else {
+            self.hash.insert(Key::of(key), (key, val));
+        }
+        Ok(())
+    }
+
+    /// Drops trailing nils off the array part, so `#t` shrinks with
+    /// `t[#t] = nil`.
+    fn trim(&mut self) {
+        while self.array.last().is_some_and(|v| v.tag == TAG_NIL) {
+            self.array.pop();
+        }
+    }
+
+    /// Moves the integer keys that now continue the array part into it.
+    fn absorb(&mut self) {
+        while !self.hash.is_empty() {
+            let next = Key::Int(self.array.len() as i64 + 1);
+            match self.hash.remove(&next) {
+                Some((_, val)) => self.array.push(val),
+                None => break,
+            }
+        }
+    }
+}
+
+/// The index in an array part of `len` elements of key `key`, if it has one.
+fn array_slot(key: i64, len: usize) -> Option<usize> {
+    (key >= 1 && (key as u64) <= len as u64).then(|| key as usize - 1)
+}
+
+/// The table a value is, or the VM's error for something else: reading
+/// (`write` false) or setting a field of it.
+///
+/// # Safety
+///
+/// A table value must point to a table of this runtime, as every one the
+/// generated code holds does, and the result must not outlive the next
+/// call into the runtime that touches the same table.
+unsafe fn table_mut<'a>(val: NykVal, write: bool) -> Result<&'a mut Table, String> {
+    if val.tag == TAG_TABLE {
+        // SAFETY: guaranteed by the caller.
+        Ok(unsafe { &mut *(val.raw as usize as *mut Table) })
+    } else if write {
+        Err(format!(
+            "attempted to set a field on a {} value",
+            val.type_name()
+        ))
+    } else {
+        Err(format!("attempted to index a {} value", val.type_name()))
+    }
+}
+
+/// A new, empty table with room for `array_cap` array elements and
+/// `fields_cap` other keys.
 ///
 /// # Safety
 ///
 /// `out` must be valid for writing.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __nyk_table_new(out: *mut NykVal, _array_cap: u32, _fields_cap: u32) {
-    static NEXT_ID: AtomicI64 = AtomicI64::new(1);
-    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+pub unsafe extern "C" fn __nyk_table_new(out: *mut NykVal, array_cap: u32, fields_cap: u32) {
+    let table = Box::new(Table {
+        array: Vec::with_capacity(array_cap as usize),
+        hash: HashMap::with_capacity(fields_cap as usize),
+    });
+    let ptr = Box::into_raw(table);
     // SAFETY: guaranteed by the caller.
-    unsafe { put(out, NykVal::new(TAG_TABLE, id)) }
+    unsafe { put(out, NykVal::new(TAG_TABLE, ptr as usize as i64)) }
 }
 
+/// `t[k]`. A missing key, a nil key and a NaN key read as nil; indexing
+/// anything but a table is an error, except a string, which reads nil
+/// (the VM looks it up in the string library, which this runtime lacks).
+///
 /// # Safety
 ///
-/// `out` must be valid for writing.
+/// `out` must be valid for writing, and a table operand a table of this
+/// runtime.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __nyk_table_get(
     out: *mut NykVal,
-    _t_tag: u8,
-    _t_raw: i64,
-    _k_tag: u8,
-    _k_raw: i64,
+    t_tag: u8,
+    t_raw: i64,
+    k_tag: u8,
+    k_raw: i64,
+) {
+    let base = NykVal::new(t_tag, t_raw);
+    let val = if base.tag == TAG_STRING {
+        NykVal::NIL
+    } else {
+        // SAFETY: guaranteed by the caller.
+        match unsafe { table_mut(base, false) } {
+            Ok(table) => table.get(NykVal::new(k_tag, k_raw)),
+            Err(msg) => fail(&msg),
+        }
+    };
+    // SAFETY: guaranteed by the caller.
+    unsafe { put(out, val) }
+}
+
+/// `t[k] = v`; nil removes the entry. A nil or NaN key is an error.
+///
+/// # Safety
+///
+/// A table operand must be a table of this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __nyk_table_set(
+    t_tag: u8,
+    t_raw: i64,
+    k_tag: u8,
+    k_raw: i64,
+    v_tag: u8,
+    v_raw: i64,
 ) {
     // SAFETY: guaranteed by the caller.
-    unsafe { put(out, NykVal::NIL) }
+    let result = unsafe { table_mut(NykVal::new(t_tag, t_raw), true) }.and_then(|table| {
+        table
+            .set(NykVal::new(k_tag, k_raw), NykVal::new(v_tag, v_raw))
+            .map_err(String::from)
+    });
+    if let Err(msg) = result {
+        fail(&msg);
+    }
 }
 
+/// Pushes `v` on the array part of `t`, as table constructors do for their
+/// positional items (a nil is kept, so `#{1, nil}` is 2, as in the VM).
+///
+/// # Safety
+///
+/// A table operand must be a table of this runtime.
 #[unsafe(no_mangle)]
-pub extern "C" fn __nyk_table_set(
-    _t_tag: u8,
-    _t_raw: i64,
-    _k_tag: u8,
-    _k_raw: i64,
-    _v_tag: u8,
-    _v_raw: i64,
-) {
+pub unsafe extern "C" fn __nyk_table_append(t_tag: u8, t_raw: i64, v_tag: u8, v_raw: i64) {
+    if t_tag != TAG_TABLE {
+        fail("cannot append to non-table");
+    }
+    // SAFETY: guaranteed by the caller.
+    match unsafe { table_mut(NykVal::new(t_tag, t_raw), true) } {
+        Ok(table) => table.array.push(NykVal::new(v_tag, v_raw)),
+        Err(msg) => fail(&msg),
+    }
 }
-
-#[unsafe(no_mangle)]
-pub extern "C" fn __nyk_table_append(_t_tag: u8, _t_raw: i64, _v_tag: u8, _v_raw: i64) {}
 
 // ---- strings -----------------------------------------------------------------
 
@@ -400,7 +616,8 @@ pub unsafe extern "C" fn __nyk_concat(
     unsafe { put(out, NykVal::string(&text)) }
 }
 
-/// `#v`: the byte length of a string; 0 for a (stub) table.
+/// `#v`: the byte length of a string, or the length of the array part of a
+/// table.
 ///
 /// # Safety
 ///
@@ -412,7 +629,8 @@ pub unsafe extern "C" fn __nyk_len(out: *mut NykVal, tag: u8, raw: i64) {
     let len = match tag {
         // SAFETY: guaranteed by the caller.
         TAG_STRING => unsafe { val.str_bytes() }.len() as i64,
-        TAG_TABLE => 0,
+        // SAFETY: guaranteed by the caller.
+        TAG_TABLE => unsafe { table_mut(val, false) }.map_or(0, |t| t.array.len() as i64),
         _ => fail("len expects string, table or buffer"),
     };
     // SAFETY: guaranteed by the caller.
@@ -640,5 +858,137 @@ mod closure_tests {
         }
         assert_ne!(a, b);
         assert_eq!(got, NykVal::int(7));
+    }
+}
+
+#[cfg(test)]
+mod table_tests {
+    use super::*;
+
+    fn new_table() -> NykVal {
+        let mut t = NykVal::NIL;
+        // SAFETY: a valid out-pointer.
+        unsafe { __nyk_table_new(&mut t, 0, 0) };
+        t
+    }
+
+    fn get(t: NykVal, k: NykVal) -> NykVal {
+        let mut out = NykVal::NIL;
+        // SAFETY: a valid out-pointer and a table of this runtime.
+        unsafe { __nyk_table_get(&mut out, t.tag, t.raw, k.tag, k.raw) };
+        out
+    }
+
+    fn set(t: NykVal, k: NykVal, v: NykVal) {
+        // SAFETY: a table of this runtime.
+        unsafe { __nyk_table_set(t.tag, t.raw, k.tag, k.raw, v.tag, v.raw) }
+    }
+
+    fn append(t: NykVal, v: NykVal) {
+        // SAFETY: a table of this runtime.
+        unsafe { __nyk_table_append(t.tag, t.raw, v.tag, v.raw) }
+    }
+
+    fn len(t: NykVal) -> i64 {
+        let mut out = NykVal::NIL;
+        // SAFETY: a valid out-pointer and a table of this runtime.
+        unsafe { __nyk_len(&mut out, t.tag, t.raw) };
+        out.raw
+    }
+
+    fn float(f: f64) -> NykVal {
+        NykVal::new(TAG_FLOAT, f.to_bits() as i64)
+    }
+
+    #[test]
+    fn tables_have_their_own_identity() {
+        let (a, b) = (new_table(), new_table());
+        assert_eq!(a.tag, TAG_TABLE);
+        assert_ne!(a, b);
+        assert_eq!(a, a);
+    }
+
+    #[test]
+    fn array_and_hash_parts_round_trip() {
+        let t = new_table();
+        append(t, NykVal::int(10));
+        append(t, NykVal::int(20));
+        set(t, NykVal::string(b"name"), NykVal::int(7));
+        set(t, NykVal::int(100), NykVal::int(8));
+        assert_eq!(len(t), 2);
+        assert_eq!(get(t, NykVal::int(2)), NykVal::int(20));
+        assert_eq!(get(t, NykVal::string(b"name")), NykVal::int(7));
+        assert_eq!(get(t, NykVal::int(100)), NykVal::int(8));
+        assert_eq!(get(t, NykVal::int(3)), NykVal::NIL);
+        assert_eq!(get(t, NykVal::string(b"missing")), NykVal::NIL);
+        // Overwrite, then remove.
+        set(t, NykVal::string(b"name"), NykVal::int(9));
+        assert_eq!(get(t, NykVal::string(b"name")), NykVal::int(9));
+        set(t, NykVal::string(b"name"), NykVal::NIL);
+        assert_eq!(get(t, NykVal::string(b"name")), NykVal::NIL);
+    }
+
+    #[test]
+    fn length_follows_the_array_part_like_the_vm() {
+        let t = new_table();
+        set(t, NykVal::int(1), NykVal::int(1));
+        set(t, NykVal::int(3), NykVal::int(3));
+        assert_eq!(len(t), 1);
+        // Key 2 closes the gap: 3 moves from the hash into the array.
+        set(t, NykVal::int(2), NykVal::int(2));
+        assert_eq!(len(t), 3);
+        set(t, NykVal::int(3), NykVal::NIL);
+        assert_eq!(len(t), 2);
+        // A hole in the middle keeps the length.
+        set(t, NykVal::int(1), NykVal::NIL);
+        assert_eq!(len(t), 2);
+        set(t, NykVal::int(2), NykVal::NIL);
+        assert_eq!(len(t), 0);
+        // Constructors keep nils.
+        let u = new_table();
+        append(u, NykVal::int(1));
+        append(u, NykVal::NIL);
+        assert_eq!(len(u), 2);
+    }
+
+    #[test]
+    fn floats_with_integer_values_are_integer_keys() {
+        let t = new_table();
+        set(t, float(1.0), NykVal::int(5));
+        assert_eq!(get(t, NykVal::int(1)), NykVal::int(5));
+        assert_eq!(len(t), 1);
+        set(t, float(2.5), NykVal::int(6));
+        assert_eq!(get(t, float(2.5)), NykVal::int(6));
+        set(t, float(-0.0), NykVal::int(7));
+        assert_eq!(get(t, NykVal::int(0)), NykVal::int(7));
+        assert_eq!(get(t, float(f64::NAN)), NykVal::NIL);
+        assert_eq!(get(t, NykVal::NIL), NykVal::NIL);
+    }
+
+    #[test]
+    fn keys_and_values_can_be_tables_and_strings() {
+        let (t, k, v) = (new_table(), new_table(), new_table());
+        set(t, k, v);
+        assert_eq!(get(t, k), v);
+        assert_eq!(get(t, new_table()), NykVal::NIL);
+        // Strings compare by content, not address.
+        set(t, NykVal::string(b"a"), k);
+        assert_eq!(get(t, NykVal::string(b"a")), k);
+        set(t, NykVal::new(TAG_BOOL, 1), NykVal::int(1));
+        assert_eq!(get(t, NykVal::new(TAG_BOOL, 1)), NykVal::int(1));
+        assert_eq!(get(t, NykVal::new(TAG_BOOL, 0)), NykVal::NIL);
+    }
+
+    #[test]
+    fn invalid_keys_are_rejected() {
+        let mut t = Table::default();
+        assert_eq!(
+            t.set(NykVal::NIL, NykVal::int(1)),
+            Err("table index is nil")
+        );
+        assert_eq!(
+            t.set(float(f64::NAN), NykVal::int(1)),
+            Err("table index is NaN")
+        );
     }
 }

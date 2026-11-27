@@ -744,3 +744,210 @@ print(h)
         Expect::SameAsVm,
     );
 }
+
+// Tables are real only with the external runtime (`nyk_rt`); the built-in
+// runtime keeps stubs for them, so these cases run against the native
+// build only (see docs/runtime.md).
+
+#[test]
+fn table_constructors_and_access() {
+    check_extern_case(
+        "table_ctor",
+        "\
+local arr = {10, 20, 30}
+local rec = {x = 1, y = \"two\", [5] = true}
+local mixed = {1, 2, name = \"m\", 3, [\"k k\"] = 4}
+print(arr[1], arr[3], arr[4], #arr)
+print(rec.x, rec.y, rec[5], rec.z, #rec)
+print(mixed[1], mixed[3], mixed.name, mixed[\"k k\"], #mixed)
+local e = {}
+print(#e, e[1], e.a)
+",
+        Expect::SameAsVm,
+    );
+}
+
+#[test]
+fn table_assignment_overwrite_and_nil() {
+    check_extern_case(
+        "table_set",
+        "\
+local t = {}
+t.a = 1
+t[\"b\"] = 2
+t[1] = \"one\"
+t.a = t.a + 10
+print(t.a, t.b, t[1], #t)
+t.b = nil
+t[1] = nil
+print(t.b, t[1], #t)
+local k = \"dyn\" .. \"amic\"
+t[k] = 3
+print(t.dynamic, t[k])
+t.a = false
+print(t.a, t.a == false)
+",
+        Expect::SameAsVm,
+    );
+}
+
+#[test]
+fn table_length_and_append() {
+    check_extern_case(
+        "table_len",
+        "\
+local t = {}
+for i = 1, 10 do
+  t[#t + 1] = i * i
+end
+print(#t, t[10])
+t[#t] = nil
+print(#t)
+local g = {}
+g[1] = 1
+g[3] = 3
+print(#g)
+g[2] = 2
+print(#g)
+g[2] = nil
+print(#g)
+local h = {1, nil, 3}
+print(#h, h[2], h[3])
+local n = {1, 2, nil}
+print(#n)
+local big = {}
+big[100] = 1
+print(#big, big[100])
+",
+        Expect::SameAsVm,
+    );
+}
+
+#[test]
+fn table_integer_and_float_keys_are_the_same() {
+    check_extern_case(
+        "table_float_keys",
+        "\
+local t = {}
+t[1.0] = \"a\"
+t[2] = \"b\"
+t[2.5] = \"c\"
+t[-0.0] = \"zero\"
+print(t[1], t[2.0], t[2.5], t[0], t[0.0], #t)
+local u = {[1.0] = \"x\", [2.0] = \"y\"}
+print(#u, u[1], u[2])
+t[1] = nil
+print(t[1.0], #t)
+",
+        Expect::SameAsVm,
+    );
+}
+
+#[test]
+fn nested_tables_and_tables_as_keys() {
+    check_extern_case(
+        "table_nested",
+        "\
+local cfg = {win = {w = 640, h = 480, pos = {1, 2}}, list = {{1}, {2, 3}}}
+print(cfg.win.w, cfg.win.pos[2], cfg.list[2][2], #cfg.list[2])
+cfg.win.pos[2] = 20
+cfg.win.title = \"hi\"
+print(cfg.win.pos[2], cfg.win.title)
+local key1 = {}
+local key2 = {}
+local m = {}
+m[key1] = \"first\"
+m[key2] = \"second\"
+print(m[key1], m[key2], m[{}])
+local function f() end
+m[f] = \"fn\"
+m[true] = \"yes\"
+print(m[f], m[true], m[false])
+local holder = {f = f, t = key1}
+print(holder.f == f, holder.t == key1, holder.t == key2)
+",
+        Expect::SameAsVm,
+    );
+}
+
+#[test]
+fn table_identity_and_sharing() {
+    check_extern_case(
+        "table_identity",
+        "\
+local function bump(t) t.n = (t.n or 0) + 1 end
+local a = {}
+local b = a
+bump(a)
+bump(b)
+print(a.n, b.n, a == b, a == {}, {} == {})
+local function make() return {id = 1} end
+local x, y = make(), make()
+print(x == y, x.id == y.id)
+",
+        Expect::SameAsVm,
+    );
+}
+
+#[test]
+fn table_holds_functions_and_methods() {
+    check_extern_case(
+        "table_functions",
+        "\
+local counter = {n = 0}
+function counter.inc(self) self.n = self.n + 1 return self.n end
+counter.add = function(self, k) self.n = self.n + k return self.n end
+print(counter.inc(counter), counter.add(counter, 5))
+print(counter:inc(), counter:add(10))
+local ops = {function(a) return a + 1 end, function(a) return a * 2 end}
+print(ops[1](5), ops[2](5), #ops)
+",
+        Expect::SameAsVm,
+    );
+}
+
+#[test]
+fn table_errors_match_the_vm() {
+    check_extern_case(
+        "table_nil_key",
+        "local function set(t, k) t[k] = 1 end\nlocal t = {}\nset(t, nil)\nprint(1)\n",
+        Expect::Error("table index is nil"),
+    );
+    check_extern_case(
+        "table_nan_key",
+        "local function set(t, k) t[k] = 1 end\nlocal t = {}\nset(t, 0 / 0)\nprint(1)\n",
+        Expect::Error("table index is NaN"),
+    );
+    check_extern_case(
+        "table_index_nil",
+        "local function get(t) return t.x end\nlocal r = get(nil)\nprint(r)\n",
+        Expect::Error("attempted to index a nil value"),
+    );
+    check_extern_case(
+        "table_index_number",
+        "local function get(t) return t[1] end\nlocal r = get(5)\nprint(r)\n",
+        Expect::Error("attempted to index a number value"),
+    );
+    check_extern_case(
+        "table_set_on_nil",
+        "local function set(t) t.x = 1 end\nset(nil)\nprint(1)\n",
+        Expect::Error("attempted to set a field on a nil value"),
+    );
+    // Reading a nil or NaN key is not an error.
+    check_extern_case(
+        "table_read_bad_keys",
+        "local function get(t, k) return t[k] end\nlocal t = {1}\nprint(get(t, nil), get(t, 0 / 0))\n",
+        Expect::SameAsVm,
+    );
+}
+
+#[test]
+fn builtin_runtime_tables_are_distinct_stubs() {
+    // Only identity works with the built-in stubs: no storage.
+    check_modes(
+        "builtin_table_stub",
+        "local t = {}\nlocal u = {}\nprint(t == t, t == u, #t)\n",
+        &Expect::SameAsVm,
+        &[Mode::Builtin],
+    );
+}
