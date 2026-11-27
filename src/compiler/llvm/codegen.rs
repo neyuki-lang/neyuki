@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write;
 
+use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 
 use crate::ast::op::{BinOp, UnOp};
@@ -138,7 +139,7 @@ impl<'a> FunctionEmitter<'a> {
                 );
             }
             MirConst::Int(bi) => {
-                let v = bi.to_i64().unwrap_or(0);
+                let v = wrap_to_i64(bi);
                 let _ = writeln!(
                     self.out,
                     "  {} = call %NykVal @__nyk_mk_int(i64 {})",
@@ -282,9 +283,11 @@ impl<'a> FunctionEmitter<'a> {
                     BinOp::BitAnd => "__nyk_bitand",
                     BinOp::BitOr => "__nyk_bitor",
                     BinOp::BitXor => "__nyk_bitxor",
-                    BinOp::Shl | BinOp::LShl => "__nyk_shl",
+                    BinOp::Shl => "__nyk_shl",
                     BinOp::Shr => "__nyk_shr",
+                    BinOp::LShl => "__nyk_lshl",
                     BinOp::LShr => "__nyk_lshr",
+                    BinOp::Pow => "__nyk_pow",
                     BinOp::Concat => "__nyk_concat",
                     BinOp::Eq => "__nyk_eq",
                     BinOp::Ne => "__nyk_ne",
@@ -292,7 +295,9 @@ impl<'a> FunctionEmitter<'a> {
                     BinOp::Le => "__nyk_le",
                     BinOp::Gt => "__nyk_gt",
                     BinOp::Ge => "__nyk_ge",
-                    BinOp::Pow | BinOp::And | BinOp::Or | BinOp::Coalesce => "__nyk_add",
+                    // MIR lowers the short-circuit operators to branches, so
+                    // they never reach a `BinaryOp`.
+                    BinOp::And | BinOp::Or | BinOp::Coalesce => "__nyk_add",
                 };
                 let _ = writeln!(
                     self.out,
@@ -935,6 +940,14 @@ impl<'a> FunctionEmitter<'a> {
         combined.push_str(&self.out);
         combined
     }
+}
+
+/// The low 64 bits of `bi` in two's complement. Integers are 64-bit in this
+/// backend, so a constant the MIR folder computed beyond that range (such as
+/// `INT64_MIN // -1`) wraps, as the same operation does at run time.
+fn wrap_to_i64(bi: &BigInt) -> i64 {
+    bi.to_i64()
+        .unwrap_or_else(|| (bi & BigInt::from(u64::MAX)).to_u64().unwrap_or(0) as i64)
 }
 
 pub fn emit_user_globals(globals: &BTreeSet<String>) -> String {

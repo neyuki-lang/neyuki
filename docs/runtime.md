@@ -17,6 +17,7 @@ neyuki lsp                        Language Server Protocol server on stdio
 neyuki disasm <file>              print the bytecode the compiler emits
 neyuki decompile <file> [out]     turn .nykb bytecode back into source
 neyuki dump-ir <file>             print the IR before and after optimization
+neyuki emit-llvm <file> [out.ll]  emit LLVM IR (experimental)
 neyuki help | --version
 ```
 
@@ -47,6 +48,15 @@ warning[W0001]: unused variable 'total'
 The bytecode format changes between Neyuki versions. A `.nykb` written by another version is rejected with an error naming both formats; recompile it with `neyuki compile`. When `require` meets such a file and the `.nyk` source sits next to it, it compiles the source instead.
 
 `neyuki decompile app.nykb` prints the bytecode as Neyuki source (or writes it to `[out]`). Bytecode keeps the names of locals, parameters and upvalues, but not comments, formatting, type annotations or the names of temporaries, so the result is equivalent source rather than the original text: temporaries are named `t1`, `t2`, ..., and loops come back as `while`, `for` or `while true` with `break` and `continue`. A function whose control flow does not fit those shapes, such as hand-written bytecode, keeps its signature and its disassembly in a comment, and calls `error` if it runs. Given a `.nyk` file, `decompile` compiles it first, which shows what the decompiler makes of the compiler's output.
+
+### LLVM IR
+
+`neyuki emit-llvm [-O0|-O1] app.nyk [app.ll]` compiles a script to textual LLVM IR, which `lli app.ll` runs and `clang app.ll -o app` turns into an executable. The backend is experimental: tables, globals other than those the script assigns, varargs and multiple return values are stubs, so only small programs run. Within what it supports, a program prints what it prints on the VM, with these differences:
+
+- Integers are 64-bit and wrap on overflow where the VM switches to a bignum: `9223372036854775807 + 1`, `(-9223372036854775807 - 1) // -1` (which gives `-9223372036854775808`) and `1 << 64` (which gives `0`). A shift by 64 or more bits gives `0`, or `-1` for `>>` of a negative number, as in the VM; a negative count shifts the other way for `<<` and `>>` and gives `0` for `<<<` and `>>>`.
+- `//` and `%` round toward negative infinity, so `-5 // 3` is `-2` and `-5 % 3` is `1` (the result of `%` has the sign of the divisor), for integers and floats alike. A zero divisor is an error for both; `/` follows IEEE 754 and gives an infinity or NaN.
+- A runtime error prints `runtime error: <message>` to standard error, without the source location and stack trace, and exits with status 1.
+- Floats print with `printf("%g")`, so `1/3` shows as `0.333333`.
 
 ### Building apps
 
