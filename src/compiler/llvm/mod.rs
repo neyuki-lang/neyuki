@@ -37,8 +37,8 @@ print(fib(10))";
 
         let ll = emit_llvm_ir(&mir, OptLevel::O1);
         assert!(ll.contains("%NykVal = type { i8, i64 }"));
-        assert!(ll.contains("define %NykVal @nyk_fn_0_0_fib(ptr %env, %NykVal %arg_0)"));
-        assert!(ll.contains("define %NykVal @nyk_main(ptr %env)"));
+        assert!(ll.contains("define i32 @nyk_fn_0_0_fib(ptr %env, ptr %args, i32 %argc)"));
+        assert!(ll.contains("define i32 @nyk_main(ptr %env, ptr %args, i32 %argc)"));
         assert!(ll.contains("define i32 @main()"));
         assert!(ll.contains("call void @__nyk_print_one("));
     }
@@ -129,7 +129,7 @@ print(y, v, bump(), va(1))";
             "len",
             "closure",
             "call_dyn",
-            "vararg",
+            "ret_buf",
         ] {
             assert!(declared.iter().any(|d| d == name), "{} not declared", name);
             assert!(
@@ -213,6 +213,7 @@ print(y, v, bump(), va(1))";
                     assert!(
                         line.trim_start().starts_with("call void")
                             || line.contains("= call ptr @__nyk_")
+                            || line.contains("= call i32 @__nyk_")
                             || line.starts_with("define")
                             || line.starts_with("declare"),
                         "{:?}: {}",
@@ -255,6 +256,47 @@ print(y, v, bump(), va(1))";
             .expect("function not found");
         let end = ll[start..].find("\n}\n").expect("unterminated function") + start;
         &ll[start..end]
+    }
+
+    #[test]
+    fn test_every_function_takes_its_arguments_as_an_array() {
+        // One signature for all functions, so that a call site need not know
+        // how many parameters or results the callee has.
+        let ll = emit("local function f(a, b, ...) return a, ... end\nprint(f(1, 2, 3))");
+        assert!(
+            ll.contains("define i32 @nyk_fn_0_0_f(ptr %env, ptr %args, i32 %argc)"),
+            "{}",
+            ll
+        );
+        let f = function_body(&ll, "nyk_fn_0_0_f");
+        // `...` starts after the two named parameters.
+        assert!(f.contains("%va_base = getelementptr %NykVal, ptr %args, i64 2"));
+        assert!(f.contains("@__nyk_ret_buf("), "{}", f);
+        assert!(!ll.contains("define %NykVal @nyk_"), "{}", ll);
+    }
+
+    #[test]
+    fn test_spread_arguments_are_copied_to_the_stack_around_the_call() {
+        let ll = emit("local function f(...) return ... end\nprint(f(f(1, 2)))");
+        let main = function_body(&ll, "nyk_main");
+        assert!(main.contains("@llvm.stacksave.p0()"), "{}", main);
+        assert!(main.contains("alloca %NykVal, i64"), "{}", main);
+        // One allocation per call that has a spread argument, each freed
+        // after its call.
+        assert_eq!(main.matches("@llvm.stacksave.p0()").count(), 2, "{}", main);
+        assert_eq!(
+            main.matches("@llvm.stackrestore.p0(").count(),
+            2,
+            "{}",
+            main
+        );
+        let save = main.find("@llvm.stacksave.p0()").unwrap();
+        let call = save + main[save..].find("call i32 %").unwrap();
+        let restore = main.find("@llvm.stackrestore.p0(").unwrap();
+        assert!(call < restore, "{}", main);
+        // Without a spread there is no dynamic allocation.
+        let ll = emit("local function f(a) return a end\nlocal x = f(1)\nprint(x)");
+        assert!(!function_body(&ll, "nyk_main").contains("stacksave"));
     }
 
     #[test]

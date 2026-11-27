@@ -941,6 +941,374 @@ fn table_errors_match_the_vm() {
     );
 }
 
+// Multiple values. Everything here but `select` and tables works with both
+// runtimes, because it needs nothing from the runtime but the return area.
+
+#[test]
+fn multiple_results_are_padded_and_truncated() {
+    check_case(
+        "multi_results",
+        "\
+local function two() return 1, 2 end
+local function three() return 1, 2, 3 end
+local a, b, c = two()
+print(a, b, c)
+local d, e = three()
+print(d, e)
+-- Only the last expression of a list expands; the others give one value.
+local f, g, h = three(), 10
+print(f, g, h)
+local i, j = (three())
+print(i, j)
+local k, l, m, n = 0, three()
+print(k, l, m, n)
+-- A call in parentheses gives exactly one value.
+print((two()))
+print((two()), (three()))
+print(two(), (two()))
+",
+        Expect::SameAsVm,
+    );
+}
+
+#[test]
+fn a_call_spreads_into_the_arguments_of_another() {
+    check_case(
+        "spread_args",
+        "\
+local function two() return 1, 2 end
+local function three() return 1, 2, 3 end
+local function sum3(a, b, c) return a + b + c end
+local function show(...) print(...) end
+print(two())
+print(0, three())
+print(three(), 0)
+print(two(), two())
+print(sum3(three()))
+print(sum3(0, two()))
+show(three())
+show(0, two())
+show()
+local function id(...) return ... end
+print(id(id(id(1, 2, 3))))
+print(id(two(), id(three())))
+",
+        Expect::SameAsVm,
+    );
+}
+
+#[test]
+fn missing_arguments_are_nil_and_extra_ones_are_dropped() {
+    check_case(
+        "arg_padding",
+        "\
+local function pad(a, b, c) return a, b, c end
+local function none() end
+print(pad())
+print(pad(1))
+print(pad(1, 2))
+print(pad(1, 2, 3, 4, 5))
+local function wrap(f, ...) return f(...) end
+print(wrap(pad))
+print(wrap(pad, 1, 2, 3, 4))
+-- A function without a `return` gives one nil, as does a bare `return`.
+local function bare() return end
+print(none())
+print(bare())
+local x = none()
+print(x)
+",
+        Expect::SameAsVm,
+    );
+}
+
+#[test]
+fn varargs_are_read_and_passed_on() {
+    check_case(
+        "varargs",
+        "\
+local function va(...) return ... end
+local function first(...)
+  local a = ...
+  return a
+end
+local function two(...)
+  local a, b = ...
+  return a, b
+end
+local function mid(a, ...) return a, ... end
+local function pass(...) return va(...) end
+local function deep(...) return pass(pass(pass(...))) end
+local function drop(a, b, ...) return ... end
+print(va())
+print(va(1, 2, 3))
+print(first(7, 8, 9), first())
+print(two(5), two(5, 6, 7))
+print(mid(1), mid(1, 2, 3))
+print(deep(4, 5, 6))
+print(drop(1, 2, 3, 4), drop(1), drop())
+-- nils in the middle and at the end are values.
+print(va(nil, 2, nil))
+print(va(nil, nil))
+print(deep(nil, nil, nil))
+-- The vararg values are copied at the call, so the callee may call on.
+local function relay(f, ...) return f(...) end
+print(relay(va, 1, 2), relay(relay, va, 3, 4))
+",
+        Expect::SameAsVm,
+    );
+}
+
+#[test]
+fn varargs_and_results_in_closures() {
+    check_case(
+        "varargs_closures",
+        "\
+local function va(...) return ... end
+local function make(...)
+  local a, b = ...
+  -- The closure has its own `...`; it cannot see the enclosing one.
+  return function(...) return a, b, ... end
+end
+local f = make(1, 2, 3)
+print(f())
+print(f(9, 8))
+local function counter(first, ...)
+  local n = first
+  return function(...)
+    n = n + 1
+    return n, ...
+  end
+end
+local c = counter(10)
+print(c())
+print(c(\"x\", \"y\"))
+print(c(va(1, 2)))
+local function pair() return 3, 4 end
+local g = function() return pair() end
+print(g())
+print((g()))
+",
+        Expect::SameAsVm,
+    );
+}
+
+#[test]
+fn many_values_grow_the_return_area() {
+    check_case(
+        "many_values",
+        "\
+-- Prepends one value per call, so the last returns 60 values.
+local function count(n, ...)
+  if n == 0 then
+    return ...
+  end
+  return count(n - 1, n, ...)
+end
+print(count(60))
+local function last(...)
+  local a, b, c = ...
+  return c
+end
+print(last(count(60)))
+local function more(...) return ..., 61, 62 end
+print(more(count(3)))
+print(count(0))
+",
+        Expect::SameAsVm,
+    );
+}
+
+#[test]
+fn generic_for_takes_several_values_per_step() {
+    check_case(
+        "generic_for_pairs",
+        "\
+local function upto(limit)
+  local i = 0
+  return function()
+    i = i + 1
+    if i <= limit then
+      return i, i * i, \"v\"
+    end
+  end
+end
+for i, sq in upto(3) do
+  print(i, sq)
+end
+for i in upto(2) do
+  print(i)
+end
+",
+        Expect::SameAsVm,
+    );
+}
+
+#[test]
+fn numeric_for_limit_and_step_can_be_calls() {
+    // Evaluating the limit or the step takes temporaries, so the loop's own
+    // locals do not follow each other.
+    check_case(
+        "for_call_limit",
+        "\
+local function second(a, b) return b end
+local function lim(...) return ... end
+for i = 1, second(0, 3) do
+  print(i)
+end
+for i = second(0, 10), 1, -second(0, 4) do
+  print(i)
+end
+for i = 1, lim(2) do
+  print(i)
+end
+",
+        Expect::SameAsVm,
+    );
+}
+
+#[test]
+fn method_calls_spread_too() {
+    check_extern_case(
+        "method_multi",
+        "\
+local obj = {}
+function obj.pair(self, a) return a, a + 1 end
+function obj.many(self, ...) return ... end
+print(obj:pair(1))
+print(obj:many(1, 2, 3))
+print(obj.pair(obj, 5), obj:pair(5))
+local a, b = obj:pair(7)
+print(a, b)
+",
+        Expect::SameAsVm,
+    );
+}
+
+#[test]
+fn select_counts_and_slices_real_varargs() {
+    check_extern_case(
+        "select_varargs",
+        "\
+local function va(...) return ... end
+local function count(...) return select(\"#\", ...) end
+local function from(n, ...) return select(n, ...) end
+print(count(), count(nil), count(nil, nil), count(1, 2, 3))
+print(count(va()), count(va(1, 2)), count(va(1, 2), 3), count(3, va(1, 2)))
+print(from(1, \"a\", \"b\", \"c\"))
+print(from(2, \"a\", \"b\", \"c\"))
+print(from(3, \"a\", \"b\", \"c\"))
+print(from(4, \"a\", \"b\", \"c\"))
+print(from(-1, \"a\", \"b\", \"c\"))
+print(from(-3, \"a\", \"b\", \"c\"))
+print((from(2, \"a\", \"b\", \"c\")))
+print(count(from(2, 1, 2, 3)))
+print(select(\"#\"))
+-- A tail of the values spreads on like any other results.
+local function tail(...) return select(2, ...) end
+print(tail(1, 2, 3))
+print(tail(1))
+print(count(tail(1, 2, 3, 4)))
+",
+        Expect::SameAsVm,
+    );
+    check_extern_case(
+        "select_loop",
+        "\
+local function sum(...)
+  local total = 0
+  for i = 1, select(\"#\", ...) do
+    local v = select(i, ...)
+    total = total + v
+  end
+  return total
+end
+print(sum(), sum(1), sum(1, 2, 3, 4))
+",
+        Expect::SameAsVm,
+    );
+}
+
+#[test]
+fn select_errors_match_the_vm() {
+    check_extern_case(
+        "select_zero",
+        "print(\"before\")\nlocal function f(n, ...) return select(n, ...) end\nprint(f(0, 1))\n",
+        Expect::Error("select expects '#' or an index within range"),
+    );
+    check_extern_case(
+        "select_too_negative",
+        "local function f(n, ...) return select(n, ...) end\nprint(f(-3, 1, 2))\n",
+        Expect::Error("select expects '#' or an index within range"),
+    );
+    check_extern_case(
+        "select_float",
+        "local function f(n, ...) return select(n, ...) end\nprint(f(2.0, 1, 2))\n",
+        Expect::Error("select expects '#' or an index within range"),
+    );
+    check_extern_case(
+        "select_string",
+        "local function f(n, ...) return select(n, ...) end\nprint(f(\"x\", 1, 2))\n",
+        Expect::Error("select expects '#' or an index within range"),
+    );
+    check_extern_case(
+        "spread_call_nil",
+        "local function two() return 1, 2 end\nlocal f = nil\nlocal function call(g) return g(two()) end\nprint(call(f))\n",
+        Expect::Error("attempted to call non-function (nil)"),
+    );
+}
+
+#[test]
+fn varargs_and_results_fill_tables() {
+    check_extern_case(
+        "table_spread",
+        "\
+local function two() return 1, 2 end
+local function va(...) return ... end
+local function none() end
+local function len(...) return #{...} end
+print(#{two()}, #{two(), two()}, #{(two())}, #{0, two()})
+print(len(), len(1), len(1, 2, 3), len(two()), len(two(), 5))
+local t = {va(\"a\", \"b\", \"c\")}
+print(t[1], t[2], t[3], t[4], #t)
+-- A trailing nil from `...` is kept, like the VM does.
+print(len(nil), len(1, nil), len(nil, nil))
+local u = {none()}
+print(#u, u[1])
+local v = {x = 1, va(5, 6), y = 2}
+print(v[1], v[2], v.x, v.y, #v)
+local function pack(...) return {n = select(\"#\", ...), ...} end
+local p = pack(1, nil, 3, nil)
+print(p.n, p[1], p[2], p[3], p[4])
+local function unpack(t, i, j)
+  i = i or 1
+  j = j or #t
+  if i > j then return end
+  return t[i], unpack(t, i + 1, j)
+end
+print(unpack({10, 20, 30}))
+print(select(\"#\", unpack({})), select(\"#\", unpack({1, 2})))
+",
+        Expect::SameAsVm,
+    );
+}
+
+#[test]
+fn builtin_runtime_has_real_varargs_without_select() {
+    // The built-in stubs have no builtins, so `select` is nil there; the
+    // varargs themselves do not need the runtime.
+    check_modes(
+        "builtin_varargs",
+        "\
+local function va(...) return ... end
+local function fourth(a, b, c, d) return d end
+print(va(1, 2, 3), fourth(va(1, 2, 3, 4)))
+",
+        &Expect::SameAsVm,
+        &[Mode::Builtin],
+    );
+}
+
 #[test]
 fn builtin_runtime_tables_are_distinct_stubs() {
     // Only identity works with the built-in stubs: no storage.

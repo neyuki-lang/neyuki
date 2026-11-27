@@ -4,8 +4,9 @@
 //!
 //! The generated code keeps arithmetic, comparisons and `print` inline and
 //! calls the functions here for everything that needs the heap or global
-//! state. Globals, closures, tables, strings built by `..`, `#` and the
-//! `select` builtin work; module imports and varargs are stubs for now.
+//! state. Globals, closures, tables, strings built by `..`, `#`, varargs,
+//! multiple return values and the `select` builtin work; module imports are
+//! a stub for now.
 //!
 //! # ABI
 //!
@@ -21,6 +22,20 @@
 //!   parameter, and the function returns nothing;
 //! - argument lists are pointers to arrays of [`NykVal`] in memory, whose
 //!   layout matches the IR's under the module's `target datalayout`.
+//!
+//! # Calls and multiple values
+//!
+//! Every function the compiler generates has the signature
+//! `i32 f(env: *const *mut NykVal, args: *const NykVal, argc: u32)`: its
+//! arguments are `argc` values at `args` (it reads a missing parameter as
+//! nil, ignores the surplus and reads `...` from the end of the named
+//! parameters on), and it returns the number of results `n`. The results
+//! themselves are in the *return area*, which holds the `n` values at
+//! [`__nyk_ret_buf`]`(n)`: the callee reserves room and stores them as its
+//! last act, and the caller reads them before it makes another call. There
+//! is one area per thread, which only ever grows. The runtime follows the
+//! same convention, so [`__nyk_call_dyn`] returns a count too, and a builtin
+//! such as `select` can return any number of values.
 //!
 //! # Closures
 //!
@@ -45,6 +60,8 @@
 //! `src/compiler/llvm/runtime.rs` in the `neyuki` crate declares the same
 //! signatures.
 
+use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::sync::{Mutex, OnceLock};
@@ -663,53 +680,81 @@ pub unsafe extern "C" fn __nyk_closure(
     unsafe { put(out, NykVal::new(TAG_FN, ptr as usize as i64)) }
 }
 
-/// A builtin of this runtime: its arguments in, its first result out.
-type Native = fn(&[NykVal]) -> NykVal;
+/// A builtin of this runtime: its arguments in, all its results out.
+type Native = for<'a> fn(&'a [NykVal]) -> Cow<'a, [NykVal]>;
 
 /// The builtins this runtime provides, as `(global name, function)`.
 static NATIVES: &[(&str, Native)] = &[("select", native_select)];
 
-/// `select(n, ...)`: the `n`th of the remaining arguments (counting from
-/// the end when negative), or `select("#", ...)`: how many there are. Only
-/// the first result is returned, like every call in this backend.
-fn native_select(args: &[NykVal]) -> NykVal {
+/// `select(n, ...)`: the remaining arguments from the `n`th on (counting
+/// from the end when negative), or `select("#", ...)`: how many there are.
+fn native_select(args: &[NykVal]) -> Cow<'_, [NykVal]> {
+    const BAD_INDEX: &str = "select expects '#' or an index within range";
     let Some((selector, rest)) = args.split_first() else {
-        fail("select expects '#' or an index within range");
+        fail(BAD_INDEX);
     };
     // SAFETY: string values come from the program.
     if selector.tag == TAG_STRING && unsafe { selector.str_bytes() } == b"#" {
-        return NykVal::int(rest.len() as i64);
+        return Cow::Owned(vec![NykVal::int(rest.len() as i64)]);
     }
-    let n = match selector.tag {
-        TAG_INT => selector.raw,
-        TAG_FLOAT => f64::from_bits(selector.raw as u64) as i64,
-        _ => fail("select expects '#' or an index within range"),
-    };
-    let len = rest.len() as i64;
-    let idx = if n > 0 {
-        n - 1
-    } else if n < 0 && -n <= len {
-        len + n
+    // Like the VM, only an integer selects (not a float with an integer
+    // value).
+    if selector.tag != TAG_INT {
+        fail(BAD_INDEX);
+    }
+    let n = selector.raw;
+    if n > 0 {
+        Cow::Borrowed(
+            rest.get(usize::try_from(n - 1).unwrap_or(usize::MAX)..)
+                .unwrap_or(&[]),
+        )
+    } else if n < 0 && n.unsigned_abs() <= rest.len() as u64 {
+        Cow::Borrowed(&rest[rest.len() - n.unsigned_abs() as usize..])
     } else {
-        fail("select expects '#' or an index within range");
-    };
-    rest.get(idx as usize).copied().unwrap_or(NykVal::NIL)
+        fail(BAD_INDEX)
+    }
+}
+
+thread_local! {
+    /// The return area: where a function leaves its results (see "Calls and
+    /// multiple values" above). It holds at least as many values as the
+    /// largest request so far; only the first `n` of a call that returned
+    /// `n` results mean anything.
+    static RETURN_AREA: RefCell<Vec<NykVal>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The return area, with room for at least `n` values. A later call may
+/// move it, but what it holds stays. `__nyk_ret_buf(0)` is where the results
+/// of the call that just returned are.
+#[unsafe(no_mangle)]
+pub extern "C" fn __nyk_ret_buf(n: u32) -> *mut NykVal {
+    RETURN_AREA.with_borrow_mut(|area| {
+        if area.len() < n as usize {
+            area.resize(n as usize, NykVal::NIL);
+        }
+        area.as_mut_ptr()
+    })
+}
+
+/// Leaves `vals` in the return area and returns how many there are.
+fn set_results(vals: &[NykVal]) -> u32 {
+    let area = __nyk_ret_buf(vals.len() as u32);
+    // SAFETY: the area holds at least `vals.len()` values, and `vals` is not
+    // in it (the generated code passes arguments from its own stack, and
+    // natives return their own values or a slice of the arguments).
+    unsafe { std::ptr::copy(vals.as_ptr(), area, vals.len()) };
+    vals.len() as u32
 }
 
 /// Calls a value that is not a function of the generated code: a builtin
-/// of this runtime. Anything else is an error.
+/// of this runtime. Anything else is an error. Returns the number of
+/// results, which are in the return area.
 ///
 /// # Safety
 ///
-/// `out` must be valid for writing and `argv` must point to `argc` values.
+/// `argv` must point to `argc` values, or `argc` must be 0.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __nyk_call_dyn(
-    out: *mut NykVal,
-    tag: u8,
-    raw: i64,
-    argc: u32,
-    argv: *const NykVal,
-) {
+pub unsafe extern "C" fn __nyk_call_dyn(tag: u8, raw: i64, argc: u32, argv: *const NykVal) -> u32 {
     let callee = NykVal::new(tag, raw);
     let native = match tag {
         TAG_NATIVE => usize::try_from(raw).ok().and_then(|idx| NATIVES.get(idx)),
@@ -722,43 +767,31 @@ pub unsafe extern "C" fn __nyk_call_dyn(
         ));
     };
     // SAFETY: guaranteed by the caller.
-    let result = native(unsafe { args(argc, argv) });
-    // SAFETY: guaranteed by the caller.
-    unsafe { put(out, result) }
-}
-
-/// `...`, which is always empty for now.
-///
-/// # Safety
-///
-/// `out` must be valid for writing.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __nyk_vararg(out: *mut NykVal) {
-    // SAFETY: guaranteed by the caller.
-    unsafe { put(out, NykVal::NIL) }
+    let results = native(unsafe { args(argc, argv) });
+    set_results(&results)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn call(name: &str, args: &[NykVal]) -> NykVal {
+    /// Calls the builtin `name` and returns all its results.
+    fn call_all(name: &str, args: &[NykVal]) -> Vec<NykVal> {
         let cname = std::ffi::CString::new(name).unwrap();
         let mut callee = NykVal::NIL;
-        let mut out = NykVal::NIL;
-        // SAFETY: valid out-pointers, a NUL-terminated name and `args.len()`
-        // values at `args`.
+        // SAFETY: a valid out-pointer, a NUL-terminated name and
+        // `args.len()` values at `args`; the results are the first `n` of
+        // the return area.
         unsafe {
             __nyk_global_get(&mut callee, cname.as_ptr());
-            __nyk_call_dyn(
-                &mut out,
-                callee.tag,
-                callee.raw,
-                args.len() as u32,
-                args.as_ptr(),
-            );
+            let n = __nyk_call_dyn(callee.tag, callee.raw, args.len() as u32, args.as_ptr());
+            std::slice::from_raw_parts(__nyk_ret_buf(0), n as usize).to_vec()
         }
-        out
+    }
+
+    /// The first result of the builtin `name`, nil if it returns none.
+    fn call(name: &str, args: &[NykVal]) -> NykVal {
+        call_all(name, args).first().copied().unwrap_or(NykVal::NIL)
     }
 
     #[test]
@@ -811,6 +844,56 @@ mod tests {
         assert_eq!(call("select", &c), NykVal::int(2));
         let d = [NykVal::int(5), NykVal::int(1)];
         assert_eq!(call("select", &d), NykVal::NIL);
+    }
+
+    #[test]
+    fn select_returns_every_value_from_its_index_on() {
+        let (x, y, z) = (NykVal::int(10), NykVal::int(20), NykVal::int(30));
+        assert_eq!(call_all("select", &[NykVal::int(2), x, y, z]), [y, z]);
+        assert_eq!(call_all("select", &[NykVal::int(1), x, y, z]), [x, y, z]);
+        assert_eq!(call_all("select", &[NykVal::int(-2), x, y, z]), [y, z]);
+        assert_eq!(call_all("select", &[NykVal::int(-3), x, y, z]), [x, y, z]);
+        // Past the end there is nothing, which is not an error.
+        assert_eq!(call_all("select", &[NykVal::int(4), x, y, z]), []);
+        assert_eq!(call_all("select", &[NykVal::int(2)]), []);
+        assert_eq!(
+            call_all("select", &[NykVal::string(b"#"), x, NykVal::NIL]),
+            [NykVal::int(2)]
+        );
+        assert_eq!(
+            call_all("select", &[NykVal::string(b"#")]),
+            [NykVal::int(0)]
+        );
+    }
+
+    #[test]
+    fn the_return_area_grows_and_keeps_its_values() {
+        let first = __nyk_ret_buf(2);
+        // SAFETY: the area holds at least 2 values.
+        unsafe {
+            first.write(NykVal::int(1));
+            first.add(1).write(NykVal::int(2));
+        }
+        // Asking for less never shrinks it, and asking for more keeps what
+        // it holds, wherever it ends up.
+        assert!(!__nyk_ret_buf(0).is_null());
+        let grown = __nyk_ret_buf(1000);
+        // SAFETY: the area holds at least 1000 values.
+        unsafe {
+            assert_eq!(*grown, NykVal::int(1));
+            assert_eq!(*grown.add(1), NykVal::int(2));
+            assert_eq!(*grown.add(999), NykVal::NIL);
+        }
+    }
+
+    #[test]
+    fn set_results_copies_the_values_into_the_area() {
+        let vals = [NykVal::int(7), NykVal::NIL, NykVal::int(9)];
+        assert_eq!(set_results(&vals), 3);
+        // SAFETY: the area holds at least 3 values.
+        let got = unsafe { std::slice::from_raw_parts(__nyk_ret_buf(0), 3) };
+        assert_eq!(got, vals);
+        assert_eq!(set_results(&[]), 0);
     }
 
     #[test]
