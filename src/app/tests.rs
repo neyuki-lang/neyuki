@@ -156,7 +156,7 @@ fn test_damaged_payloads_are_errors() {
 
     // An index naming a path outside the bundle is refused when read back.
     let mut forged = Vec::new();
-    forged.extend_from_slice(bundle::PAYLOAD_MAGIC);
+    forged.extend_from_slice(bundle::PAYLOAD_MAGIC_V1);
     forged.extend_from_slice(&0u32.to_le_bytes());
     forged.extend_from_slice(&1u32.to_le_bytes());
     forged.extend_from_slice(&5u32.to_le_bytes());
@@ -168,13 +168,128 @@ fn test_damaged_payloads_are_errors() {
 
     // A size larger than the payload.
     let mut oversized = Vec::new();
-    oversized.extend_from_slice(bundle::PAYLOAD_MAGIC);
+    oversized.extend_from_slice(bundle::PAYLOAD_MAGIC_V1);
     oversized.extend_from_slice(&0u32.to_le_bytes());
     oversized.extend_from_slice(&1u32.to_le_bytes());
     oversized.extend_from_slice(&1u32.to_le_bytes());
     oversized.extend_from_slice(b"x");
     oversized.extend_from_slice(&u64::MAX.to_le_bytes());
     assert!(Bundle::from_payload(oversized).is_err());
+}
+
+/// Bytes that deflate cannot shrink (xorshift, so the test is repeatable).
+fn noise(len: usize) -> Vec<u8> {
+    let mut state = 0x2545_f491_4f6c_dd1du64;
+    (0..len)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as u8
+        })
+        .collect()
+}
+
+#[test]
+fn test_pack_deflates_only_what_shrinks() {
+    let text = "local x = 1\nprint(x)\n".repeat(4096).into_bytes();
+    let random = noise(64 * 1024);
+    let files = vec![
+        ("main.nyk".to_string(), text.clone()),
+        ("assets/photo.jpg".to_string(), random.clone()),
+        ("assets/empty.txt".to_string(), Vec::new()),
+    ];
+    let payload = pack(&meta(), &files).unwrap();
+    assert!(payload.starts_with(bundle::PAYLOAD_MAGIC));
+    // The text shrinks to a fraction; the noise is stored, not inflated.
+    assert!(
+        payload.len() < random.len() + text.len() / 10,
+        "payload is {} bytes",
+        payload.len()
+    );
+    let bundle = Bundle::from_payload(payload).unwrap();
+    assert_eq!(bundle.read("main.nyk").unwrap().unwrap(), text);
+    assert_eq!(bundle.read("assets/photo.jpg").unwrap().unwrap(), random);
+    assert_eq!(bundle.read("assets/empty.txt").unwrap().unwrap(), b"");
+    // Sizes are what the files hold, not what the payload stores.
+    assert_eq!(
+        bundle.entry("main.nyk"),
+        Some(Entry::File {
+            size: text.len() as u64
+        })
+    );
+}
+
+#[test]
+fn test_version_1_payloads_still_read() {
+    let mut v1 = Vec::new();
+    v1.extend_from_slice(bundle::PAYLOAD_MAGIC_V1);
+    v1.extend_from_slice(&1u32.to_le_bytes());
+    for s in ["entry", "main.nyk"] {
+        v1.extend_from_slice(&(s.len() as u32).to_le_bytes());
+        v1.extend_from_slice(s.as_bytes());
+    }
+    v1.extend_from_slice(&2u32.to_le_bytes());
+    for (path, size) in [("main.nyk", 8u64), ("assets/a.txt", 2)] {
+        v1.extend_from_slice(&(path.len() as u32).to_le_bytes());
+        v1.extend_from_slice(path.as_bytes());
+        v1.extend_from_slice(&size.to_le_bytes());
+    }
+    v1.extend_from_slice(b"print(1)hi");
+    let bundle = Bundle::from_payload(v1).unwrap();
+    assert_eq!(bundle.meta("entry"), Some("main.nyk"));
+    assert_eq!(bundle.read("main.nyk").unwrap().unwrap(), b"print(1)");
+    assert_eq!(bundle.read("assets/a.txt").unwrap().unwrap(), b"hi");
+}
+
+/// A version 2 payload holding one file `x` with the given index fields.
+fn v2_payload(method: u8, stored: &[u8], size: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(bundle::PAYLOAD_MAGIC);
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&1u32.to_le_bytes());
+    out.extend_from_slice(&1u32.to_le_bytes());
+    out.extend_from_slice(b"x");
+    out.push(method);
+    out.extend_from_slice(&(stored.len() as u64).to_le_bytes());
+    out.extend_from_slice(&size.to_le_bytes());
+    out.extend_from_slice(stored);
+    out
+}
+
+#[test]
+fn test_damaged_compressed_files_are_errors() {
+    use std::io::Write;
+    let mut encoder =
+        flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(&[b'a'; 1000]).unwrap();
+    let deflated = encoder.finish().unwrap();
+    assert_eq!(
+        Bundle::from_payload(v2_payload(1, &deflated, 1000))
+            .unwrap()
+            .read("x")
+            .unwrap()
+            .unwrap(),
+        vec![b'a'; 1000]
+    );
+
+    // Refused when the index is read: an unknown method, a stored file whose
+    // sizes differ, and a size no deflate stream can reach.
+    for (method, size) in [(7, 1000), (0, 1000), (1, u64::MAX)] {
+        let err = Bundle::from_payload(v2_payload(method, &deflated, size)).unwrap_err();
+        assert!(err.contains("damaged"), "{}", err);
+    }
+
+    // Refused when the file is read: a stream that inflates to more or less
+    // than the index says, and one that is not deflate at all.
+    for (stored, size) in [
+        (deflated.clone(), 999),
+        (deflated.clone(), 1001),
+        (vec![0xff; 16], 1000),
+    ] {
+        let bundle = Bundle::from_payload(v2_payload(1, &stored, size)).unwrap();
+        assert!(bundle.read("x").unwrap().is_err(), "size {}", size);
+    }
 }
 
 #[test]
