@@ -214,16 +214,40 @@ fn check_extern_case(name: &str, src: &str, expect: Expect) {
 }
 
 fn check_modes(name: &str, src: &str, expect: &Expect, modes: &[Mode]) {
+    check_files(name, &[(&format!("{}.nyk", name), src)], expect, modes);
+}
+
+/// Checks a project of several files, the first of which is the entry
+/// script, which the VM runs and `neyuki build --native` is given the
+/// directory of (so `main.nyk` when there is no `neyuki.toml` among them).
+/// A single file is built as a script.
+fn check_files(name: &str, files: &[(&str, &str)], expect: &Expect, modes: &[Mode]) {
     let Some(opt) = llvm_tool("opt") else {
         return;
     };
     let dir = scratch_dir(name);
-    let script = dir.join(format!("{}.nyk", name));
-    std::fs::write(&script, src).expect("write script");
+    let mut src = String::new();
+    for (file, text) in files {
+        let path = dir.join(file);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("create dirs");
+        std::fs::write(&path, text).expect("write file");
+        src.push_str(&format!("-- {}\n{}\n", file, text));
+    }
+    let entry = files
+        .iter()
+        .map(|(file, _)| *file)
+        .find(|file| *file != "neyuki.toml")
+        .expect("an entry script");
+    let script = dir.join(entry);
+    let input = if files.len() == 1 {
+        script.clone()
+    } else {
+        dir.clone()
+    };
     let vm: Run = neyuki().arg(&script).output().expect("run vm").into();
 
     for &mode in modes {
-        let Some(native) = run_llvm(&dir, &script, &opt, mode) else {
+        let Some(native) = run_llvm(&dir, &input, &opt, mode) else {
             continue;
         };
         let context = format!(
@@ -463,6 +487,9 @@ fn every_test_and_example_emits_valid_ir() {
     let mut files = Vec::new();
     nyk_files(&root.join("tests"), &mut files);
     nyk_files(&root.join("examples"), &mut files);
+    // The fixtures are modules for other tests to require, not scripts: they
+    // name each other relative to the script that requires them.
+    files.retain(|file| !file.components().any(|c| c.as_os_str() == "fixtures"));
     files.sort();
     assert!(!files.is_empty(), "no .nyk files found");
     let dir = scratch_dir("all");
@@ -1318,4 +1345,347 @@ fn builtin_runtime_tables_are_distinct_stubs() {
         &Expect::SameAsVm,
         &[Mode::Builtin],
     );
+}
+
+// Projects of several files. They run with the external runtime only: the
+// built-in one cannot load modules, nor does it have real tables.
+
+#[test]
+fn modules_nested_paths_directories_and_tables_of_functions() {
+    check_files(
+        "modules_basic",
+        &[
+            (
+                "main.nyk",
+                "\
+local x = require(\"util/x\")
+local lib = require(\"lib\")
+print(x.add(2, 3), x.name, x.twice(x.add)(1, 2))
+print(lib.greet(\"neyuki\"), lib.count())
+print(lib.count())
+",
+            ),
+            (
+                "util/x.nyk",
+                "\
+local M = { name = \"x\" }
+function M.add(a, b) return a + b end
+function M.twice(f) return function(a, b) return f(f(a, b), b) end end
+return M
+",
+            ),
+            (
+                "lib/init.nyk",
+                "\
+local calls = 0
+local M = {}
+function M.greet(who) return \"hello \" .. who end
+function M.count() calls = calls + 1 return calls end
+return M
+",
+            ),
+        ],
+        &Expect::SameAsVm,
+        &[Mode::Extern],
+    );
+}
+
+#[test]
+fn modules_may_return_anything() {
+    check_files(
+        "modules_return_values",
+        &[
+            (
+                "main.nyk",
+                "\
+print(require(\"number\"), require(\"text\"), require(\"nothing\"), require(\"flag\"))
+print(require(\"fn\") == require(\"fn\"), require(\"fn\")(4))
+local first = require(\"many\")
+print(first)
+",
+            ),
+            ("number.nyk", "return 12.5\n"),
+            ("text.nyk", "return \"hi\"\n"),
+            ("nothing.nyk", "local unused = 1\n"),
+            ("flag.nyk", "return false\n"),
+            ("fn.nyk", "return function(n) return n * n end\n"),
+            ("many.nyk", "return 1, 2, 3\n"),
+        ],
+        &Expect::SameAsVm,
+        &[Mode::Extern],
+    );
+}
+
+#[test]
+fn a_module_runs_once_whatever_its_spelling_and_in_order() {
+    check_files(
+        "modules_once_and_order",
+        &[
+            (
+                "main.nyk",
+                "\
+print(\"main 1\")
+local a = require(\"a\")
+print(\"main 2\")
+local again = require(\"./a.nyk\")
+local dotted = require(\"sub.b\")
+local b = require(\"sub/b\")
+print(a == again, dotted == b, a.tag, b.tag)
+print(\"main 3\")
+",
+            ),
+            (
+                "a.nyk",
+                "\
+print(\"a starts\")
+local b = require(\"sub/b\")
+print(\"a has\", b.tag)
+return { tag = \"A\" }
+",
+            ),
+            (
+                "sub/b.nyk",
+                "\
+print(\"b runs\")
+return { tag = \"B\" }
+",
+            ),
+        ],
+        &Expect::SameAsVm,
+        &[Mode::Extern],
+    );
+}
+
+#[test]
+fn a_require_cycle_gets_an_empty_table_like_in_the_vm() {
+    check_files(
+        "modules_cycle",
+        &[
+            (
+                "main.nyk",
+                "\
+local a = require(\"a\")
+print(\"main\", a.name, a.seen_b)
+print(require(\"b\").name, require(\"b\").saw_a_name)
+",
+            ),
+            (
+                "a.nyk",
+                "\
+print(\"a starts\")
+local b = require(\"b\")
+print(\"a sees b\", b.name)
+return { name = \"a\", seen_b = b.name }
+",
+            ),
+            (
+                "b.nyk",
+                "\
+print(\"b starts\")
+local a = require(\"a\")
+print(\"b sees a\", a.name, a ~= nil)
+return { name = \"b\", saw_a_name = a.name }
+",
+            ),
+        ],
+        &Expect::SameAsVm,
+        &[Mode::Extern],
+    );
+}
+
+#[test]
+fn modules_with_the_same_names_do_not_clash() {
+    check_files(
+        "modules_same_names",
+        &[
+            (
+                "main.nyk",
+                "\
+local function helper() return \"main\" end
+local value = 1
+local one = require(\"one\")
+local two = require(\"two\")
+print(helper(), value, one.call(), two.call(), one.next(), one.next(), two.next())
+print(one.make()(), two.make()())
+",
+            ),
+            (
+                "one.nyk",
+                "\
+local function helper() return \"one\" end
+local value = 10
+local n = 0
+local M = {}
+function M.call() return helper() .. value end
+function M.next() n = n + 1 return n end
+function M.make() local v = \"made by one\" return function() return v end end
+return M
+",
+            ),
+            (
+                "two.nyk",
+                "\
+local function helper() return \"two\" end
+local value = 20
+local n = 100
+local M = {}
+function M.call() return helper() .. value end
+function M.next() n = n + 1 return n end
+function M.make() local v = \"made by two\" return function() return v end end
+return M
+",
+            ),
+        ],
+        &Expect::SameAsVm,
+        &[Mode::Extern],
+    );
+}
+
+#[test]
+fn the_entry_comes_from_neyuki_toml_and_modules_from_its_directory() {
+    check_files(
+        "modules_manifest",
+        &[
+            (
+                "neyuki.toml",
+                "[package]\nname = \"game\"\nversion = \"0.1.0\"\nentry = \"start.nyk\"\n",
+            ),
+            (
+                "start.nyk",
+                "print(require(\"deep/er/mod\").path, require(\"deep/helper\"))\n",
+            ),
+            // Every require is relative to the entry script, not to the file
+            // that makes it.
+            (
+                "deep/er/mod.nyk",
+                "return { path = \"deep/er/mod via \" .. require(\"deep/helper\") }\n",
+            ),
+            ("deep/helper.nyk", "return \"helper\"\n"),
+        ],
+        &Expect::SameAsVm,
+        &[Mode::Extern],
+    );
+}
+
+#[test]
+fn a_dynamic_require_loads_modules_the_project_names_elsewhere() {
+    check_files(
+        "modules_dynamic",
+        &[
+            (
+                "main.nyk",
+                "\
+local function load(name) return require(name) end
+local known = require(\"known\")
+print(load(\"known\") == known, load(\"known\").tag)
+",
+            ),
+            ("known.nyk", "return { tag = \"known\" }\n"),
+        ],
+        &Expect::SameAsVm,
+        &[Mode::Extern],
+    );
+}
+
+/// Writes `files` into a scratch directory and runs `neyuki args... <dir>
+/// -o <dir>/app` there.
+fn neyuki_on_project(name: &str, files: &[(&str, &str)], args: &[&str]) -> (PathBuf, Run) {
+    let dir = scratch_dir(name);
+    for (file, text) in files {
+        let path = dir.join(file);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("create dirs");
+        std::fs::write(&path, text).expect("write file");
+    }
+    let mut cmd = neyuki();
+    cmd.args(args)
+        .arg(&dir)
+        .arg("-o")
+        .arg(dir.join("app"))
+        .env("NEYUKI_RT_LIB", nyk_rt());
+    if let Some(clang) = std::env::var_os("NEYUKI_CLANG") {
+        cmd.env("NEYUKI_CLANG", clang);
+    }
+    let out = cmd.output().expect("run neyuki");
+    (dir, out.into())
+}
+
+#[test]
+fn a_missing_module_is_a_build_error() {
+    // It fails before clang or the runtime library are needed. `emit-llvm`
+    // takes the output as a positional argument, so only `build` gets `-o`.
+    let files = [(
+        "main.nyk",
+        "print(1)\nlocal function f() return require(\"nope/missing\") end\n",
+    )];
+    let (dir, run) = neyuki_on_project("modules_missing", &files, &["build", "--native"]);
+    assert!(!run.success);
+    assert!(
+        run.stderr
+            .contains("main.nyk: cannot find module 'nope/missing'"),
+        "{}",
+        run.stderr
+    );
+    let out = neyuki()
+        .args(["emit-llvm", "--runtime=extern"])
+        .arg(&dir)
+        .output()
+        .expect("run neyuki emit-llvm");
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("cannot find module 'nope/missing'"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_dynamic_require_of_an_unknown_module_warns_and_fails_when_run() {
+    let Some(clang) = clang() else {
+        return;
+    };
+    let files = [
+        (
+            "main.nyk",
+            "\
+print(\"start\")
+local n = \"oth\" .. \"er\"
+local function load(name) return require(name) end
+print(load(n))
+",
+        ),
+        ("other.nyk", "return 1\n"),
+    ];
+    let mut cmd = neyuki();
+    let dir = scratch_dir("modules_dynamic_unknown");
+    for (file, text) in files {
+        std::fs::write(dir.join(file), text).expect("write file");
+    }
+    let exe = dir.join("app");
+    let build: Run = cmd
+        .args(["build", "--native"])
+        .arg(&dir)
+        .arg("-o")
+        .arg(&exe)
+        .env("NEYUKI_CLANG", clang)
+        .env("NEYUKI_RT_LIB", nyk_rt())
+        .output()
+        .expect("run neyuki")
+        .into();
+    assert!(build.success, "{}", build.stderr);
+    assert!(
+        build.stderr.contains("warning:") && build.stderr.contains("not a constant string"),
+        "{}",
+        build.stderr
+    );
+    let run: Run = Command::new(&exe).output().expect("run executable").into();
+    assert_eq!(run.stdout, "start\n");
+    assert!(!run.success);
+    assert!(
+        run.stderr
+            .contains("runtime error: cannot find module 'other'"),
+        "{}",
+        run.stderr
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

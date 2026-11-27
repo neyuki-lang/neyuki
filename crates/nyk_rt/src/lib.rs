@@ -5,8 +5,8 @@
 //! The generated code keeps arithmetic, comparisons and `print` inline and
 //! calls the functions here for everything that needs the heap or global
 //! state. Globals, closures, tables, strings built by `..`, `#`, varargs,
-//! multiple return values and the `select` builtin work; module imports are
-//! a stub for now.
+//! multiple return values, the `select` builtin and `require` of the modules
+//! the program was built with work; `import_get` is a stub for now.
 //!
 //! # ABI
 //!
@@ -286,6 +286,115 @@ pub unsafe extern "C" fn __nyk_import_get(
 ) {
     // SAFETY: guaranteed by the caller.
     unsafe { put(out, NykVal::NIL) }
+}
+
+// ---- require -----------------------------------------------------------------------
+
+/// The code of a module's chunk: a generated function (see "Calls and
+/// multiple values"), called with the module's closure object as `env`.
+type ModuleChunk = unsafe extern "C" fn(*const c_void, *const NykVal, u32) -> u32;
+
+/// Where a module is in its life, like the VM's `modules` map: absent until
+/// `require` runs it.
+#[derive(Clone, Copy)]
+enum ModuleState {
+    /// Running. A `require` of it from itself (through other modules) gets
+    /// this table instead of running it again.
+    Loading(NykVal),
+    Done(NykVal),
+}
+
+#[derive(Default)]
+struct Modules {
+    /// The closure object of each module, by every name `require` may use
+    /// for it (see [`__nyk_module`]).
+    by_name: HashMap<Vec<u8>, usize>,
+    /// Loading or loaded modules, by closure object.
+    state: HashMap<usize, ModuleState>,
+}
+
+thread_local! {
+    static MODULES: RefCell<Modules> = RefCell::new(Modules::default());
+}
+
+/// Registers the module whose chunk is the generated function in the
+/// closure object `closure`, to be loaded by `require(name)`. The compiler
+/// calls it once per name, before the entry script runs, for every module
+/// the project names with a constant string.
+///
+/// # Safety
+///
+/// `name` must be a NUL-terminated string, and `closure` a closure object
+/// that lives for the rest of the program, whose code is a generated
+/// function.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __nyk_module(name: *const c_char, closure: *const c_void) {
+    // SAFETY: guaranteed by the caller.
+    let name = unsafe { CStr::from_ptr(name) }.to_bytes().to_vec();
+    MODULES.with_borrow_mut(|modules| {
+        modules.by_name.insert(name, closure as usize);
+    });
+}
+
+/// `require(name)`: the value a module returns. The first `require` runs
+/// the module's chunk, and every later one returns the same value, whatever
+/// the spelling (the compiler registered each spelling of a module under
+/// the same chunk). While a module runs, a `require` of it returns an empty
+/// table instead, as in the VM. A module that does not return a value is
+/// nil.
+///
+/// `MODULES` is not borrowed while the chunk runs, and the runtime holds no
+/// table reference across the call (see `table_mut`), so the chunk may call
+/// `require` and the table functions freely.
+fn native_require(args: &[NykVal]) -> Cow<'_, [NykVal]> {
+    let Some(name) = args.first() else {
+        fail("require expects a module path");
+    };
+    if name.tag != TAG_STRING {
+        fail("require expects string argument");
+    }
+    // SAFETY: string values come from the program.
+    let name_bytes = unsafe { name.str_bytes() };
+    let found = MODULES.with_borrow(|modules| {
+        let closure = modules.by_name.get(name_bytes).copied()?;
+        Some((closure, modules.state.get(&closure).copied()))
+    });
+    let Some((closure, state)) = found else {
+        fail(&format!(
+            "cannot find module '{}': it is not compiled into this executable (a native build \
+             has the modules that require() names with a constant string, but no \
+             standard library modules or native packages yet)",
+            String::from_utf8_lossy(name_bytes)
+        ));
+    };
+    match state {
+        Some(ModuleState::Done(val)) => return Cow::Owned(vec![val]),
+        Some(ModuleState::Loading(pending)) => return Cow::Owned(vec![pending]),
+        None => {}
+    }
+    let mut pending = NykVal::NIL;
+    // SAFETY: a valid out-pointer.
+    unsafe { __nyk_table_new(&mut pending, 0, 0) };
+    MODULES.with_borrow_mut(|modules| {
+        modules.state.insert(closure, ModuleState::Loading(pending));
+    });
+    // SAFETY: word 0 of a closure object is its code, a generated function.
+    let code = unsafe { *(closure as *const *const c_void) };
+    // SAFETY: a generated function has the signature of `ModuleChunk`.
+    let chunk: ModuleChunk = unsafe { std::mem::transmute(code) };
+    // SAFETY: the closure object is the chunk's `env`, and it takes no
+    // arguments.
+    let n = unsafe { chunk(closure as *const c_void, std::ptr::null(), 0) };
+    let val = if n == 0 {
+        NykVal::NIL
+    } else {
+        // SAFETY: the chunk's `n` results are in the return area.
+        unsafe { *__nyk_ret_buf(0) }
+    };
+    MODULES.with_borrow_mut(|modules| {
+        modules.state.insert(closure, ModuleState::Done(val));
+    });
+    Cow::Owned(vec![val])
 }
 
 // ---- tables ------------------------------------------------------------------------
@@ -684,7 +793,7 @@ pub unsafe extern "C" fn __nyk_closure(
 type Native = for<'a> fn(&'a [NykVal]) -> Cow<'a, [NykVal]>;
 
 /// The builtins this runtime provides, as `(global name, function)`.
-static NATIVES: &[(&str, Native)] = &[("select", native_select)];
+static NATIVES: &[(&str, Native)] = &[("select", native_select), ("require", native_require)];
 
 /// `select(n, ...)`: the remaining arguments from the `n`th on (counting
 /// from the end when negative), or `select("#", ...)`: how many there are.
@@ -817,6 +926,31 @@ mod tests {
         for &(f, want) in cases {
             assert_eq!(String::from_utf8(format_g(f)).unwrap(), want, "{}", f);
         }
+    }
+
+    static CHUNK_RUNS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+    /// A module chunk like the generated ones: returns the number of runs.
+    unsafe extern "C" fn counting_chunk(_env: *const c_void, _args: *const NykVal, _n: u32) -> u32 {
+        let runs = CHUNK_RUNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        set_results(&[NykVal::int(i64::from(runs))])
+    }
+
+    #[test]
+    fn require_runs_a_module_once_whatever_its_name() {
+        // The closure object of a module: its code in word 0.
+        let object: &'static [*const c_void; 1] =
+            Box::leak(Box::new([counting_chunk as *const c_void]));
+        let object = object.as_ptr() as *const c_void;
+        for name in [c"dir/mod", c"./dir/mod.nyk"] {
+            // SAFETY: NUL-terminated names and a closure object that lives
+            // forever, whose code has the generated functions' signature.
+            unsafe { __nyk_module(name.as_ptr(), object) };
+        }
+        let first = call("require", &[NykVal::string(b"dir/mod")]);
+        let second = call("require", &[NykVal::string(b"./dir/mod.nyk")]);
+        assert_eq!((first, second), (NykVal::int(1), NykVal::int(1)));
+        assert_eq!(CHUNK_RUNS.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[test]

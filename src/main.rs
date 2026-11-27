@@ -58,13 +58,13 @@ Commands:
   lsp                     Serve the Language Server Protocol on stdio
   compile [-O0|-O1] <file> [out]
                           Compile to .nykb bytecode
-  emit-llvm [-O0|-O1] [--runtime=builtin|extern] [--target <triple>] <file> [out.ll]
+  emit-llvm [-O0|-O1] [--runtime=builtin|extern] [--target <triple>] <file|project> [out.ll]
                           Emit LLVM IR (.ll) from MIR
   build [project]         Build a standalone app executable (--no-runtime:
                           an app that runs on an installed Neyuki)
-  build --native <file> [-o out]
-                          Compile a script to a native executable through
-                          LLVM (experimental)
+  build --native [file|project] [-o out]
+                          Compile a script or project to a native executable
+                          through LLVM (experimental)
   unpack <app> [-o dir]   Extract a built app's scripts and assets
   test [filter|path...]   Run .nyk test scripts (default: tests/)
   repl                    Start an interactive session

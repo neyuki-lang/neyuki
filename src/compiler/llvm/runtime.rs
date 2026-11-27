@@ -109,6 +109,7 @@ declare void @__nyk_len(ptr, i8 zeroext, i64)
 declare void @__nyk_closure(ptr, ptr, i32, ptr)
 declare ptr @__nyk_ret_buf(i32)
 declare i32 @__nyk_call_dyn(i8 zeroext, i64, i32, ptr)
+declare void @__nyk_module(ptr, ptr)
 
 "#;
 
@@ -299,6 +300,12 @@ define internal void @__nyk_closure(ptr %out, ptr %fn_ptr, i32 %ncaps, ptr %caps
 ; it does nothing and returns no results.
 define internal i32 @__nyk_call_dyn(i8 zeroext %tag, i64 %raw, i32 %argc, ptr %argv) {
   ret i32 0
+}
+
+; Modules are registered for `require` by libnyk_rt only; a program of
+; several modules needs --runtime=extern.
+define internal void @__nyk_module(ptr %name, ptr %closure) {
+  ret void
 }
 
 ; The return area (see "Calls and multiple values"): room for at least `n`

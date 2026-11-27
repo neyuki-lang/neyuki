@@ -6,11 +6,17 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::compiler::llvm::{LlvmOptions, RuntimeMode, TargetSpec, target::clang_path};
-use crate::compiler::{self, OptLevel};
+use crate::compiler::OptLevel;
+use crate::compiler::llvm::{
+    LlvmOptions, ModuleUnit, RuntimeMode, TargetSpec, emit_llvm_modules, project,
+    target::clang_path,
+};
 
 pub const EMIT_USAGE: &str = "\
-Usage: neyuki emit-llvm [-O0|-O1] [--runtime=builtin|extern] [--target <triple>] <file> [out.ll]
+Usage: neyuki emit-llvm [-O0|-O1] [--runtime=builtin|extern] [--target <triple>] <file|project> [out.ll]
+
+  <project>          a directory with a neyuki.toml (or a main.nyk): the entry
+                     script and every module it requires are emitted together
 
   --runtime=builtin  define stub runtime functions in the module, so lli and
                      clang can run it on its own (default)
@@ -18,10 +24,12 @@ Usage: neyuki emit-llvm [-O0|-O1] [--runtime=builtin|extern] [--target <triple>]
   --target <triple>  the target triple (default: the host's, from clang)";
 
 pub const BUILD_USAGE: &str = "\
-Usage: neyuki build --native [-O0|-O1] [--target <triple>] [--rt-lib <path>] <file> [-o <out>]
+Usage: neyuki build --native [-O0|-O1] [--target <triple>] [--rt-lib <path>] [<file|project>] [-o <out>]
 
-Compiles a script to a native executable through LLVM: clang compiles the
-IR and links it with the runtime library libnyk_rt.a. That library is
+Compiles a script, or a project (a directory with a neyuki.toml, by default
+the working directory), to a native executable through LLVM: every module
+the entry script requires with a constant string is compiled in. clang
+compiles the IR and links it with the runtime library libnyk_rt.a. That library is
 found with --rt-lib, else $NEYUKI_RT_LIB, else next to the neyuki
 executable; build it with
   cargo build --release --manifest-path crates/nyk_rt/Cargo.toml
@@ -100,32 +108,40 @@ fn parse_args(args: &[String], native: bool) -> Result<Args, String> {
         }
         idx += 1;
     }
-    if parsed.input.is_none() {
-        return Err(usage.to_string());
-    }
     if native {
         parsed.runtime = RuntimeMode::Extern;
+        // Like `neyuki build`, the project is the working directory by default.
+        parsed.input.get_or_insert_with(|| PathBuf::from("."));
+    }
+    if parsed.input.is_none() {
+        return Err(usage.to_string());
     }
     Ok(parsed)
 }
 
-/// Reads and compiles the input of `args` to textual IR.
+/// Compiles the input of `args`, a script or a project (see
+/// [`project::entry_of`]) with every module it requires, to textual IR.
 fn emit(args: &Args) -> Result<(String, TargetSpec), String> {
-    let input = args.input.as_deref().unwrap_or(Path::new(""));
-    let source = std::fs::read_to_string(input)
-        .map_err(|err| format!("failed to read {}: {}", input.display(), err))?;
+    let input = args.input.as_deref().unwrap_or(Path::new("."));
+    let entry = project::entry_of(input)?;
+    let project = project::load(&entry, args.opt_level)?;
+    for warning in &project.warnings {
+        eprintln!("warning: {}", warning);
+    }
     let target = TargetSpec::resolve(args.target.as_deref());
     let llvm_options = LlvmOptions {
         runtime: args.runtime,
         target: Some(target.clone()),
     };
-    let chunk = input.to_string_lossy();
-    let ll = compiler::compile_source_to_llvm_ir(
-        &source,
-        &chunk,
-        compiler::Options::RUN.with_opt_level(args.opt_level),
-        &llvm_options,
-    )?;
+    let units: Vec<ModuleUnit> = project
+        .modules
+        .iter()
+        .map(|module| ModuleUnit {
+            program: &module.program,
+            names: &module.names,
+        })
+        .collect();
+    let ll = emit_llvm_modules(&units, args.opt_level, &llvm_options);
     Ok((ll, target))
 }
 
@@ -241,12 +257,19 @@ fn run_tool(mut cmd: Command, what: &str) -> Result<(), String> {
 /// returns its path.
 pub fn build_native_cli(args: &[String]) -> Result<PathBuf, String> {
     let args = parse_args(args, true)?;
-    let input = args.input.clone().unwrap_or_default();
+    let input = args.input.clone().unwrap_or_else(|| PathBuf::from("."));
     let (ll, target) = emit(&args)?;
     let rt_lib = find_rt_lib(args.rt_lib.as_deref(), &target.triple)?;
 
-    let stem = input
-        .file_stem()
+    // A script is named after its file, a project after its directory.
+    let named = if input.is_dir() {
+        std::fs::canonicalize(&input)
+            .ok()
+            .and_then(|dir| dir.file_name().map(|n| n.to_os_string()))
+    } else {
+        input.file_stem().map(|n| n.to_os_string())
+    };
+    let stem = named
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "app".to_string());
     let output = args.output.clone().unwrap_or_else(|| {
@@ -362,6 +385,9 @@ mod tests {
         assert_eq!(args.rt_lib.as_deref(), Some(Path::new("lib.a")));
         assert_eq!(args.target.as_deref(), Some("aarch64-apple-darwin"));
         assert!(parse_args(&strings(&["--native", "a.nyk", "b.nyk"]), true).is_err());
+        // The project is the working directory unless one is named.
+        let args = parse_args(&strings(&["--native"]), true).expect("valid arguments");
+        assert_eq!(args.input.as_deref(), Some(Path::new(".")));
         assert!(parse_args(&strings(&["--native", "--runtime=builtin", "a.nyk"]), true).is_err());
     }
 }

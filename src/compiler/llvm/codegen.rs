@@ -17,7 +17,8 @@ pub struct LlvmModuleCollector {
     pub string_literals: Vec<(String, String, usize)>,
     string_map: HashMap<String, usize>,
     pub user_globals: BTreeSet<String>,
-    pub fn_names: HashMap<(usize, usize), String>,
+    /// The symbol of each nested function, by module, scope and index.
+    pub fn_names: HashMap<(usize, usize, usize), String>,
 }
 
 impl LlvmModuleCollector {
@@ -43,22 +44,23 @@ impl LlvmModuleCollector {
         (sym, len)
     }
 
-    pub fn collect_program(&mut self, prog: &MirProgram) {
-        self.collect_body(&prog.main, "nyk_main", 0);
+    /// Collects module `module` of the program (0 is the entry script).
+    pub fn collect_program(&mut self, prog: &MirProgram, module: usize) {
+        self.collect_body(&prog.main, module, 0);
     }
 
-    fn collect_body(&mut self, body: &MirBody, llvm_name: &str, scope_id: usize) {
+    fn collect_body(&mut self, body: &MirBody, module: usize, scope_id: usize) {
         for (idx, child) in body.functions.iter().enumerate() {
             let child_name = format!(
-                "@nyk_fn_{}_{}_{}",
+                "@{}_{}_{}_{}",
+                fn_prefix(module),
                 scope_id,
                 idx,
                 sanitize_ident(child.name.as_deref().unwrap_or("anon"))
             );
-            self.fn_names.insert((scope_id, idx), child_name.clone());
-            self.collect_body(child, &child_name[1..], scope_id * 100 + idx + 1);
+            self.fn_names.insert((module, scope_id, idx), child_name);
+            self.collect_body(child, module, scope_id * 100 + idx + 1);
         }
-        let _ = llvm_name;
         for bb in &body.blocks {
             for stmt in &bb.statements {
                 if let StatementKind::SetGlobal { name, .. } = &stmt.kind {
@@ -66,6 +68,26 @@ impl LlvmModuleCollector {
                 }
             }
         }
+    }
+}
+
+/// The prefix of the function symbols of module `module`. Every module of a
+/// program shares one LLVM module, so their symbols must not clash; the
+/// entry script keeps the plain `nyk_fn` names.
+pub fn fn_prefix(module: usize) -> String {
+    if module == 0 {
+        "nyk_fn".to_string()
+    } else {
+        format!("nyk_m{}_fn", module)
+    }
+}
+
+/// The symbol of the chunk of module `module`.
+pub fn main_symbol(module: usize) -> String {
+    if module == 0 {
+        "nyk_main".to_string()
+    } else {
+        format!("nyk_m{}_main", module)
     }
 }
 
@@ -95,6 +117,7 @@ struct Spread {
 
 pub struct FunctionEmitter<'a> {
     collector: &'a mut LlvmModuleCollector,
+    module: usize,
     scope_id: usize,
     next_tmp: usize,
     out: String,
@@ -119,9 +142,10 @@ pub struct FunctionEmitter<'a> {
 }
 
 impl<'a> FunctionEmitter<'a> {
-    pub fn new(collector: &'a mut LlvmModuleCollector, scope_id: usize) -> Self {
+    pub fn new(collector: &'a mut LlvmModuleCollector, module: usize, scope_id: usize) -> Self {
         Self {
             collector,
+            module,
             scope_id,
             next_tmp: 0,
             out: String::new(),
@@ -792,7 +816,7 @@ impl<'a> FunctionEmitter<'a> {
                 let sym = self
                     .collector
                     .fn_names
-                    .get(&(self.scope_id, *fn_idx))
+                    .get(&(self.module, self.scope_id, *fn_idx))
                     .cloned()
                     .unwrap_or_else(|| "@nyk_unknown".to_string());
                 if captures.is_empty() {
@@ -907,10 +931,13 @@ impl<'a> FunctionEmitter<'a> {
             let child_name = self
                 .collector
                 .fn_names
-                .get(&(self.scope_id, idx))
+                .get(&(self.module, self.scope_id, idx))
                 .cloned()
-                .unwrap_or_else(|| format!("@nyk_fn_{}_{}", self.scope_id, idx));
-            let child_emitter = FunctionEmitter::new(self.collector, self.scope_id * 100 + idx + 1);
+                .unwrap_or_else(|| {
+                    format!("@{}_{}_{}", fn_prefix(self.module), self.scope_id, idx)
+                });
+            let child_emitter =
+                FunctionEmitter::new(self.collector, self.module, self.scope_id * 100 + idx + 1);
             child_defs.push_str(&child_emitter.emit_body(child, &child_name[1..]));
             child_defs.push('\n');
         }

@@ -3,11 +3,12 @@
 pub mod codegen;
 pub mod emit;
 pub mod native;
+pub mod project;
 pub mod runtime;
 pub mod target;
 pub mod types;
 
-pub use emit::{LlvmOptions, emit_llvm_ir, emit_llvm_ir_with};
+pub use emit::{LlvmOptions, ModuleUnit, emit_llvm_ir, emit_llvm_ir_with, emit_llvm_modules};
 pub use runtime::RuntimeMode;
 pub use target::TargetSpec;
 
@@ -130,6 +131,7 @@ print(y, v, bump(), va(1))";
             "closure",
             "call_dyn",
             "ret_buf",
+            "module",
         ] {
             assert!(declared.iter().any(|d| d == name), "{} not declared", name);
             assert!(
@@ -139,7 +141,7 @@ print(y, v, bump(), va(1))";
                 name
             );
         }
-        assert_eq!(declared.len(), 17, "{:?}", declared);
+        assert_eq!(declared.len(), 18, "{:?}", declared);
         // The small helpers stay defined, so they still inline.
         for helper in ["mk_int", "truthy", "as_f64", "add", "idiv", "eq", "lt"] {
             assert!(
