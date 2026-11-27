@@ -27,13 +27,6 @@ ignore = [
     # network service and point to ed25519/x25519. Remove once a fixed `rsa`
     # ships.
     { id = "RUSTSEC-2023-0071", reason = "no fixed rsa release yet; RSA private-key ops are documented as unsuitable for network-facing use" },
-    # `zbus_names`, `zvariant` and `zvariant_derive` were folded into zbus 6
-    # and are no longer released on their own. They come from zbus 4, which
-    # keyring's Secret Service backend uses; keyring has no release on zbus 6
-    # yet. Remove once it moves.
-    { id = "RUSTSEC-2026-0370", reason = "zvariant merged into zbus 6; keyring still depends on zbus 4" },
-    { id = "RUSTSEC-2026-0371", reason = "zbus_names merged into zbus 6; keyring still depends on zbus 4" },
-    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive merged into zbus 6; keyring still depends on zbus 4" },
 ]
 
 [licenses]

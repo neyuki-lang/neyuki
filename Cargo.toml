@@ -128,10 +128,16 @@ schannel = ">=0.1.23, <0.1.28"
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_UI_WindowsAndMessaging"] }
 
 # Elsewhere `os.protect` keeps a random AES-256-GCM key in the OS keychain:
-# Keychain Services on macOS, the Secret Service over the pure-Rust `zbus`
-# D-Bus client on Linux and the BSDs (no libdbus needed to build or run).
+# Keychain Services on macOS, the Secret Service over D-Bus on Linux and the
+# BSDs. The D-Bus client is libdbus, built from source and linked statically
+# (`vendored`), so nothing is needed to build or run beyond a C compiler. It
+# replaced the async `zbus` client, which with its executor made the Linux
+# binary about 1.4 MB (13%) larger. The vendored libdbus C sources are
+# AFL-2.1 OR GPL-2.0-or-later (the `libdbus-sys` crate metadata only covers
+# its Rust bindings). `crypto-rust` rather than `crypto-openssl`: with `vendored` the
+# latter would also turn on `openssl/vendored` for `native-tls`.
 [target.'cfg(not(windows))'.dependencies]
-keyring = { version = "3.6", features = ["apple-native", "async-secret-service", "async-io", "crypto-rust"] }
+keyring = { version = "3.6", features = ["apple-native", "sync-secret-service", "vendored", "crypto-rust"] }
 
 # Debug builds still optimize dependencies: the crypto crates run 10-50x
 # slower unoptimized, enough that `hashPassword` and `pbkdf2` at their default
