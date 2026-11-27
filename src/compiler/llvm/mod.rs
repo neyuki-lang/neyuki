@@ -58,4 +58,35 @@ print(\"sum\", sum)";
         assert!(ll.contains("call %NykVal @__nyk_add("));
         assert!(ll.contains("call %NykVal @__nyk_le("));
     }
+
+    fn emit(code: &str) -> String {
+        let stmts = compile_source(code).expect("syntax error");
+        let hir = lower_ast(&stmts, None, OptLevel::O1);
+        let thir = lower_hir_to_thir(&hir);
+        let mut mir = lower_thir_to_mir(&thir, false);
+        optimize_mir(&mut mir, OptLevel::O1);
+        emit_llvm_ir(&mir, OptLevel::O1)
+    }
+
+    /// The body of the LLVM function `name`, from `define` to its `}`.
+    fn function_body<'a>(ll: &'a str, name: &str) -> &'a str {
+        let start = ll
+            .find(&format!("@{}(", name))
+            .and_then(|i| ll[..i].rfind("define "))
+            .expect("function not found");
+        let end = ll[start..].find("\n}\n").expect("unterminated function") + start;
+        &ll[start..end]
+    }
+
+    #[test]
+    fn test_call_dyn_gets_its_arguments_in_an_entry_block_array() {
+        let ll = emit("local v = Vector3.new(8, 1, 8)\nlocal m = require(\"@pkg/janis/khione\")");
+        let main = function_body(&ll, "nyk_main");
+        let entry = &main[..main.find("bb0:").expect("no bb0")];
+        assert!(entry.contains("alloca [3 x %NykVal]"), "{}", main);
+        assert!(entry.contains("alloca [1 x %NykVal]"), "{}", main);
+        assert!(main.contains(", i32 3, ptr %t"), "{}", main);
+        assert!(main.contains(", i32 1, ptr %t"), "{}", main);
+        assert!(!main.contains("ptr null)"), "{}", main);
+    }
 }

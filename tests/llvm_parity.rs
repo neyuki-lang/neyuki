@@ -434,3 +434,38 @@ fn ordering_mixed_types_is_an_error() {
         Expect::Error("expected number"),
     );
 }
+
+#[test]
+fn calls_pass_their_arguments() {
+    check_case(
+        "spread_calls",
+        "\
+local function add3(a, b, c) return a + b + c end
+local function twice(f, x) return f(f(x, 1, 1), 1, 1) end
+local function wrap(f, a, b, c) return f(a, b, c) end
+print(add3(1, 2, 3))
+print(\"sum\", wrap(add3, 10, 20, 30), twice(add3, 0))
+local t = { add3(1, 1, 1) }
+",
+        Expect::SameAsVm,
+    );
+    check_case(
+        "generic_for",
+        "\
+-- Called as upto3(state, ctrl), with ctrl the previous value (nil at first).
+local function upto3(_, i)
+  if i == nil then
+    i = 0
+  end
+  if i < 3 then
+    return i + 1
+  end
+  return nil
+end
+for i in upto3 do
+  print(\"i\", i)
+end
+",
+        Expect::SameAsVm,
+    );
+}
