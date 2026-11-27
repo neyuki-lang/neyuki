@@ -37,8 +37,8 @@ print(fib(10))";
 
         let ll = emit_llvm_ir(&mir, OptLevel::O1);
         assert!(ll.contains("%NykVal = type { i8, i64 }"));
-        assert!(ll.contains("define %NykVal @nyk_fn_0_0_fib("));
-        assert!(ll.contains("define %NykVal @nyk_main()"));
+        assert!(ll.contains("define %NykVal @nyk_fn_0_0_fib(ptr %env, %NykVal %arg_0)"));
+        assert!(ll.contains("define %NykVal @nyk_main(ptr %env)"));
         assert!(ll.contains("define i32 @main()"));
         assert!(ll.contains("call void @__nyk_print_one("));
     }
@@ -87,14 +87,16 @@ local function bump() n = n + 1 return n end
 local function va(...) return ... end
 print(y, v, bump(), va(1))";
 
-    /// `(name, parameter types)` of every `declare` of a runtime function.
-    fn runtime_declares(ll: &str) -> Vec<(String, String)> {
+    /// `(name, return type, parameter types)` of every `declare` of a
+    /// runtime function.
+    fn runtime_declares(ll: &str) -> Vec<(String, String, String)> {
         ll.lines()
-            .filter_map(|line| line.strip_prefix("declare void @__nyk_"))
-            .map(|rest| {
-                let (name, params) = rest.split_once('(').expect("declare has params");
+            .filter_map(|line| {
+                let rest = line.strip_prefix("declare ")?;
+                let (ret, rest) = rest.split_once(" @__nyk_")?;
+                let (name, params) = rest.split_once('(')?;
                 let params = params.split(')').next().unwrap_or("");
-                (name.to_string(), params.to_string())
+                Some((name.to_string(), ret.to_string(), params.to_string()))
             })
             .collect()
     }
@@ -106,13 +108,18 @@ print(y, v, bump(), va(1))";
             target: None,
         };
         let ll = emit_with(USES_THE_RUNTIME, &options);
-        let declared: Vec<String> = runtime_declares(&ll).into_iter().map(|(n, _)| n).collect();
+        let declared: Vec<String> = runtime_declares(&ll)
+            .into_iter()
+            .map(|(n, _, _)| n)
+            .collect();
         for name in [
             "error",
             "global_get",
             "global_set",
             "upval_get",
             "upval_set",
+            "upval_cell",
+            "cell_new",
             "import_get",
             "table_new",
             "table_get",
@@ -126,12 +133,13 @@ print(y, v, bump(), va(1))";
         ] {
             assert!(declared.iter().any(|d| d == name), "{} not declared", name);
             assert!(
-                !ll.contains(&format!("define internal void @__nyk_{}(", name)),
+                !ll.lines()
+                    .any(|l| l.starts_with("define") && l.contains(&format!(" @__nyk_{}(", name))),
                 "{} is defined in extern mode",
                 name
             );
         }
-        assert_eq!(declared.len(), 15, "{:?}", declared);
+        assert_eq!(declared.len(), 17, "{:?}", declared);
         // The small helpers stay defined, so they still inline.
         for helper in ["mk_int", "truthy", "as_f64", "add", "idiv", "eq", "lt"] {
             assert!(
@@ -157,8 +165,8 @@ print(y, v, bump(), va(1))";
                 target: None,
             },
         );
-        for (name, params) in runtime_declares(&extern_ll) {
-            let def_start = format!("define internal void @__nyk_{}(", name);
+        for (name, ret, params) in runtime_declares(&extern_ll) {
+            let def_start = format!("define internal {} @__nyk_{}(", ret, name);
             let line = builtin
                 .lines()
                 .find(|l| l.starts_with(&def_start))
@@ -192,7 +200,7 @@ print(y, v, bump(), va(1))";
                     target: None,
                 },
             );
-            for (name, _) in runtime_declares(&emit_with(
+            for (name, _, _) in runtime_declares(&emit_with(
                 USES_THE_RUNTIME,
                 &LlvmOptions {
                     runtime: RuntimeMode::Extern,
@@ -204,6 +212,7 @@ print(y, v, bump(), va(1))";
                     assert!(!line.contains("%NykVal %"), "{:?}: {}", mode, line);
                     assert!(
                         line.trim_start().starts_with("call void")
+                            || line.contains("= call ptr @__nyk_")
                             || line.starts_with("define")
                             || line.starts_with("declare"),
                         "{:?}: {}",

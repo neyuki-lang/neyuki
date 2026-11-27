@@ -1,6 +1,6 @@
 //! Lowers CFG-based [`MirBody`] functions into LLVM IR SSA instructions.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write;
 
 use num_bigint::BigInt;
@@ -90,9 +90,13 @@ pub struct FunctionEmitter<'a> {
     next_tmp: usize,
     out: String,
     local_is_print_builtin: HashMap<LocalId, bool>,
-    self_name: Option<String>,
-    self_llvm_sym: String,
-    upvalue_names: Vec<String>,
+    /// Locals that a closure captures. They live in heap cells (see
+    /// `emit_body`), and their `%cell_N` slot holds the cell's pointer.
+    boxed: HashSet<LocalId>,
+    /// For each child function, where each of its upvalues comes from when
+    /// a closure of it is made: `None` for a local of this function (named
+    /// by the `Closure` rvalue), `Some(i)` for this function's upvalue `i`.
+    child_upvalue_sources: Vec<Vec<Option<u8>>>,
     /// `alloca`s that belong in the entry block, spliced in by `emit_body`
     /// so that every stack slot is allocated once per call, where mem2reg
     /// and SROA expect it, rather than at the instruction that needs it.
@@ -108,9 +112,8 @@ impl<'a> FunctionEmitter<'a> {
             next_tmp: 0,
             out: String::new(),
             local_is_print_builtin: HashMap::new(),
-            self_name: None,
-            self_llvm_sym: String::new(),
-            upvalue_names: Vec::new(),
+            boxed: HashSet::new(),
+            child_upvalue_sources: Vec::new(),
             entry_allocas: String::new(),
             next_label: 0,
         }
@@ -204,9 +207,15 @@ impl<'a> FunctionEmitter<'a> {
             "  {} = extractvalue %NykVal {}, 1",
             raw_ptr, callee
         );
+        // A function value points to its closure object, whose first word is
+        // the code; the object itself is the callee's hidden `%env`.
+        let env = self.tmp();
+        let _ = writeln!(self.out, "  {} = inttoptr i64 {} to ptr", env, raw_ptr);
         let fn_ptr = self.tmp();
-        let _ = writeln!(self.out, "  {} = inttoptr i64 {} to ptr", fn_ptr, raw_ptr);
-        let arg_list: Vec<String> = args.iter().map(|a| format!("%NykVal {}", a)).collect();
+        let _ = writeln!(self.out, "  {} = load ptr, ptr {}", fn_ptr, env);
+        let arg_list: Vec<String> = std::iter::once(format!("ptr {}", env))
+            .chain(args.iter().map(|a| format!("%NykVal {}", a)))
+            .collect();
         let direct_res = self.tmp();
         let _ = writeln!(
             self.out,
@@ -321,22 +330,12 @@ impl<'a> FunctionEmitter<'a> {
     /// rest.
     fn store_call_results(&mut self, dsts: &[LocalId], res: &str) {
         if let Some(first) = dsts.first() {
-            let _ = writeln!(
-                self.out,
-                "  store %NykVal {}, ptr {}",
-                res,
-                Self::slot(*first)
-            );
+            self.store_local(*first, res);
         }
         for extra in dsts.iter().skip(1) {
             let nil = self.tmp();
             let _ = writeln!(self.out, "  {} = call %NykVal @__nyk_mk_nil()", nil);
-            let _ = writeln!(
-                self.out,
-                "  store %NykVal {}, ptr {}",
-                nil,
-                Self::slot(*extra)
-            );
+            self.store_local(*extra, &nil);
         }
     }
 
@@ -348,6 +347,42 @@ impl<'a> FunctionEmitter<'a> {
 
     fn slot(id: LocalId) -> String {
         format!("%slot_{}", id.0)
+    }
+
+    fn cell_slot(id: LocalId) -> String {
+        format!("%cell_{}", id.0)
+    }
+
+    /// The address that holds local `id`'s value: its stack slot, or for a
+    /// captured local the heap cell its `%cell_N` slot points to now.
+    fn slot_ptr(&mut self, id: LocalId) -> String {
+        if !self.boxed.contains(&id) {
+            return Self::slot(id);
+        }
+        let p = self.tmp();
+        let _ = writeln!(self.out, "  {} = load ptr, ptr {}", p, Self::cell_slot(id));
+        p
+    }
+
+    /// Stores `val` into local `id`.
+    fn store_local(&mut self, id: LocalId, val: &str) {
+        let p = self.slot_ptr(id);
+        let _ = writeln!(self.out, "  store %NykVal {}, ptr {}", val, p);
+    }
+
+    /// Allocates a fresh cell holding `val` and returns its pointer.
+    fn new_cell(&mut self, val: &str) -> String {
+        let tag = self.tmp();
+        let _ = writeln!(self.out, "  {} = extractvalue %NykVal {}, 0", tag, val);
+        let raw = self.tmp();
+        let _ = writeln!(self.out, "  {} = extractvalue %NykVal {}, 1", raw, val);
+        let cell = self.tmp();
+        let _ = writeln!(
+            self.out,
+            "  {} = call ptr @__nyk_cell_new(i8 zeroext {}, i64 {})",
+            cell, tag, raw
+        );
+        cell
     }
 
     fn bb_name(id: BasicBlockId) -> String {
@@ -407,13 +442,9 @@ impl<'a> FunctionEmitter<'a> {
     }
 
     fn eval_place(&mut self, place: &Place) -> String {
+        let src = self.slot_ptr(place.local);
         let mut cur = self.tmp();
-        let _ = writeln!(
-            self.out,
-            "  {} = load %NykVal, ptr {}",
-            cur,
-            Self::slot(place.local)
-        );
+        let _ = writeln!(self.out, "  {} = load %NykVal, ptr {}", cur, src);
         for proj in &place.projections {
             let key = match proj {
                 Projection::Field(f) => {
@@ -431,21 +462,12 @@ impl<'a> FunctionEmitter<'a> {
 
     fn store_place(&mut self, place: &Place, val_reg: &str) {
         if place.projections.is_empty() {
-            let _ = writeln!(
-                self.out,
-                "  store %NykVal {}, ptr {}",
-                val_reg,
-                Self::slot(place.local)
-            );
+            self.store_local(place.local, val_reg);
             return;
         }
+        let src = self.slot_ptr(place.local);
         let mut cur = self.tmp();
-        let _ = writeln!(
-            self.out,
-            "  {} = load %NykVal, ptr {}",
-            cur,
-            Self::slot(place.local)
-        );
+        let _ = writeln!(self.out, "  {} = load %NykVal, ptr {}", cur, src);
         let last = place.projections.len() - 1;
         for proj in &place.projections[..last] {
             let key = match proj {
@@ -581,22 +603,10 @@ impl<'a> FunctionEmitter<'a> {
                     self.rt_call("__nyk_global_get", &[RtArg::Ptr(&s)])
                 }
             }
-            Rvalue::Upvalue(idx) => {
-                if let (Some(sname), Some(uname)) =
-                    (&self.self_name, self.upvalue_names.get(*idx as usize))
-                    && sname == uname
-                {
-                    let res = self.tmp();
-                    let _ = writeln!(
-                        self.out,
-                        "  {} = call %NykVal @__nyk_mk_fn(ptr @{})",
-                        res, self.self_llvm_sym
-                    );
-                    res
-                } else {
-                    self.rt_call("__nyk_upval_get", &[RtArg::I32(*idx as usize)])
-                }
-            }
+            Rvalue::Upvalue(idx) => self.rt_call(
+                "__nyk_upval_get",
+                &[RtArg::Ptr("%env"), RtArg::I32(*idx as usize)],
+            ),
             Rvalue::ModuleImport { module, field } => {
                 let mp = self.emit_string_ptr(module);
                 let fp = self.emit_string_ptr(field);
@@ -620,19 +630,63 @@ impl<'a> FunctionEmitter<'a> {
                     .cloned()
                     .unwrap_or_else(|| "@nyk_unknown".to_string());
                 if captures.is_empty() {
+                    // A function that captures nothing has one static
+                    // closure object.
                     let res = self.tmp();
                     let _ = writeln!(
                         self.out,
-                        "  {} = call %NykVal @__nyk_mk_fn(ptr {})",
+                        "  {} = call %NykVal @__nyk_mk_fn(ptr {}.closure)",
                         res, sym
                     );
-                    res
-                } else {
-                    self.rt_call(
-                        "__nyk_closure",
-                        &[RtArg::Ptr(&sym), RtArg::I32(captures.len())],
-                    )
+                    return res;
                 }
+                // The cells to share: a captured local's own cell, or the one
+                // behind an upvalue of this function.
+                let ty = format!("[{} x ptr]", captures.len());
+                let caps = self.entry_alloca(&ty);
+                for (i, cap) in captures.iter().enumerate() {
+                    let cell = match cap {
+                        Some(local) => {
+                            let c = self.tmp();
+                            let _ = writeln!(
+                                self.out,
+                                "  {} = load ptr, ptr {}",
+                                c,
+                                Self::cell_slot(*local)
+                            );
+                            c
+                        }
+                        None => {
+                            let up = self
+                                .child_upvalue_sources
+                                .get(*fn_idx)
+                                .and_then(|srcs| srcs.get(i).copied().flatten())
+                                .unwrap_or(0);
+                            let c = self.tmp();
+                            let _ = writeln!(
+                                self.out,
+                                "  {} = call ptr @__nyk_upval_cell(ptr %env, i32 {})",
+                                c, up
+                            );
+                            c
+                        }
+                    };
+                    let at = self.tmp();
+                    let _ = writeln!(
+                        self.out,
+                        "  {} = getelementptr inbounds {}, ptr {}, i64 0, i64 {}",
+                        at, ty, caps, i
+                    );
+                    let _ = writeln!(self.out, "  store ptr {}, ptr {}", cell, at);
+                }
+                self.rt_call(
+                    "__nyk_closure",
+                    &[
+                        RtArg::Ptr(&sym),
+                        RtArg::I32(captures.len()),
+                        RtArg::Ptr(&caps),
+                    ],
+                )
             }
             Rvalue::Vararg => self.rt_call("__nyk_vararg", &[]),
         }
@@ -650,9 +704,26 @@ impl<'a> FunctionEmitter<'a> {
     }
 
     pub fn emit_body(mut self, body: &MirBody, llvm_name: &str) -> String {
-        self.self_name = body.name.clone();
-        self.self_llvm_sym = llvm_name.to_string();
-        self.upvalue_names = body.upvalues.iter().map(|u| u.name.clone()).collect();
+        // A local that a closure captures is shared with it, so it lives in
+        // a heap cell instead of a stack slot.
+        for bb in &body.blocks {
+            for stmt in &bb.statements {
+                if let StatementKind::Assign(_, Rvalue::Closure { captures, .. }) = &stmt.kind {
+                    self.boxed.extend(captures.iter().flatten().copied());
+                }
+            }
+        }
+        self.child_upvalue_sources = body
+            .functions
+            .iter()
+            .map(|child| {
+                child
+                    .upvalues
+                    .iter()
+                    .map(|u| if u.in_stack { None } else { Some(u.index) })
+                    .collect()
+            })
+            .collect();
         let mut child_defs = String::new();
         for (idx, child) in body.functions.iter().enumerate() {
             let child_name = self
@@ -666,8 +737,15 @@ impl<'a> FunctionEmitter<'a> {
             child_defs.push('\n');
         }
 
-        let params_sig: Vec<String> = (0..body.num_params as usize)
-            .map(|i| format!("%NykVal %arg_{}", i))
+        // Every function takes its closure object as a hidden `%env` (see
+        // `emit_call`); one that captures nothing uses this static object.
+        let _ = writeln!(
+            self.out,
+            "@{}.closure = internal constant [1 x ptr] [ptr @{}]\n",
+            llvm_name, llvm_name
+        );
+        let params_sig: Vec<String> = std::iter::once("ptr %env".to_string())
+            .chain((0..body.num_params as usize).map(|i| format!("%NykVal %arg_{}", i)))
             .collect();
         let _ = writeln!(
             self.out,
@@ -681,14 +759,33 @@ impl<'a> FunctionEmitter<'a> {
         // Allocate stack slots for all MIR locals so mem2reg/O1 can promote them cleanly.
         for decl in &body.locals {
             let hint = LlvmTypeHint::from_neyuki(&decl.ty).ir_comment_name();
+            let name = decl.name.as_deref().unwrap_or("tmp");
+            let zero = self.tmp();
+            if self.boxed.contains(&decl.id) {
+                let _ = writeln!(
+                    self.out,
+                    "  {} = alloca ptr ; cell of {} {}",
+                    Self::cell_slot(decl.id),
+                    hint,
+                    name
+                );
+                let _ = writeln!(self.out, "  {} = call %NykVal @__nyk_mk_nil()", zero);
+                let cell = self.new_cell(&zero);
+                let _ = writeln!(
+                    self.out,
+                    "  store ptr {}, ptr {}",
+                    cell,
+                    Self::cell_slot(decl.id)
+                );
+                continue;
+            }
             let _ = writeln!(
                 self.out,
                 "  {} = alloca %NykVal ; {} {}",
                 Self::slot(decl.id),
                 hint,
-                decl.name.as_deref().unwrap_or("tmp")
+                name
             );
-            let zero = self.tmp();
             let _ = writeln!(self.out, "  {} = call %NykVal @__nyk_mk_nil()", zero);
             let _ = writeln!(
                 self.out,
@@ -704,12 +801,7 @@ impl<'a> FunctionEmitter<'a> {
             if matches!(decl.kind, crate::compiler::mir::LocalKind::Arg)
                 && arg_idx < body.num_params as usize
             {
-                let _ = writeln!(
-                    self.out,
-                    "  store %NykVal %arg_{}, ptr {}",
-                    arg_idx,
-                    Self::slot(decl.id)
-                );
+                self.store_local(decl.id, &format!("%arg_{}", arg_idx));
                 arg_idx += 1;
             }
         }
@@ -750,7 +842,11 @@ impl<'a> FunctionEmitter<'a> {
                         let val = self.eval_operand(value);
                         self.rt_call_void(
                             "__nyk_upval_set",
-                            &[RtArg::I32(*index as usize), RtArg::Val(&val)],
+                            &[
+                                RtArg::Ptr("%env"),
+                                RtArg::I32(*index as usize),
+                                RtArg::Val(&val),
+                            ],
                         );
                     }
                     StatementKind::AppendArray { table, value } => {
@@ -763,9 +859,28 @@ impl<'a> FunctionEmitter<'a> {
                         let first = self.rt_call("__nyk_vararg", &[]);
                         self.store_call_results(dsts, &first);
                     }
-                    StatementKind::CloseUpvals(_)
-                    | StatementKind::DebugLocal { .. }
-                    | StatementKind::DebugScopeEnd { .. } => {}
+                    StatementKind::CloseUpvals(locals) => {
+                        // The end of a loop iteration: closures made in it keep
+                        // the current cell, and the next iteration's variable
+                        // gets a fresh one (with the same value until it is
+                        // assigned).
+                        for local in locals {
+                            if !self.boxed.contains(local) {
+                                continue;
+                            }
+                            let cur = self.slot_ptr(*local);
+                            let val = self.tmp();
+                            let _ = writeln!(self.out, "  {} = load %NykVal, ptr {}", val, cur);
+                            let cell = self.new_cell(&val);
+                            let _ = writeln!(
+                                self.out,
+                                "  store ptr {}, ptr {}",
+                                cell,
+                                Self::cell_slot(*local)
+                            );
+                        }
+                    }
+                    StatementKind::DebugLocal { .. } | StatementKind::DebugScopeEnd { .. } => {}
                 }
             }
 
@@ -856,12 +971,7 @@ impl<'a> FunctionEmitter<'a> {
                         "  {} = call %NykVal @__nyk_sub(%NykVal {}, %NykVal {})",
                         init, b, s
                     );
-                    let _ = writeln!(
-                        self.out,
-                        "  store %NykVal {}, ptr {}",
-                        init,
-                        Self::slot(*base)
-                    );
+                    self.store_local(*base, &init);
                     let _ = writeln!(self.out, "  br label %{}", Self::bb_name(*test_bb));
                 }
                 TerminatorKind::ForLoop {
@@ -883,18 +993,8 @@ impl<'a> FunctionEmitter<'a> {
                         "  {} = call %NykVal @__nyk_add(%NykVal {}, %NykVal {})",
                         next, b, stp
                     );
-                    let _ = writeln!(
-                        self.out,
-                        "  store %NykVal {}, ptr {}",
-                        next,
-                        Self::slot(*base)
-                    );
-                    let _ = writeln!(
-                        self.out,
-                        "  store %NykVal {}, ptr {}",
-                        next,
-                        Self::slot(loop_var_local)
-                    );
+                    self.store_local(*base, &next);
+                    self.store_local(loop_var_local, &next);
 
                     // Positive step: next <= limit; negative step: limit <= next.
                     let zero = self.tmp();
@@ -959,12 +1059,7 @@ impl<'a> FunctionEmitter<'a> {
                     let ct = self.eval_place(&Place::local(*ctrl));
                     let first = self.emit_call(&iter_fn, &[st, ct]);
                     self.store_call_results(vars, &first);
-                    let _ = writeln!(
-                        self.out,
-                        "  store %NykVal {}, ptr {}",
-                        first,
-                        Self::slot(*ctrl)
-                    );
+                    self.store_local(*ctrl, &first);
                     let tag = self.tmp();
                     let _ = writeln!(self.out, "  {} = extractvalue %NykVal {}, 0", tag, first);
                     let is_nil = self.tmp();

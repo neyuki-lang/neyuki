@@ -639,3 +639,108 @@ fn emitted_module_targets_the_host() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn recursive_closures() {
+    check_case(
+        "recursive_closure",
+        "\
+local base = 100
+local function fact(n)
+  if n <= 1 then
+    return 1
+  end
+  return n * fact(n - 1)
+end
+local function sum(n)
+  if n == 0 then
+    return base
+  end
+  return n + sum(n - 1)
+end
+local f = fact(10)
+local s = sum(3)
+print(f, s)
+",
+        Expect::SameAsVm,
+    );
+}
+
+#[test]
+fn closures_capture_their_own_variables() {
+    check_case(
+        "closure_instances",
+        "\
+local function counter()
+  local n = 0
+  return function()
+    n = n + 1
+    return n
+  end
+end
+local function adder(k)
+  return function(x) return x + k end
+end
+local a = counter()
+local b = counter()
+local x = a()
+local y = a()
+local z = b()
+local add1 = adder(1)
+local add10 = adder(10)
+local p = add1(5)
+local q = add10(5)
+print(x, y, z, p, q)
+",
+        Expect::SameAsVm,
+    );
+}
+
+#[test]
+fn closures_share_variables_with_their_parent() {
+    check_case(
+        "closure_sharing",
+        "\
+local v = 1
+local function get() return v end
+local function set(x) v = x end
+v = 2
+local a = get()
+set(3)
+local b = get()
+print(a, b, v)
+-- Each loop iteration has its own `i`.
+local f1 = nil
+local f2 = nil
+for i = 1, 2 do
+  local function cur() return i end
+  if i == 1 then
+    f1 = cur
+  else
+    f2 = cur
+  end
+end
+local c = f1()
+local d = f2()
+print(c, d)
+-- A variable two functions out reaches the inner one through the middle one.
+local function outer()
+  local hits = 0
+  local function middle()
+    local function inner()
+      hits = hits + 1
+      return hits
+    end
+    return inner
+  end
+  local g = middle()
+  g()
+  g()
+  return hits
+end
+local h = outer()
+print(h)
+",
+        Expect::SameAsVm,
+    );
+}
