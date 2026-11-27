@@ -2082,8 +2082,16 @@ mod tests {
 
         let closed = builtin_unforward(&mut VM::new(), &[integer(id)]).unwrap();
         assert_eq!(closed[0].as_bool(), Some(true));
-        assert!(
-            TcpListener::bind(("127.0.0.1", port)).is_ok(),
+        // Nothing listens on the port any more. (Binding it again is not a
+        // reliable check: the freed ephemeral port can at once become the
+        // local port of another test's outgoing connection, which blocks a
+        // new listener there.)
+        let refused = TcpStream::connect(("127.0.0.1", port))
+            .err()
+            .map(|err| err.kind());
+        assert_eq!(
+            refused,
+            Some(std::io::ErrorKind::ConnectionRefused),
             "closing should release the port"
         );
         let again = builtin_unforward(&mut VM::new(), &[integer(id)]).unwrap();
