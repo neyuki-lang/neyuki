@@ -145,7 +145,9 @@ define internal void @__nyk_import_get(ptr %out, ptr %mod, ptr %field) {
   ret void
 }
 
-; Tables are stubs here, but each one gets its own allocation so that two
+; Tables are stubs here: a hash table is not worth writing in IR, so real
+; tables exist only with libnyk_rt (--runtime=extern). Reads give nil and
+; writes do nothing, but each table gets its own allocation so that two
 ; tables are not equal.
 define internal void @__nyk_table_new(ptr %out, i32 %arr, i32 %map) {
   %p = call ptr @malloc(i64 16)
