@@ -18,6 +18,7 @@ neyuki disasm <file>              print the bytecode the compiler emits
 neyuki decompile <file> [out]     turn .nykb bytecode back into source
 neyuki dump-ir <file>             print the IR before and after optimization
 neyuki emit-llvm <file> [out.ll]  emit LLVM IR (experimental)
+neyuki build --native <file>      compile a script to a native executable (experimental)
 neyuki help | --version
 ```
 
@@ -51,7 +52,15 @@ The bytecode format changes between Neyuki versions. A `.nykb` written by anothe
 
 ### LLVM IR
 
-`neyuki emit-llvm [-O0|-O1] app.nyk [app.ll]` compiles a script to textual LLVM IR, which `lli app.ll` runs and `clang app.ll -o app` turns into an executable. The backend is experimental: tables, globals other than those the script assigns, varargs and multiple return values are stubs, so only small programs run. Within what it supports, a program prints what it prints on the VM, with these differences:
+`neyuki emit-llvm [-O0|-O1] app.nyk [app.ll]` compiles a script to textual LLVM IR, which `lli app.ll` runs and `clang app.ll -o app` turns into an executable. The backend is experimental: tables, globals other than those the script assigns, varargs and multiple return values are stubs, so only small programs run.
+
+The module starts with the `target triple` and `target datalayout` that the installed clang uses for the host (`$NEYUKI_CLANG`, else `clang` on `PATH`), so clang compiles it without overriding the triple; `--target <triple>` picks another one. Without clang the module names the host triple only and LLVM supplies the data layout.
+
+`--runtime=builtin` (the default) defines the runtime functions in the module as stubs, which is what lets `lli` run it on its own. `--runtime=extern` only declares them, for linking with `libnyk_rt.a` from [`crates/nyk_rt`](../crates/nyk_rt), which implements globals, `..` and `#` on strings and the `select` builtin so far. Values cross into that library as a tag byte and 64 raw bits, results come back through a pointer, so the boundary has the same calling convention on Linux, macOS and Windows (the comments at the top of `crates/nyk_rt/src/lib.rs` have the details).
+
+`neyuki build --native [-O0|-O1] [--target <triple>] app.nyk [-o app]` does all of it: it emits the IR for the external runtime, compiles it with clang and links it with `libnyk_rt.a` through the system linker. It looks for the library given with `--rt-lib`, else in `$NEYUKI_RT_LIB`, else next to the `neyuki` executable; `cargo build --release --manifest-path crates/nyk_rt/Cargo.toml` builds it. The system libraries the Rust standard library inside it needs (on Linux `-lgcc_s -lutil -lrt -lpthread -lm -ldl -lc`, as `cargo rustc -- --print native-static-libs` reports them) are added for the target, or taken from `$NEYUKI_RT_NATIVE_LIBS`.
+
+Within what it supports, a program prints what it prints on the VM, with these differences:
 
 - Integers are 64-bit and wrap on overflow where the VM switches to a bignum: `9223372036854775807 + 1`, `(-9223372036854775807 - 1) // -1` (which gives `-9223372036854775808`) and `1 << 64` (which gives `0`). A shift by 64 or more bits gives `0`, or `-1` for `>>` of a negative number, as in the VM; a negative count shifts the other way for `<<` and `>>` and gives `0` for `<<<` and `>>>`.
 - `//` and `%` round toward negative infinity, so `-5 // 3` is `-2` and `-5 % 3` is `1` (the result of `%` has the sign of the divisor), for integers and floats alike. A zero divisor is an error for both; `/` follows IEEE 754 and gives an infinity or NaN.

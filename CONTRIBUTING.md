@@ -31,6 +31,8 @@ cargo test
 
 `cargo test` also runs every `.nyk` file under `tests/` and checks formatting, so a failing `cargo fmt` will fail the test suite too.
 
+`crates/nyk_rt`, the runtime that `neyuki build --native` links, is a workspace of its own (it is built with `panic = "abort"`), so the commands above skip it. If you change it, run them with `--manifest-path crates/nyk_rt/Cargo.toml` too. `tests/llvm_parity.rs` compares the LLVM backend with the VM using `opt`, `lli` and `clang`; it skips when they are not installed (CI installs them on Linux).
+
 ## Rules
 
 ### Code

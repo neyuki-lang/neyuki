@@ -370,6 +370,7 @@ pub fn compile_source_to_llvm_ir(
     source: &str,
     chunk: &str,
     options: Options,
+    llvm_options: &llvm::LlvmOptions,
 ) -> Result<String, String> {
     let parsed = parse_or_render_syntax_errors(source, chunk)?;
     if options.check {
@@ -390,7 +391,11 @@ pub fn compile_source_to_llvm_ir(
     let thir_module = thir::lower_hir_to_thir(&hir_module);
     let mut mir_program = mir::lower_thir_to_mir(&thir_module, options.keep_locals);
     mir::optimize_mir(&mut mir_program, options.opt_level);
-    Ok(llvm::emit_llvm_ir(&mir_program, options.opt_level))
+    Ok(llvm::emit_llvm_ir_with(
+        &mir_program,
+        options.opt_level,
+        llvm_options,
+    ))
 }
 
 /// The IR of a program before and after optimization, for debugging the
