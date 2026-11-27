@@ -60,7 +60,7 @@ pub fn emit_llvm_ir_with(
         r#"
 define i32 @main() {
 entry:
-  %res = call %NykVal @nyk_main()
+  %res = call %NykVal @nyk_main(ptr @nyk_main.closure)
   ret i32 0
 }
 "#,

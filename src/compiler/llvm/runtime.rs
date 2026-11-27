@@ -20,6 +20,17 @@
 //!   first, and the function returns `void`;
 //! - an argument list is a `ptr` to a `[N x %NykVal]` array in memory, laid
 //!   out per the module's `target datalayout` (`#[repr(C)]` in Rust).
+//!
+//! # Closures
+//!
+//! A function value (tag 6) points to a closure object, an array of
+//! pointers: the function's code, then one cell per captured variable. A
+//! cell is a heap `%NykVal` shared by every closure that captures the
+//! variable and by the function that declared it. The generated code reads
+//! the code pointer of a closure object to call it, and passes the object
+//! as the callee's hidden first parameter `%env`; it reads and writes cells
+//! of its own locals directly, and upvalues only through `__nyk_upval_*`.
+//! A function that captures nothing has a static object `@<fn>.closure`.
 
 use std::fmt::Write;
 
@@ -54,8 +65,10 @@ pub const EXTERN_DECLS: &str = r#"; Runtime functions, provided by libnyk_rt (cr
 declare void @__nyk_error(ptr) noreturn cold
 declare void @__nyk_global_get(ptr, ptr)
 declare void @__nyk_global_set(ptr, i8 zeroext, i64)
-declare void @__nyk_upval_get(ptr, i32)
-declare void @__nyk_upval_set(i32, i8 zeroext, i64)
+declare void @__nyk_upval_get(ptr, ptr, i32)
+declare void @__nyk_upval_set(ptr, i32, i8 zeroext, i64)
+declare ptr @__nyk_upval_cell(ptr, i32)
+declare ptr @__nyk_cell_new(i8 zeroext, i64)
 declare void @__nyk_import_get(ptr, ptr, ptr)
 declare void @__nyk_table_new(ptr, i32, i32)
 declare void @__nyk_table_get(ptr, i8 zeroext, i64, i8 zeroext, i64)
@@ -63,7 +76,7 @@ declare void @__nyk_table_set(i8 zeroext, i64, i8 zeroext, i64, i8 zeroext, i64)
 declare void @__nyk_table_append(i8 zeroext, i64, i8 zeroext, i64)
 declare void @__nyk_concat(ptr, i8 zeroext, i64, i8 zeroext, i64)
 declare void @__nyk_len(ptr, i8 zeroext, i64)
-declare void @__nyk_closure(ptr, ptr, i32)
+declare void @__nyk_closure(ptr, ptr, i32, ptr)
 declare void @__nyk_call_dyn(ptr, i8 zeroext, i64, i32, ptr)
 declare void @__nyk_vararg(ptr)
 
@@ -85,8 +98,6 @@ define internal void @__nyk_error(ptr %msg) noreturn cold {
   unreachable
 }
 
-@__nyk_upvals = internal global [256 x %NykVal] zeroinitializer
-
 define internal void @__nyk_global_get(ptr %out, ptr %name) {
   store %NykVal zeroinitializer, ptr %out
   ret void
@@ -96,20 +107,36 @@ define internal void @__nyk_global_set(ptr %name, i8 zeroext %tag, i64 %raw) {
   ret void
 }
 
-define internal void @__nyk_upval_get(ptr %out, i32 %idx) {
+; A new cell (a heap value) holding the given value.
+define internal ptr @__nyk_cell_new(i8 zeroext %tag, i64 %raw) {
+  %c = call ptr @malloc(i64 16)
+  %v0 = insertvalue %NykVal zeroinitializer, i8 %tag, 0
+  %v = insertvalue %NykVal %v0, i64 %raw, 1
+  store %NykVal %v, ptr %c
+  ret ptr %c
+}
+
+; The cell of upvalue `idx` of the closure `env`: word `idx + 1` of it.
+define internal ptr @__nyk_upval_cell(ptr %env, i32 %idx) {
   %i = zext i32 %idx to i64
-  %gep = getelementptr inbounds [256 x %NykVal], ptr @__nyk_upvals, i64 0, i64 %i
-  %v = load %NykVal, ptr %gep
+  %word = add i64 %i, 1
+  %gep = getelementptr inbounds ptr, ptr %env, i64 %word
+  %c = load ptr, ptr %gep
+  ret ptr %c
+}
+
+define internal void @__nyk_upval_get(ptr %out, ptr %env, i32 %idx) {
+  %c = call ptr @__nyk_upval_cell(ptr %env, i32 %idx)
+  %v = load %NykVal, ptr %c
   store %NykVal %v, ptr %out
   ret void
 }
 
-define internal void @__nyk_upval_set(i32 %idx, i8 zeroext %tag, i64 %raw) {
-  %i = zext i32 %idx to i64
-  %gep = getelementptr inbounds [256 x %NykVal], ptr @__nyk_upvals, i64 0, i64 %i
+define internal void @__nyk_upval_set(ptr %env, i32 %idx, i8 zeroext %tag, i64 %raw) {
+  %c = call ptr @__nyk_upval_cell(ptr %env, i32 %idx)
   %v0 = insertvalue %NykVal zeroinitializer, i8 %tag, 0
   %v = insertvalue %NykVal %v0, i64 %raw, 1
-  store %NykVal %v, ptr %gep
+  store %NykVal %v, ptr %c
   ret void
 }
 
@@ -218,8 +245,19 @@ bad:
   unreachable
 }
 
-define internal void @__nyk_closure(ptr %out, ptr %fn_ptr, i32 %ncaps) {
-  %addr = ptrtoint ptr %fn_ptr to i64
+; A closure object: `fn_ptr` followed by the `ncaps` cells at `caps`.
+define internal void @__nyk_closure(ptr %out, ptr %fn_ptr, i32 %ncaps, ptr %caps) {
+  %n = zext i32 %ncaps to i64
+  %ptr_end = getelementptr ptr, ptr null, i64 1
+  %ptr_size = ptrtoint ptr %ptr_end to i64
+  %words = add i64 %n, 1
+  %size = mul i64 %words, %ptr_size
+  %obj = call ptr @malloc(i64 %size)
+  store ptr %fn_ptr, ptr %obj
+  %cells = getelementptr inbounds ptr, ptr %obj, i64 1
+  %cap_bytes = mul i64 %n, %ptr_size
+  call void @llvm.memcpy.p0.p0.i64(ptr %cells, ptr %caps, i64 %cap_bytes, i1 false)
+  %addr = ptrtoint ptr %obj to i64
   %s0 = insertvalue %NykVal { i8 6, i64 0 }, i64 %addr, 1
   store %NykVal %s0, ptr %out
   ret void

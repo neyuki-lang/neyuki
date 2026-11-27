@@ -4,8 +4,8 @@
 //!
 //! The generated code keeps arithmetic, comparisons and `print` inline and
 //! calls the functions here for everything that needs the heap or global
-//! state. Globals, strings built by `..`, `#` and the `select` builtin work;
-//! tables, module imports and varargs are stubs for now.
+//! state. Globals, closures, strings built by `..`, `#` and the `select`
+//! builtin work; tables, module imports and varargs are stubs for now.
 //!
 //! # ABI
 //!
@@ -21,6 +21,15 @@
 //!   parameter, and the function returns nothing;
 //! - argument lists are pointers to arrays of [`NykVal`] in memory, whose
 //!   layout matches the IR's under the module's `target datalayout`.
+//!
+//! # Closures
+//!
+//! A function value (tag 6) points to a closure object: an array of
+//! pointers holding the function's code and then one cell per captured
+//! variable. A cell is a heap [`NykVal`], shared by the closures that
+//! capture the variable and the function that declared it. The generated
+//! code calls through word 0 and reads and writes the cells of its own
+//! locals; closures and cells, like strings, are never freed yet.
 //!
 //! `src/compiler/llvm/runtime.rs` in the `neyuki` crate declares the same
 //! signatures.
@@ -195,34 +204,46 @@ pub unsafe extern "C" fn __nyk_global_set(name: *const c_char, tag: u8, raw: i64
         .insert(name, NykVal::new(tag, raw));
 }
 
-// ---- upvalues ----------------------------------------------------------------
+// ---- cells and upvalues -------------------------------------------------------
 
-const UPVAL_SLOTS: usize = 256;
-
-/// Upvalues live in one shared array for now, as in the built-in fallback.
-static UPVALS: Mutex<[NykVal; UPVAL_SLOTS]> = Mutex::new([NykVal::NIL; UPVAL_SLOTS]);
-
-/// # Safety
-///
-/// `out` must be valid for writing.
+/// A new cell holding `(tag, raw)`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __nyk_upval_get(out: *mut NykVal, idx: u32) {
-    let slots = UPVALS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let val = slots.get(idx as usize).copied().unwrap_or(NykVal::NIL);
-    // SAFETY: guaranteed by the caller.
-    unsafe { put(out, val) }
+pub extern "C" fn __nyk_cell_new(tag: u8, raw: i64) -> *mut NykVal {
+    Box::into_raw(Box::new(NykVal::new(tag, raw)))
 }
 
+/// The cell of upvalue `idx` of the closure object `env`.
+///
+/// # Safety
+///
+/// `env` must be a closure object with more than `idx` cells.
 #[unsafe(no_mangle)]
-pub extern "C" fn __nyk_upval_set(idx: u32, tag: u8, raw: i64) {
-    let mut slots = UPVALS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(slot) = slots.get_mut(idx as usize) {
-        *slot = NykVal::new(tag, raw);
-    }
+pub unsafe extern "C" fn __nyk_upval_cell(env: *const *mut NykVal, idx: u32) -> *mut NykVal {
+    // SAFETY: word 0 is the code, and the caller guarantees cell `idx`.
+    unsafe { *env.add(idx as usize + 1) }
+}
+
+/// Reads upvalue `idx` of the closure `env`.
+///
+/// # Safety
+///
+/// `out` must be valid for writing, and `env` a closure object with more
+/// than `idx` cells.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __nyk_upval_get(out: *mut NykVal, env: *const *mut NykVal, idx: u32) {
+    // SAFETY: guaranteed by the caller; cells stay valid forever.
+    unsafe { put(out, *__nyk_upval_cell(env, idx)) }
+}
+
+/// Assigns upvalue `idx` of the closure `env`.
+///
+/// # Safety
+///
+/// `env` must be a closure object with more than `idx` cells.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __nyk_upval_set(env: *const *mut NykVal, idx: u32, tag: u8, raw: i64) {
+    // SAFETY: guaranteed by the caller; cells stay valid forever.
+    unsafe { *__nyk_upval_cell(env, idx) = NykVal::new(tag, raw) }
 }
 
 // ---- modules and tables (stubs) ------------------------------------------------
@@ -400,16 +421,28 @@ pub unsafe extern "C" fn __nyk_len(out: *mut NykVal, tag: u8, raw: i64) {
 
 // ---- functions -----------------------------------------------------------------
 
-/// A function value for `fn_ptr`. Captured variables are not stored yet;
-/// they go through the shared upvalue slots.
+/// A function value: a new closure object for `fn_ptr` sharing the `ncaps`
+/// cells at `caps`.
 ///
 /// # Safety
 ///
-/// `out` must be valid for writing.
+/// `out` must be valid for writing and `caps` must point to `ncaps` cells.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __nyk_closure(out: *mut NykVal, fn_ptr: *const c_void, _ncaps: u32) {
+pub unsafe extern "C" fn __nyk_closure(
+    out: *mut NykVal,
+    fn_ptr: *mut c_void,
+    ncaps: u32,
+    caps: *const *mut c_void,
+) {
+    let mut object = Vec::with_capacity(ncaps as usize + 1);
+    object.push(fn_ptr);
+    if ncaps > 0 {
+        // SAFETY: guaranteed by the caller.
+        object.extend_from_slice(unsafe { std::slice::from_raw_parts(caps, ncaps as usize) });
+    }
+    let ptr = Box::leak(object.into_boxed_slice()).as_ptr();
     // SAFETY: guaranteed by the caller.
-    unsafe { put(out, NykVal::new(TAG_FN, fn_ptr as usize as i64)) }
+    unsafe { put(out, NykVal::new(TAG_FN, ptr as usize as i64)) }
 }
 
 /// A builtin of this runtime: its arguments in, its first result out.
@@ -580,5 +613,32 @@ mod tests {
             out.str_bytes()
         };
         assert_eq!(s, b"x1.5");
+    }
+}
+
+#[cfg(test)]
+mod closure_tests {
+    use super::*;
+
+    #[test]
+    fn closures_share_their_cells() {
+        let cell = __nyk_cell_new(TAG_INT, 1);
+        let caps = [cell.cast::<c_void>()];
+        let mut a = NykVal::NIL;
+        let mut b = NykVal::NIL;
+        let mut got = NykVal::NIL;
+        // SAFETY: valid out-pointers, one cell at `caps`, and the closure
+        // objects just made have one cell each.
+        unsafe {
+            __nyk_closure(&mut a, std::ptr::null_mut(), 1, caps.as_ptr());
+            __nyk_closure(&mut b, std::ptr::null_mut(), 1, caps.as_ptr());
+            let env_a = a.raw as usize as *const *mut NykVal;
+            let env_b = b.raw as usize as *const *mut NykVal;
+            __nyk_upval_set(env_a, 0, TAG_INT, 7);
+            __nyk_upval_get(&mut got, env_b, 0);
+            assert_eq!(__nyk_upval_cell(env_b, 0), cell);
+        }
+        assert_ne!(a, b);
+        assert_eq!(got, NykVal::int(7));
     }
 }
