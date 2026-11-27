@@ -38,7 +38,10 @@ Options:
                         running one, e.g. to build for another OS
   --no-runtime          Leave out the runtime and the registry packages:
                         write <name>.nykpak and launchers that run it on an
-                        installed Neyuki with globally installed packages";
+                        installed Neyuki with globally installed packages
+
+neyuki build --native <file> compiles a single script to a native
+executable through LLVM instead (see `neyuki build --native --help`).";
 
 /// What to build. Relative paths are taken from the working directory,
 /// except `assets`, which are inside the project like their bundle paths.
@@ -98,6 +101,11 @@ pub struct BuildReport {
 }
 
 pub fn run_cli(args: &[String]) -> Result<(), String> {
+    if args.iter().any(|arg| arg == "--native") {
+        let output = crate::compiler::llvm::native::build_native_cli(args)?;
+        println!("built {} (native executable)", output.display());
+        return Ok(());
+    }
     let mut options = BuildOptions::default();
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {

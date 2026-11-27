@@ -1,0 +1,28 @@
+[package]
+name = "nyk_rt"
+version = "0.1.0"
+edition = "2024"
+description = "The runtime that executables built by the Neyuki LLVM backend link against"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/neyuki-lang/neyuki"
+publish = false
+
+# A static library for the system linker: `neyuki build --native` links
+# the object file of a script with `libnyk_rt.a` (`nyk_rt.lib` on msvc).
+[lib]
+crate-type = ["staticlib"]
+
+# No dependencies: the C ABI in src/lib.rs is all it shares with the
+# generated code.
+[dependencies]
+
+# A workspace of its own, because `panic` can only be set for a whole
+# workspace: the runtime must abort rather than unwind into generated code
+# (and then needs no unwinder), while the `neyuki` binary keeps unwinding.
+[workspace]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

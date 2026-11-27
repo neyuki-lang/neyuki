@@ -75,6 +75,15 @@ impl Default for LlvmModuleCollector {
     }
 }
 
+/// An argument of a call into the runtime.
+enum RtArg<'s> {
+    /// A `%NykVal` register, passed as its tag and raw bits.
+    Val(&'s str),
+    /// A pointer register or global.
+    Ptr(&'s str),
+    I32(usize),
+}
+
 pub struct FunctionEmitter<'a> {
     collector: &'a mut LlvmModuleCollector,
     scope_id: usize,
@@ -119,6 +128,48 @@ impl<'a> FunctionEmitter<'a> {
         let p = self.tmp();
         let _ = writeln!(self.entry_allocas, "  {} = alloca {}", p, ty);
         p
+    }
+
+    /// Lowers `args` to the parameter list of a runtime function: a value
+    /// becomes its tag and raw bits (see the ABI notes in runtime.rs).
+    fn rt_params(&mut self, args: &[RtArg]) -> String {
+        let mut params = Vec::with_capacity(args.len());
+        for arg in args {
+            match arg {
+                RtArg::Val(v) => {
+                    let tag = self.tmp();
+                    let _ = writeln!(self.out, "  {} = extractvalue %NykVal {}, 0", tag, v);
+                    let raw = self.tmp();
+                    let _ = writeln!(self.out, "  {} = extractvalue %NykVal {}, 1", raw, v);
+                    params.push(format!("i8 zeroext {}, i64 {}", tag, raw));
+                }
+                RtArg::Ptr(p) => params.push(format!("ptr {}", p)),
+                RtArg::I32(n) => params.push(format!("i32 {}", n)),
+            }
+        }
+        params.join(", ")
+    }
+
+    /// Calls the runtime function `func`, which returns a value through an
+    /// out-pointer, and returns the register holding that value.
+    fn rt_call(&mut self, func: &str, args: &[RtArg]) -> String {
+        let params = self.rt_params(args);
+        let slot = self.entry_alloca("%NykVal");
+        let sep = if params.is_empty() { "" } else { ", " };
+        let _ = writeln!(
+            self.out,
+            "  call void @{}(ptr {}{}{})",
+            func, slot, sep, params
+        );
+        let res = self.tmp();
+        let _ = writeln!(self.out, "  {} = load %NykVal, ptr {}", res, slot);
+        res
+    }
+
+    /// Calls the runtime function `func`, which returns nothing.
+    fn rt_call_void(&mut self, func: &str, args: &[RtArg]) {
+        let params = self.rt_params(args);
+        let _ = writeln!(self.out, "  call void @{}({})", func, params);
     }
 
     /// Calls `callee` with `args`, returning the register holding its first
@@ -184,14 +235,13 @@ impl<'a> FunctionEmitter<'a> {
 
         let _ = writeln!(self.out, "{}:", lbl_ext);
         let argv = self.emit_argv(args);
-        let dyn_res = self.tmp();
-        let _ = writeln!(
-            self.out,
-            "  {} = call %NykVal @__nyk_call_dyn(%NykVal {}, i32 {}, ptr {})",
-            dyn_res,
-            callee,
-            args.len(),
-            argv
+        let dyn_res = self.rt_call(
+            "__nyk_call_dyn",
+            &[
+                RtArg::Val(callee),
+                RtArg::I32(args.len()),
+                RtArg::Ptr(&argv),
+            ],
         );
         let _ = writeln!(self.out, "  br label %{}", lbl_join);
 
@@ -247,11 +297,7 @@ impl<'a> FunctionEmitter<'a> {
                 let (callee, args) = self.eval_call_parts(callee, args, trailing.as_deref());
                 self.emit_call(&callee, &args)
             }
-            MirSpreadSource::Vararg => {
-                let res = self.tmp();
-                let _ = writeln!(self.out, "  {} = call %NykVal @__nyk_vararg()", res);
-                res
-            }
+            MirSpreadSource::Vararg => self.rt_call("__nyk_vararg", &[]),
         }
     }
 
@@ -378,13 +424,7 @@ impl<'a> FunctionEmitter<'a> {
                 }
                 Projection::Index(idx) => self.eval_operand(idx),
             };
-            let next = self.tmp();
-            let _ = writeln!(
-                self.out,
-                "  {} = call %NykVal @__nyk_table_get(%NykVal {}, %NykVal {})",
-                next, cur, key
-            );
-            cur = next;
+            cur = self.rt_call("__nyk_table_get", &[RtArg::Val(&cur), RtArg::Val(&key)]);
         }
         cur
     }
@@ -417,13 +457,7 @@ impl<'a> FunctionEmitter<'a> {
                 }
                 Projection::Index(idx) => self.eval_operand(idx),
             };
-            let next = self.tmp();
-            let _ = writeln!(
-                self.out,
-                "  {} = call %NykVal @__nyk_table_get(%NykVal {}, %NykVal {})",
-                next, cur, key
-            );
-            cur = next;
+            cur = self.rt_call("__nyk_table_get", &[RtArg::Val(&cur), RtArg::Val(&key)]);
         }
         let last_key = match &place.projections[last] {
             Projection::Field(f) => {
@@ -434,10 +468,9 @@ impl<'a> FunctionEmitter<'a> {
             }
             Projection::Index(idx) => self.eval_operand(idx),
         };
-        let _ = writeln!(
-            self.out,
-            "  call void @__nyk_table_set(%NykVal {}, %NykVal {}, %NykVal {})",
-            cur, last_key, val_reg
+        self.rt_call_void(
+            "__nyk_table_set",
+            &[RtArg::Val(&cur), RtArg::Val(&last_key), RtArg::Val(val_reg)],
         );
     }
 
@@ -466,6 +499,9 @@ impl<'a> FunctionEmitter<'a> {
             Rvalue::BinaryOp { op, lhs, rhs } => {
                 let l = self.eval_operand(lhs);
                 let r = self.eval_operand(rhs);
+                if *op == BinOp::Concat {
+                    return self.rt_call("__nyk_concat", &[RtArg::Val(&l), RtArg::Val(&r)]);
+                }
                 let res = self.tmp();
                 let helper = match op {
                     BinOp::Add => "__nyk_add",
@@ -482,7 +518,7 @@ impl<'a> FunctionEmitter<'a> {
                     BinOp::LShl => "__nyk_lshl",
                     BinOp::LShr => "__nyk_lshr",
                     BinOp::Pow => "__nyk_pow",
-                    BinOp::Concat => "__nyk_concat",
+                    BinOp::Concat => unreachable!("handled above"),
                     BinOp::Eq => "__nyk_eq",
                     BinOp::Ne => "__nyk_ne",
                     BinOp::Lt => "__nyk_lt",
@@ -502,11 +538,14 @@ impl<'a> FunctionEmitter<'a> {
             }
             Rvalue::UnaryOp { op, src } => {
                 let s = self.eval_operand(src);
+                if *op == UnOp::Len {
+                    return self.rt_call("__nyk_len", &[RtArg::Val(&s)]);
+                }
                 let res = self.tmp();
                 let helper = match op {
                     UnOp::Neg => "__nyk_neg",
                     UnOp::Not => "__nyk_not",
-                    UnOp::Len => "__nyk_len",
+                    UnOp::Len => unreachable!("handled above"),
                     UnOp::BitNot => "__nyk_bitnot",
                 };
                 let _ = writeln!(
@@ -539,58 +578,40 @@ impl<'a> FunctionEmitter<'a> {
                     res
                 } else {
                     let s = self.emit_string_ptr(name);
-                    let res = self.tmp();
-                    let _ = writeln!(
-                        self.out,
-                        "  {} = call %NykVal @__nyk_global_get(ptr {})",
-                        res, s
-                    );
-                    res
+                    self.rt_call("__nyk_global_get", &[RtArg::Ptr(&s)])
                 }
             }
             Rvalue::Upvalue(idx) => {
-                let res = self.tmp();
                 if let (Some(sname), Some(uname)) =
                     (&self.self_name, self.upvalue_names.get(*idx as usize))
                     && sname == uname
                 {
+                    let res = self.tmp();
                     let _ = writeln!(
                         self.out,
                         "  {} = call %NykVal @__nyk_mk_fn(ptr @{})",
                         res, self.self_llvm_sym
                     );
+                    res
                 } else {
-                    let _ = writeln!(
-                        self.out,
-                        "  {} = call %NykVal @__nyk_upval_get(i32 {})",
-                        res, idx
-                    );
+                    self.rt_call("__nyk_upval_get", &[RtArg::I32(*idx as usize)])
                 }
-                res
             }
             Rvalue::ModuleImport { module, field } => {
                 let mp = self.emit_string_ptr(module);
                 let fp = self.emit_string_ptr(field);
-                let res = self.tmp();
-                let _ = writeln!(
-                    self.out,
-                    "  {} = call %NykVal @__nyk_import_get(ptr {}, ptr {})",
-                    res, mp, fp
-                );
-                res
+                self.rt_call("__nyk_import_get", &[RtArg::Ptr(&mp), RtArg::Ptr(&fp)])
             }
             Rvalue::NewTable {
                 array_cap,
                 fields_cap,
-            } => {
-                let res = self.tmp();
-                let _ = writeln!(
-                    self.out,
-                    "  {} = call %NykVal @__nyk_table_new(i32 {}, i32 {})",
-                    res, array_cap, fields_cap
-                );
-                res
-            }
+            } => self.rt_call(
+                "__nyk_table_new",
+                &[
+                    RtArg::I32(*array_cap as usize),
+                    RtArg::I32(*fields_cap as usize),
+                ],
+            ),
             Rvalue::Closure { fn_idx, captures } => {
                 let sym = self
                     .collector
@@ -598,29 +619,22 @@ impl<'a> FunctionEmitter<'a> {
                     .get(&(self.scope_id, *fn_idx))
                     .cloned()
                     .unwrap_or_else(|| "@nyk_unknown".to_string());
-                let res = self.tmp();
                 if captures.is_empty() {
+                    let res = self.tmp();
                     let _ = writeln!(
                         self.out,
                         "  {} = call %NykVal @__nyk_mk_fn(ptr {})",
                         res, sym
                     );
+                    res
                 } else {
-                    let _ = writeln!(
-                        self.out,
-                        "  {} = call %NykVal @__nyk_closure(ptr {}, i32 {})",
-                        res,
-                        sym,
-                        captures.len()
-                    );
+                    self.rt_call(
+                        "__nyk_closure",
+                        &[RtArg::Ptr(&sym), RtArg::I32(captures.len())],
+                    )
                 }
-                res
             }
-            Rvalue::Vararg => {
-                let res = self.tmp();
-                let _ = writeln!(self.out, "  {} = call %NykVal @__nyk_vararg()", res);
-                res
-            }
+            Rvalue::Vararg => self.rt_call("__nyk_vararg", &[]),
         }
     }
 
@@ -726,43 +740,28 @@ impl<'a> FunctionEmitter<'a> {
                             let _ = writeln!(self.out, "  store %NykVal {}, ptr {}", val, gsym);
                         } else {
                             let s = self.emit_string_ptr(name);
-                            let _ = writeln!(
-                                self.out,
-                                "  call void @__nyk_global_set(ptr {}, %NykVal {})",
-                                s, val
+                            self.rt_call_void(
+                                "__nyk_global_set",
+                                &[RtArg::Ptr(&s), RtArg::Val(&val)],
                             );
                         }
                     }
                     StatementKind::SetUpval { index, value } => {
                         let val = self.eval_operand(value);
-                        let _ = writeln!(
-                            self.out,
-                            "  call void @__nyk_upval_set(i32 {}, %NykVal {})",
-                            index, val
+                        self.rt_call_void(
+                            "__nyk_upval_set",
+                            &[RtArg::I32(*index as usize), RtArg::Val(&val)],
                         );
                     }
                     StatementKind::AppendArray { table, value } => {
                         let t = self.eval_place(&Place::local(*table));
                         let v = self.eval_operand(value);
-                        let _ = writeln!(
-                            self.out,
-                            "  call void @__nyk_table_append(%NykVal {}, %NykVal {})",
-                            t, v
-                        );
+                        self.rt_call_void("__nyk_table_append", &[RtArg::Val(&t), RtArg::Val(&v)]);
                     }
                     StatementKind::VarargMany(dsts) => {
                         // This backend models `...` as its first value only.
-                        for (i, d) in dsts.iter().enumerate() {
-                            let v = self.tmp();
-                            let helper = if i == 0 {
-                                "__nyk_vararg"
-                            } else {
-                                "__nyk_mk_nil"
-                            };
-                            let _ = writeln!(self.out, "  {} = call %NykVal @{}()", v, helper);
-                            let _ =
-                                writeln!(self.out, "  store %NykVal {}, ptr {}", v, Self::slot(*d));
-                        }
+                        let first = self.rt_call("__nyk_vararg", &[]);
+                        self.store_call_results(dsts, &first);
                     }
                     StatementKind::CloseUpvals(_)
                     | StatementKind::DebugLocal { .. }
@@ -832,11 +831,7 @@ impl<'a> FunctionEmitter<'a> {
                 } => {
                     let v = self.eval_spread_first(source);
                     let t = self.eval_place(&Place::local(*table));
-                    let _ = writeln!(
-                        self.out,
-                        "  call void @__nyk_table_append(%NykVal {}, %NykVal {})",
-                        t, v
-                    );
+                    self.rt_call_void("__nyk_table_append", &[RtArg::Val(&t), RtArg::Val(&v)]);
                     let _ = writeln!(self.out, "  br label %{}", Self::bb_name(*target));
                 }
                 TerminatorKind::SpreadReturn { values, source } => {

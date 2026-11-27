@@ -14,6 +14,9 @@ homepage = "https://neyuki.cc/"
 [workspace]
 members = ["crates/neyuki-ext"]
 default-members = [".", "crates/neyuki-ext"]
+# The runtime of natively built scripts is a workspace of its own, built
+# with `panic = "abort"` (see crates/nyk_rt/Cargo.toml).
+exclude = ["crates/nyk_rt"]
 
 [lib]
 name = "neyuki"

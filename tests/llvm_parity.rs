@@ -1,13 +1,20 @@
-//! Runs small programs on the register VM and through the LLVM backend
-//! (`neyuki emit-llvm`, checked with `opt -passes=verify`, run with `lli`)
-//! and checks that both print the same thing.
+//! Runs small programs on the register VM and through the LLVM backend, and
+//! checks that both print the same thing. Every case runs twice under LLVM:
 //!
-//! The LLVM tools are found in `NEYUKI_LLVM_BIN` if set, else on `PATH`.
+//! - built-in runtime: `neyuki emit-llvm`, checked with `opt -passes=verify`
+//!   and run with `lli`;
+//! - external runtime: `neyuki emit-llvm --runtime=extern` (verified too)
+//!   and `neyuki build --native`, which links with `crates/nyk_rt`, built
+//!   here once with cargo.
+//!
+//! The LLVM tools are found in `NEYUKI_LLVM_BIN` if set, else on `PATH`, and
+//! clang as `neyuki build --native` finds it (`NEYUKI_CLANG` or `clang`).
 //! Without them the tests skip, unless `NEYUKI_REQUIRE_LLVM=1` (as in CI)
 //! makes a missing tool a failure.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// What a program should do under the LLVM backend.
@@ -20,6 +27,13 @@ enum Expect {
     /// Fail like the VM does after printing the same output, with this in
     /// the error message of both.
     Error(&'static str),
+}
+
+/// Which LLVM runtime a case runs with.
+#[derive(Clone, Copy, Debug)]
+enum Mode {
+    Builtin,
+    Extern,
 }
 
 struct Run {
@@ -38,13 +52,13 @@ impl From<Output> for Run {
     }
 }
 
-/// The LLVM tool `name`, or `None` (after saying so) when it is missing and
-/// not required.
-fn llvm_tool(name: &str) -> Option<PathBuf> {
-    let path = match std::env::var_os("NEYUKI_LLVM_BIN") {
-        Some(dir) => Path::new(&dir).join(name),
-        None => PathBuf::from(name),
-    };
+fn require_llvm() -> bool {
+    std::env::var_os("NEYUKI_REQUIRE_LLVM").is_some_and(|v| v == "1")
+}
+
+/// `path` when `path --version` runs, else `None` (after saying so) unless
+/// the tools are required.
+fn working_tool(path: PathBuf) -> Option<PathBuf> {
     let works = Command::new(&path)
         .arg("--version")
         .output()
@@ -52,14 +66,59 @@ fn llvm_tool(name: &str) -> Option<PathBuf> {
     if works {
         return Some(path);
     }
-    if std::env::var_os("NEYUKI_REQUIRE_LLVM").is_some_and(|v| v == "1") {
+    if require_llvm() {
         panic!(
             "NEYUKI_REQUIRE_LLVM=1 but `{}` does not run",
             path.display()
         );
     }
-    eprintln!("skipping: LLVM tool `{}` not found", name);
+    eprintln!("skipping: `{}` not found", path.display());
     None
+}
+
+/// The LLVM tool `name`.
+fn llvm_tool(name: &str) -> Option<PathBuf> {
+    working_tool(match std::env::var_os("NEYUKI_LLVM_BIN") {
+        Some(dir) => Path::new(&dir).join(name),
+        None => PathBuf::from(name),
+    })
+}
+
+fn clang() -> Option<PathBuf> {
+    working_tool(
+        std::env::var_os("NEYUKI_CLANG")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("clang")),
+    )
+}
+
+/// `libnyk_rt.a`, built once per test run into Cargo's temporary directory
+/// for integration tests.
+fn nyk_rt() -> &'static Path {
+    static LIB: OnceLock<PathBuf> = OnceLock::new();
+    LIB.get_or_init(|| {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let target_dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("nyk_rt");
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let out = Command::new(cargo)
+            .args(["build", "--release", "--quiet", "--manifest-path"])
+            .arg(root.join("crates/nyk_rt/Cargo.toml"))
+            .arg("--target-dir")
+            .arg(&target_dir)
+            .output()
+            .expect("run cargo build for nyk_rt");
+        assert!(
+            out.status.success(),
+            "building nyk_rt failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let name = if cfg!(target_env = "msvc") {
+            "nyk_rt.lib"
+        } else {
+            "libnyk_rt.a"
+        };
+        target_dir.join("release").join(name)
+    })
 }
 
 /// A fresh scratch directory for one test case.
@@ -79,12 +138,16 @@ fn neyuki() -> Command {
     Command::new(env!("CARGO_BIN_EXE_neyuki"))
 }
 
-/// Emits `script` as LLVM IR, checks it with `opt -passes=verify` and returns
-/// the `.ll` path.
-fn emit_verified(dir: &Path, script: &Path, opt: &Path) -> PathBuf {
-    let ll = dir.join("out.ll");
-    let emit = neyuki()
-        .arg("emit-llvm")
+/// Emits `script` as LLVM IR for `mode`, checks it with `opt -passes=verify`
+/// and returns the `.ll` path.
+fn emit_verified(dir: &Path, script: &Path, opt: &Path, mode: Mode) -> PathBuf {
+    let ll = dir.join(format!("{:?}.ll", mode));
+    let mut cmd = neyuki();
+    cmd.arg("emit-llvm");
+    if let Mode::Extern = mode {
+        cmd.arg("--runtime=extern");
+    }
+    let emit = cmd
         .arg(script)
         .arg(&ll)
         .output()
@@ -108,58 +171,99 @@ fn emit_verified(dir: &Path, script: &Path, opt: &Path) -> PathBuf {
     ll
 }
 
+/// Runs `script` under LLVM in `mode`: the IR with `lli`, or the executable
+/// that `neyuki build --native` makes.
+fn run_llvm(dir: &Path, script: &Path, opt: &Path, mode: Mode) -> Option<Run> {
+    let ll = emit_verified(dir, script, opt, mode);
+    match mode {
+        Mode::Builtin => {
+            let lli = llvm_tool("lli")?;
+            Some(Command::new(lli).arg(&ll).output().expect("run lli").into())
+        }
+        Mode::Extern => {
+            let clang = clang()?;
+            let exe = dir.join(if cfg!(windows) { "app.exe" } else { "app" });
+            let build = neyuki()
+                .args(["build", "--native"])
+                .arg(script)
+                .arg("-o")
+                .arg(&exe)
+                .env("NEYUKI_CLANG", clang)
+                .env("NEYUKI_RT_LIB", nyk_rt())
+                .output()
+                .expect("run neyuki build --native");
+            assert!(
+                build.status.success(),
+                "build --native failed: {}",
+                String::from_utf8_lossy(&build.stderr)
+            );
+            Some(Command::new(&exe).output().expect("run executable").into())
+        }
+    }
+}
+
+/// Checks `src` against `expect` with both runtimes.
 fn check_case(name: &str, src: &str, expect: Expect) {
-    let (Some(opt), Some(lli)) = (llvm_tool("opt"), llvm_tool("lli")) else {
+    check_modes(name, src, &expect, &[Mode::Builtin, Mode::Extern]);
+}
+
+/// Checks `src` against `expect` with the external runtime only, for what
+/// the built-in stubs cannot do (such as calling a builtin of the runtime).
+fn check_extern_case(name: &str, src: &str, expect: Expect) {
+    check_modes(name, src, &expect, &[Mode::Extern]);
+}
+
+fn check_modes(name: &str, src: &str, expect: &Expect, modes: &[Mode]) {
+    let Some(opt) = llvm_tool("opt") else {
         return;
     };
     let dir = scratch_dir(name);
     let script = dir.join(format!("{}.nyk", name));
     std::fs::write(&script, src).expect("write script");
-
     let vm: Run = neyuki().arg(&script).output().expect("run vm").into();
-    let ll = emit_verified(&dir, &script, &opt);
-    let native: Run = Command::new(&lli)
-        .arg(&ll)
-        .output()
-        .expect("run lli")
-        .into();
 
-    let context = format!(
-        "case `{}`:\n{}\n--- vm stdout ---\n{}--- vm stderr ---\n{}--- lli stdout ---\n{}--- lli stderr ---\n{}",
-        name, src, vm.stdout, vm.stderr, native.stdout, native.stderr
-    );
-    match expect {
-        Expect::SameAsVm => {
-            assert_eq!(
-                vm.success, native.success,
-                "exit status differs, {}",
-                context
-            );
-            assert_eq!(vm.stdout, native.stdout, "output differs, {}", context);
-        }
-        Expect::Output(out) => {
-            assert!(native.success, "lli failed, {}", context);
-            assert_eq!(native.stdout, out, "unexpected output, {}", context);
-        }
-        Expect::Error(msg) => {
-            assert!(
-                !vm.success && !native.success,
-                "expected failure, {}",
-                context
-            );
-            assert_eq!(vm.stdout, native.stdout, "output differs, {}", context);
-            assert!(
-                vm.stderr.contains(msg),
-                "vm error lacks `{}`, {}",
-                msg,
-                context
-            );
-            assert!(
-                native.stderr.contains(&format!("runtime error: {}", msg)),
-                "lli error lacks `{}`, {}",
-                msg,
-                context
-            );
+    for &mode in modes {
+        let Some(native) = run_llvm(&dir, &script, &opt, mode) else {
+            continue;
+        };
+        let context = format!(
+            "case `{}` ({:?} runtime):\n{}\n--- vm stdout ---\n{}--- vm stderr ---\n{}\
+             --- llvm stdout ---\n{}--- llvm stderr ---\n{}",
+            name, mode, src, vm.stdout, vm.stderr, native.stdout, native.stderr
+        );
+        match expect {
+            Expect::SameAsVm => {
+                assert_eq!(
+                    vm.success, native.success,
+                    "exit status differs, {}",
+                    context
+                );
+                assert_eq!(vm.stdout, native.stdout, "output differs, {}", context);
+            }
+            Expect::Output(out) => {
+                assert!(native.success, "llvm run failed, {}", context);
+                assert_eq!(native.stdout, *out, "unexpected output, {}", context);
+            }
+            Expect::Error(msg) => {
+                assert!(
+                    !vm.success && !native.success,
+                    "expected failure, {}",
+                    context
+                );
+                assert_eq!(vm.stdout, native.stdout, "output differs, {}", context);
+                assert!(
+                    vm.stderr.contains(msg),
+                    "vm error lacks `{}`, {}",
+                    msg,
+                    context
+                );
+                assert!(
+                    native.stderr.contains(&format!("runtime error: {}", msg)),
+                    "llvm error lacks `{}`, {}",
+                    msg,
+                    context
+                );
+            }
         }
     }
     let _ = std::fs::remove_dir_all(&dir);
@@ -363,7 +467,8 @@ fn every_test_and_example_emits_valid_ir() {
     assert!(!files.is_empty(), "no .nyk files found");
     let dir = scratch_dir("all");
     for script in &files {
-        emit_verified(&dir, script, &opt);
+        emit_verified(&dir, script, &opt, Mode::Builtin);
+        emit_verified(&dir, script, &opt, Mode::Extern);
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -468,4 +573,69 @@ end
 ",
         Expect::SameAsVm,
     );
+}
+
+#[test]
+fn dynamic_calls_reach_runtime_builtins() {
+    // `select` is a builtin of nyk_rt, called through __nyk_call_dyn with
+    // all of its arguments; the built-in stubs have no builtins.
+    check_extern_case(
+        "call_dyn_select",
+        "\
+local x = select(3, 10, 20, 30)
+local y = select(-1, \"a\", \"b\")
+local n = select(\"#\", 1, 2, 3)
+print(x, y, n)
+",
+        Expect::SameAsVm,
+    );
+    check_extern_case(
+        "call_nil",
+        "local function call(f) return f(1, 2, 3) end\nlocal r = call(nil)\nprint(r)\n",
+        Expect::Error("attempted to call non-function (nil)"),
+    );
+}
+
+#[test]
+fn length_of_strings() {
+    check_case(
+        "len",
+        "local function id(x) return x end\nlocal s = id(\"abc\") .. id(\"de\")\nprint(#s, #\"\")\n",
+        Expect::SameAsVm,
+    );
+    check_case(
+        "len_number",
+        "local function len(x) return #x end\nlocal n = len(5)\nprint(n)\n",
+        Expect::Error("len expects string, table or buffer"),
+    );
+}
+
+#[test]
+fn emitted_module_targets_the_host() {
+    let (Some(clang), Some(opt)) = (clang(), llvm_tool("opt")) else {
+        return;
+    };
+    let dir = scratch_dir("target");
+    let script = dir.join("t.nyk");
+    std::fs::write(&script, "print(1)\n").expect("write script");
+    let ll = emit_verified(&dir, &script, &opt, Mode::Builtin);
+    let ir = std::fs::read_to_string(&ll).expect("read IR");
+    assert!(ir.contains("\ntarget triple = \""), "{}", ir);
+    assert!(ir.contains("\ntarget datalayout = \""), "{}", ir);
+    // clang compiles it as it is, without overriding the module's triple.
+    let out = Command::new(clang)
+        .arg("-c")
+        .arg(&ll)
+        .arg("-o")
+        .arg(dir.join("t.o"))
+        .output()
+        .expect("run clang");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{}", stderr);
+    assert!(
+        !stderr.contains("overriding the module target triple"),
+        "{}",
+        stderr
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

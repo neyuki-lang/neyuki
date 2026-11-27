@@ -2,10 +2,14 @@
 
 pub mod codegen;
 pub mod emit;
+pub mod native;
 pub mod runtime;
+pub mod target;
 pub mod types;
 
-pub use emit::emit_llvm_ir;
+pub use emit::{LlvmOptions, emit_llvm_ir, emit_llvm_ir_with};
+pub use runtime::RuntimeMode;
+pub use target::TargetSpec;
 
 #[cfg(test)]
 mod tests {
@@ -60,12 +64,178 @@ print(\"sum\", sum)";
     }
 
     fn emit(code: &str) -> String {
+        emit_with(code, &LlvmOptions::default())
+    }
+
+    fn emit_with(code: &str, options: &LlvmOptions) -> String {
         let stmts = compile_source(code).expect("syntax error");
         let hir = lower_ast(&stmts, None, OptLevel::O1);
         let thir = lower_hir_to_thir(&hir);
         let mut mir = lower_thir_to_mir(&thir, false);
         optimize_mir(&mut mir, OptLevel::O1);
-        emit_llvm_ir(&mir, OptLevel::O1)
+        emit_llvm_ir_with(&mir, OptLevel::O1, options)
+    }
+
+    /// A program that calls every runtime function.
+    const USES_THE_RUNTIME: &str = "\
+local t = { 1, 2 }
+t.x = #\"ab\" .. \"c\"
+local y = t.x
+local v = Vector3.new(8, 1, 8)
+local n = 0
+local function bump() n = n + 1 return n end
+local function va(...) return ... end
+print(y, v, bump(), va(1))";
+
+    /// `(name, parameter types)` of every `declare` of a runtime function.
+    fn runtime_declares(ll: &str) -> Vec<(String, String)> {
+        ll.lines()
+            .filter_map(|line| line.strip_prefix("declare void @__nyk_"))
+            .map(|rest| {
+                let (name, params) = rest.split_once('(').expect("declare has params");
+                let params = params.split(')').next().unwrap_or("");
+                (name.to_string(), params.to_string())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_extern_runtime_only_declares_runtime_functions() {
+        let options = LlvmOptions {
+            runtime: RuntimeMode::Extern,
+            target: None,
+        };
+        let ll = emit_with(USES_THE_RUNTIME, &options);
+        let declared: Vec<String> = runtime_declares(&ll).into_iter().map(|(n, _)| n).collect();
+        for name in [
+            "error",
+            "global_get",
+            "global_set",
+            "upval_get",
+            "upval_set",
+            "import_get",
+            "table_new",
+            "table_get",
+            "table_set",
+            "table_append",
+            "concat",
+            "len",
+            "closure",
+            "call_dyn",
+            "vararg",
+        ] {
+            assert!(declared.iter().any(|d| d == name), "{} not declared", name);
+            assert!(
+                !ll.contains(&format!("define internal void @__nyk_{}(", name)),
+                "{} is defined in extern mode",
+                name
+            );
+        }
+        assert_eq!(declared.len(), 15, "{:?}", declared);
+        // The small helpers stay defined, so they still inline.
+        for helper in ["mk_int", "truthy", "as_f64", "add", "idiv", "eq", "lt"] {
+            assert!(
+                ll.contains(&format!("@__nyk_{}(", helper)) && ll.contains("alwaysinline"),
+                "{} missing",
+                helper
+            );
+            assert!(
+                ll.contains(&format!("define internal %NykVal @__nyk_{}(", helper))
+                    || ll.contains(&format!("define internal i1 @__nyk_{}(", helper))
+                    || ll.contains(&format!("define internal double @__nyk_{}(", helper))
+            );
+        }
+    }
+
+    #[test]
+    fn test_builtin_runtime_matches_the_extern_signatures() {
+        let builtin = emit(USES_THE_RUNTIME);
+        let extern_ll = emit_with(
+            USES_THE_RUNTIME,
+            &LlvmOptions {
+                runtime: RuntimeMode::Extern,
+                target: None,
+            },
+        );
+        for (name, params) in runtime_declares(&extern_ll) {
+            let def_start = format!("define internal void @__nyk_{}(", name);
+            let line = builtin
+                .lines()
+                .find(|l| l.starts_with(&def_start))
+                .unwrap_or_else(|| panic!("{} not defined in builtin mode", name));
+            let def_params = line[def_start.len()..].split(')').next().unwrap_or("");
+            // Drop the parameter names: `i8 zeroext %tag` -> `i8 zeroext`.
+            let types: Vec<String> = def_params
+                .split(", ")
+                .filter(|p| !p.is_empty())
+                .map(|p| {
+                    p.split(' ')
+                        .filter(|w| !w.starts_with('%'))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .collect();
+            assert_eq!(types.join(", "), params, "signature of {} differs", name);
+        }
+    }
+
+    #[test]
+    fn test_runtime_calls_pass_no_aggregates() {
+        // At the runtime boundary values are (i8, i64) pairs and results come
+        // back through an out-pointer (see runtime.rs), never `%NykVal` by
+        // value, which the Windows x64 C ABI passes differently.
+        for mode in [RuntimeMode::Builtin, RuntimeMode::Extern] {
+            let ll = emit_with(
+                USES_THE_RUNTIME,
+                &LlvmOptions {
+                    runtime: mode,
+                    target: None,
+                },
+            );
+            for (name, _) in runtime_declares(&emit_with(
+                USES_THE_RUNTIME,
+                &LlvmOptions {
+                    runtime: RuntimeMode::Extern,
+                    target: None,
+                },
+            )) {
+                let call = format!("@__nyk_{}(", name);
+                for line in ll.lines().filter(|l| l.contains(&call)) {
+                    assert!(!line.contains("%NykVal %"), "{:?}: {}", mode, line);
+                    assert!(
+                        line.trim_start().starts_with("call void")
+                            || line.starts_with("define")
+                            || line.starts_with("declare"),
+                        "{:?}: {}",
+                        mode,
+                        line
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_target_header() {
+        let ll = emit_with(
+            "print(1)",
+            &LlvmOptions {
+                runtime: RuntimeMode::Builtin,
+                target: Some(TargetSpec {
+                    triple: "x86_64-pc-windows-msvc".to_string(),
+                    datalayout: Some("e-m:w-i64:64-n8:16:32:64-S128".to_string()),
+                }),
+            },
+        );
+        let header: Vec<&str> = ll.lines().take(3).collect();
+        assert_eq!(
+            header[1..],
+            [
+                "target datalayout = \"e-m:w-i64:64-n8:16:32:64-S128\"",
+                "target triple = \"x86_64-pc-windows-msvc\""
+            ]
+        );
+        assert!(!emit("print(1)").contains("target triple"));
     }
 
     /// The body of the LLVM function `name`, from `define` to its `}`.

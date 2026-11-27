@@ -58,10 +58,13 @@ Commands:
   lsp                     Serve the Language Server Protocol on stdio
   compile [-O0|-O1] <file> [out]
                           Compile to .nykb bytecode
-  emit-llvm [-O0|-O1] <file> [out.ll]
+  emit-llvm [-O0|-O1] [--runtime=builtin|extern] [--target <triple>] <file> [out.ll]
                           Emit LLVM IR (.ll) from MIR
   build [project]         Build a standalone app executable (--no-runtime:
                           an app that runs on an installed Neyuki)
+  build --native <file> [-o out]
+                          Compile a script to a native executable through
+                          LLVM (experimental)
   unpack <app> [-o dir]   Extract a built app's scripts and assets
   test [filter|path...]   Run .nyk test scripts (default: tests/)
   repl                    Start an interactive session
@@ -189,49 +192,16 @@ fn run_cli() {
             }
         }
     } else if action == "emit-llvm" {
-        let (opt_level, rest) = match parse_opt_level_prefix(&args[2..]) {
-            Ok(parsed) => parsed,
-            Err(err) => {
+        if let Err(err) = compiler::llvm::native::emit_cli(&args[2..]) {
+            if err.starts_with("error[") || err.starts_with("runtime error") {
+                eprint!("{}", err);
+                if !err.ends_with('\n') {
+                    eprintln!();
+                }
+            } else {
                 eprintln!("{}", err);
-                process::exit(1);
             }
-        };
-        let Some(path) = rest.first() else {
-            eprintln!("Usage: {} emit-llvm [-O0|-O1] <path> [out.ll]", args[0]);
             process::exit(1);
-        };
-        let emitted = std::fs::read_to_string(path)
-            .map_err(|err| format!("failed to read {}: {}", path, err))
-            .and_then(|source| {
-                compiler::compile_source_to_llvm_ir(
-                    &source,
-                    path,
-                    compiler::Options::RUN.with_opt_level(opt_level),
-                )
-            });
-        match emitted {
-            Ok(ll) => {
-                if let Some(out_path) = rest.get(1) {
-                    if let Err(err) = std::fs::write(out_path, &ll) {
-                        eprintln!("failed to write LLVM IR to {}: {}", out_path, err);
-                        process::exit(1);
-                    }
-                    println!("emitted {} -> {} ({} bytes)", path, out_path, ll.len());
-                } else {
-                    print!("{}", ll);
-                }
-            }
-            Err(err) => {
-                if err.starts_with("error[") || err.starts_with("runtime error") {
-                    eprint!("{}", err);
-                    if !err.ends_with('\n') {
-                        eprintln!();
-                    }
-                } else {
-                    eprintln!("{}: {}", path, err);
-                }
-                process::exit(1);
-            }
         }
     } else if action == "build" {
         if let Err(err) = app::build::run_cli(&args[2..]) {
